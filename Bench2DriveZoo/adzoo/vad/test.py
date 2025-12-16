@@ -227,9 +227,9 @@ def main():
         model.PALETTE = dataset.PALETTE
 
     if not distributed:
-	# Deyun: fix a bug
-	# Explicitly move the model to the GPU
-	if torch.cuda.is_available():
+        # Deyun: fix a bug
+        # Explicitly move the model to the GPU
+        if torch.cuda.is_available():
             model = model.cuda()
         model = DataParallel(model, device_ids=[0])
         outputs = single_gpu_test(model, data_loader)
