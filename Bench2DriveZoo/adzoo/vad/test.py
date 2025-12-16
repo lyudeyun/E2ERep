@@ -205,7 +205,12 @@ def main():
     fp16_cfg = cfg.get('fp16', None)
     if fp16_cfg is not None:
         wrap_fp16_model(model)
-    checkpoint = load_checkpoint(model, args.checkpoint, map_location='cpu')
+    # Load the checkpoint directly to the GPU if available
+    if torch.cuda.is_available():
+        map_location = f'cuda:{torch.cuda.current_device()}'
+    else:
+        map_location = 'cpu'
+    checkpoint = load_checkpoint(model, args.checkpoint, map_location=map_location)
     if args.fuse_conv_bn:
         model = fuse_conv_bn(model)
     # old versions did not save class info in checkpoints, this walkaround is
@@ -222,6 +227,10 @@ def main():
         model.PALETTE = dataset.PALETTE
 
     if not distributed:
+	# Deyun: fix a bug
+	# Explicitly move the model to the GPU
+	if torch.cuda.is_available():
+            model = model.cuda()
         model = DataParallel(model, device_ids=[0])
         outputs = single_gpu_test(model, data_loader)
     else:
