@@ -180,7 +180,6 @@ def single_gpu_test(model, data_loader):
     for i, data in enumerate(data_loader):
         with torch.no_grad():
             result = model(data,return_loss=False, rescale=True)
-            batch_size = len(result['bbox_results'])
 
             # encode mask results
             if isinstance(result, dict):
