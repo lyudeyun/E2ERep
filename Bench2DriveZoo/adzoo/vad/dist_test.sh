@@ -13,6 +13,8 @@ if [ "$GPUS" -eq 1 ]; then
     export CUDA_VISIBLE_DEVICES=0
     python $(dirname "$0")/test.py $CONFIG $CHECKPOINT --launcher none ${@:4} --eval bbox
 else
+    # Keep consistent device visibility with single-GPU branch
+    export CUDA_VISIBLE_DEVICES=0
     python -m torch.distributed.launch --nproc_per_node=$GPUS --master_port=$PORT \
         $(dirname "$0")/test.py $CONFIG $CHECKPOINT --launcher pytorch ${@:4} --eval bbox
 fi
