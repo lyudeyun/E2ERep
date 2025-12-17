@@ -5,8 +5,10 @@
 # ---------------------------------------------
 import argparse
 import os
+import json
 import torch
 import warnings
+import numpy as np
 from mmcv.utils import get_dist_info, init_dist, wrap_fp16_model, set_random_seed, Config, DictAction, load_checkpoint
 from mmcv.models import build_model, fuse_conv_bn
 from torch.nn import DataParallel
@@ -89,6 +91,21 @@ def parse_args():
         default='none',
         help='job launcher')
     parser.add_argument('--local-rank', type=int, default=0)
+    # Data collection for repair (optional; no behavior change when disabled)
+    parser.add_argument(
+        '--collect-data',
+        action='store_true',
+        help='Collect per-frame planning metrics and intermediate info into a JSON file.')
+    parser.add_argument(
+        '--data-output',
+        type=str,
+        default=None,
+        help='Output JSON path used with --collect-data (e.g., data/infos/repair_preprocessing.json).')
+    parser.add_argument(
+        '--print-collected',
+        type=int,
+        default=0,
+        help='Print first N collected items to stdout (only works with --collect-data).')
     args = parser.parse_args()
     if 'LOCAL_RANK' not in os.environ:
         os.environ['LOCAL_RANK'] = str(args.local_rank)
@@ -264,6 +281,226 @@ def main():
             eval_kwargs.update(dict(metric=args.eval, **kwargs))
 
             print(dataset.evaluate(outputs['bbox_results'], **eval_kwargs))
+
+        # Optional: collect per-frame info (planning metrics etc.) into a JSON list
+        if args.collect_data:
+            if not args.data_output:
+                print('WARNING: --collect-data set but --data-output not provided; skip saving JSON.')
+            else:
+                # Helpers for JSON serialization
+                def _to_jsonable(x):
+                    if torch.is_tensor(x):
+                        return x.detach().cpu().numpy().tolist()
+                    if isinstance(x, np.ndarray):
+                        return x.tolist()
+                    if isinstance(x, (np.integer, )):
+                        return int(x)
+                    if isinstance(x, (np.floating, )):
+                        return float(x)
+                    if isinstance(x, dict):
+                        return {k: _to_jsonable(v) for k, v in x.items()}
+                    if isinstance(x, (list, tuple)):
+                        return [_to_jsonable(v) for v in x]
+                    return x
+
+                # Build scenario_idx by clip (folder) in order of appearance
+                folder_to_scenario = {}
+                next_scenario = 0
+                collected = []
+                results_list = outputs.get('bbox_results', [])
+                for batch_idx, res in enumerate(results_list):
+                    # Get info from dataset if available (B2D repair pkl provides folder/town_name/frame_idx)
+                    info = None
+                    if hasattr(dataset, 'data_infos') and batch_idx < len(dataset.data_infos):
+                        info = dataset.data_infos[batch_idx]
+
+                    folder = ''
+                    town_name = ''
+                    frame_idx = batch_idx
+                    timestamp = 0.0
+                    if isinstance(info, dict):
+                        folder = info.get('folder', '') or ''
+                        town_name = info.get('town_name', '') or ''
+                        frame_idx = int(info.get('frame_idx', frame_idx))
+                        timestamp = float(info.get('timestamp', timestamp)) if 'timestamp' in info else timestamp
+
+                    if folder not in folder_to_scenario:
+                        folder_to_scenario[folder] = next_scenario
+                        next_scenario += 1
+                    scenario_idx = folder_to_scenario[folder]
+
+                    metric = res.get('metric_results', {}) if isinstance(res, dict) else {}
+                    fut_valid_flag = bool(metric.get('fut_valid_flag', False))
+                    # --- Extract ego GT / prediction trajectories (nuScenes-style naming) ---
+                    # GT ego future trajs are derived from adjacent frames in the clip (not stored in a single frame).
+                    gt_ego_fut_trajs = []
+                    ego_fut_masks = []
+                    ego_fut_cmd = []
+                    ego_fut_cmd_idx = -1
+                    # Align naming with nuScenes:
+                    # - ego_features: 512-D model feature (input to last planning layers)
+                    # - ego_lcf_feat: 9-D handcrafted ego state
+                    ego_features = []
+                    ego_lcf_feat = []
+                    predictions = []
+
+                    # (1) GT from dataset utilities (same logic as dataloader uses)
+                    try:
+                        if hasattr(dataset, 'get_ego_trajs'):
+                            _, ego_fut_trajs_off, ego_fut_masks_arr, cmd_onehot = dataset.get_ego_trajs(
+                                batch_idx, dataset.sample_interval, dataset.past_frames, dataset.future_frames
+                            )
+                            # offsets -> absolute in ego frame
+                            gt_ego_fut_trajs = np.cumsum(np.asarray(ego_fut_trajs_off, dtype=np.float32), axis=0).tolist()
+                            ego_fut_masks = np.asarray(ego_fut_masks_arr, dtype=np.float32).tolist()
+                            ego_fut_cmd = np.asarray(cmd_onehot, dtype=np.float32).tolist()
+                            if len(ego_fut_cmd) > 0:
+                                ego_fut_cmd_idx = int(np.argmax(np.asarray(ego_fut_cmd)))
+                    except Exception:
+                        # Keep empty if anything goes wrong; collection should not break evaluation.
+                        gt_ego_fut_trajs = []
+                        ego_fut_masks = []
+                        ego_fut_cmd = []
+                        ego_fut_cmd_idx = -1
+
+                    # (2) Ego handcrafted features (B2D ego_lcf_feat-style 9D vector)
+                    if isinstance(info, dict):
+                        try:
+                            ego_translation = np.asarray(info.get('ego_translation', [0, 0, 0]), dtype=np.float32).reshape(-1)
+                            ego_accel = np.asarray(info.get('ego_accel', [0, 0, 0, 0]), dtype=np.float32).reshape(-1)
+                            if ego_accel.shape[0] < 4:
+                                ego_accel = np.pad(ego_accel, (0, 4 - ego_accel.shape[0]), mode='constant')
+                            ego_rotation_rate = np.asarray(info.get('ego_rotation_rate', [0, 0, 0]), dtype=np.float32).reshape(-1)
+                            ego_size = np.asarray(info.get('ego_size', [0, 0]), dtype=np.float32).reshape(-1)
+                            steer = float(info.get('steer', 0.0) or 0.0)
+                            ego_lcf_feat = np.zeros(9, dtype=np.float32)
+                            ego_lcf_feat[0:2] = ego_translation[0:2] if ego_translation.shape[0] >= 2 else 0.0
+                            ego_lcf_feat[2:4] = ego_accel[2:4]
+                            ego_lcf_feat[4] = float(ego_rotation_rate[-1]) if ego_rotation_rate.shape[0] > 0 else 0.0
+                            ego_lcf_feat[5] = float(ego_size[1]) if ego_size.shape[0] > 1 else 0.0
+                            ego_lcf_feat[6] = float(ego_size[0]) if ego_size.shape[0] > 0 else 0.0
+                            ego_lcf_feat[7] = float(np.sqrt((ego_translation[0] if ego_translation.shape[0] > 0 else 0.0) ** 2 +
+                                                            (ego_translation[1] if ego_translation.shape[0] > 1 else 0.0) ** 2))
+                            ego_lcf_feat[8] = float(steer)
+                            ego_lcf_feat = ego_lcf_feat.tolist()
+                        except Exception:
+                            ego_lcf_feat = []
+
+                    # (3) Ego_features from model outputs (expected 512-D; saved as nuScenes-style ego_features)
+                    try:
+                        feat_src = None
+                        if isinstance(res, dict):
+                            if 'ego_features' in res:
+                                feat_src = res
+                            elif 'pts_bbox' in res and isinstance(res['pts_bbox'], dict) and 'ego_features' in res['pts_bbox']:
+                                feat_src = res['pts_bbox']
+                        if feat_src is not None and feat_src.get('ego_features', None) is not None:
+                            ef = feat_src['ego_features']
+                            if torch.is_tensor(ef):
+                                ef = ef.detach().cpu().numpy()
+                            ef = np.asarray(ef, dtype=np.float32).reshape(-1)
+                            ego_features = ef.tolist()
+                    except Exception:
+                        ego_features = []
+
+                    # (4) Predictions from model outputs (ego_fut_preds: per-command future offsets)
+                    try:
+                        pred_src = None
+                        if isinstance(res, dict):
+                            # Some codepaths wrap bbox results under 'pts_bbox'
+                            if 'ego_fut_preds' in res:
+                                pred_src = res
+                            elif 'pts_bbox' in res and isinstance(res['pts_bbox'], dict) and 'ego_fut_preds' in res['pts_bbox']:
+                                pred_src = res['pts_bbox']
+
+                        if pred_src is not None and pred_src.get('ego_fut_preds', None) is not None:
+                            pred = pred_src['ego_fut_preds']
+                            if torch.is_tensor(pred):
+                                pred = pred.detach().cpu().numpy()
+                            pred = np.asarray(pred, dtype=np.float32)
+                            # offsets -> absolute in ego frame
+                            pred = np.cumsum(pred, axis=-2)
+                            predictions = pred.tolist()
+                    except Exception as e:
+                        # Do not break eval; but print a one-time hint for debugging.
+                        if batch_idx == 0:
+                            try:
+                                v = None
+                                if isinstance(res, dict):
+                                    v = res.get('ego_fut_preds', None)
+                                    if v is None and 'pts_bbox' in res and isinstance(res['pts_bbox'], dict):
+                                        v = res['pts_bbox'].get('ego_fut_preds', None)
+                                if torch.is_tensor(v):
+                                    v_desc = 'torch(shape={}, dtype={})'.format(tuple(v.shape), v.dtype)
+                                elif v is None:
+                                    v_desc = 'None'
+                                else:
+                                    try:
+                                        v_np = np.asarray(v)
+                                        v_desc = 'ndarray(shape={}, dtype={})'.format(v_np.shape, v_np.dtype)
+                                    except Exception:
+                                        v_desc = str(type(v))
+                                print('[collect-data] WARN: failed to parse ego_fut_preds for predictions: {} (ego_fut_preds={})'.format(e, v_desc))
+                            except Exception:
+                                pass
+                        predictions = []
+
+                    item = {
+                        'batch_idx': int(batch_idx),
+                        'scenario_idx': int(scenario_idx),
+                        'scenario_abs_idx': int(scenario_idx + 1),
+                        'frame_idx': int(frame_idx),
+                        # For B2D we use folder as the scene identifier (clip-level)
+                        'scene_token': str(folder),
+                        'timestamp': float(timestamp),
+                        # Planning metrics (match nuScenes-style naming)
+                        'plan_L2_1s': float(_to_jsonable(metric.get('plan_L2_1s', 0.0)) or 0.0),
+                        'plan_L2_2s': float(_to_jsonable(metric.get('plan_L2_2s', 0.0)) or 0.0),
+                        'plan_L2_3s': float(_to_jsonable(metric.get('plan_L2_3s', 0.0)) or 0.0),
+                        'plan_obj_box_col_1s': float(_to_jsonable(metric.get('plan_obj_box_col_1s', 0.0)) or 0.0) if fut_valid_flag else -1.0,
+                        'plan_obj_box_col_2s': float(_to_jsonable(metric.get('plan_obj_box_col_2s', 0.0)) or 0.0) if fut_valid_flag else -1.0,
+                        'plan_obj_box_col_3s': float(_to_jsonable(metric.get('plan_obj_box_col_3s', 0.0)) or 0.0) if fut_valid_flag else -1.0,
+                        'fut_valid_flag': bool(fut_valid_flag),
+                        # Match nuScenes preprocessing schema
+                        'predictions': predictions,
+                        'ground_truth': gt_ego_fut_trajs,
+                        'ego_features': ego_features,
+                        'ego_lcf_feat': ego_lcf_feat,
+                        'ego_fut_cmd': ego_fut_cmd,
+                        'ego_fut_cmd_idx': int(ego_fut_cmd_idx),
+                        # Extra B2D-specific helper (not in nuScenes json): future mask for debugging/repair
+                        'ego_fut_masks': ego_fut_masks,
+                        'town_name': str(town_name),
+                    }
+                    collected.append(item)
+
+                os.makedirs(os.path.dirname(args.data_output) or '.', exist_ok=True)
+                with open(args.data_output, 'w', encoding='utf-8') as f:
+                    json.dump(collected, f, indent=2)
+                print('Saved collected data to {} (num_frames={})'.format(args.data_output, len(collected)))
+
+                # Optional: print a small preview for quick verification
+                if getattr(args, 'print_collected', 0) and int(args.print_collected) > 0:
+                    n = min(int(args.print_collected), len(collected))
+                    print('Preview first {} collected items:'.format(n))
+                    for i in range(n):
+                        it = collected[i]
+                        print(
+                            '  [{}] scene_token={} scenario_idx={} frame_idx={} '
+                            'L2(1/2/3s)=({:.4f},{:.4f},{:.4f}) col(1/2/3s)=({:.1f},{:.1f},{:.1f}) fut_valid={}'.format(
+                                i,
+                                it.get('scene_token', ''),
+                                it.get('scenario_idx', -1),
+                                it.get('frame_idx', -1),
+                                float(it.get('plan_L2_1s', 0.0)),
+                                float(it.get('plan_L2_2s', 0.0)),
+                                float(it.get('plan_L2_3s', 0.0)),
+                                float(it.get('plan_obj_box_col_1s', -1.0)),
+                                float(it.get('plan_obj_box_col_2s', -1.0)),
+                                float(it.get('plan_obj_box_col_3s', -1.0)),
+                                bool(it.get('fut_valid_flag', False)),
+                            )
+                        )
     
         # # # NOTE: record to json
         # json_path = args.json_dir
