@@ -884,11 +884,25 @@ class B2D_VAD_Dataset(Custom3DDataset):
                 all_metric_dict[key] += results[i]['metric_results'][key]
         
         for cls in motion_cls_names:
-            result_dict['EPA_'+cls] = (all_metric_dict['hit_'+cls] - \
-                 alpha * all_metric_dict['fp_'+cls]) / all_metric_dict['gt_'+cls]
-            result_dict['ADE_'+cls] = all_metric_dict['ADE_'+cls] / all_metric_dict['cnt_ade_'+cls]
-            result_dict['FDE_'+cls] = all_metric_dict['FDE_'+cls] / all_metric_dict['cnt_fde_'+cls]
-            result_dict['MR_'+cls] = all_metric_dict['MR_'+cls] / all_metric_dict['cnt_fde_'+cls]
+            # NOTE: repair set / small eval set may have no GT for some classes.
+            # Avoid ZeroDivisionError and keep metrics defined.
+            if all_metric_dict['gt_'+cls] > 0:
+                result_dict['EPA_'+cls] = (all_metric_dict['hit_'+cls] -
+                                           alpha * all_metric_dict['fp_'+cls]) / all_metric_dict['gt_'+cls]
+            else:
+                result_dict['EPA_'+cls] = 0.0
+
+            if all_metric_dict['cnt_ade_'+cls] > 0:
+                result_dict['ADE_'+cls] = all_metric_dict['ADE_'+cls] / all_metric_dict['cnt_ade_'+cls]
+            else:
+                result_dict['ADE_'+cls] = 0.0
+
+            if all_metric_dict['cnt_fde_'+cls] > 0:
+                result_dict['FDE_'+cls] = all_metric_dict['FDE_'+cls] / all_metric_dict['cnt_fde_'+cls]
+                result_dict['MR_'+cls] = all_metric_dict['MR_'+cls] / all_metric_dict['cnt_fde_'+cls]
+            else:
+                result_dict['FDE_'+cls] = 0.0
+                result_dict['MR_'+cls] = 0.0
         
         print('\n')
         print('-------------- Motion Prediction --------------')
