@@ -415,7 +415,8 @@ class VadAgent(autonomous_agent.AutonomousAgent):
 
         metric_info = self.get_metric_info()
         self.metric_info[self.step] = metric_info
-        if SAVE_PATH is not None and self.step % 1 == 0:
+        # Deyun: Save one frame every 10 frames instead of every frame
+        if SAVE_PATH is not None and self.step % 10 == 0:
             self.save(tick_data)
         self.prev_control = control
         
