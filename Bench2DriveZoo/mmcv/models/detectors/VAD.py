@@ -423,6 +423,8 @@ class VAD(MVXTwoStageDetector):
             map_bbox_result = self.map_pred2result(map_bboxes, map_scores, map_labels, map_pts)
             bbox_result.update(map_bbox_result)
             bbox_result['ego_fut_preds'] = outs['ego_fut_preds'][i].cpu()
+            if 'ego_features' in outs and outs['ego_features'] is not None:
+                bbox_result['ego_features'] = outs['ego_features'][i].cpu()
             bbox_result['ego_fut_cmd'] = ego_fut_cmd.cpu()
             bbox_results.append(bbox_result)
 

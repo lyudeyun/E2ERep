@@ -808,6 +808,9 @@ class VADHead(DETRHead):
             'map_enc_cls_scores': None,
             'map_enc_bbox_preds': None,
             'map_enc_pts_preds': None,
+            # Export ego feature fed into the final planning decoder (used for repair acceleration).
+            # Typically shape: [B, 1, 2*embed_dims] == [B, 1, 512]
+            'ego_features': ego_feats,
             'ego_fut_preds': outputs_ego_trajs,
         }
 
