@@ -1,0 +1,584 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Simplified automated experiment script for repair and evaluation.
+"""
+
+import sys
+import subprocess
+from pathlib import Path
+import argparse
+import re
+import os
+import shlex
+
+
+def str2bool(v):
+    """
+    Parse common string booleans for argparse.
+    Accepts: true/false, 1/0, yes/no, y/n, t/f (case-insensitive).
+    """
+    if isinstance(v, bool):
+        return v
+    if v is None:
+        return False
+    s = str(v).strip().lower()
+    if s in ("true", "1", "yes", "y", "t"):
+        return True
+    if s in ("false", "0", "no", "n", "f"):
+        return False
+    raise argparse.ArgumentTypeError(f"Invalid boolean value: {v!r}")
+
+
+def get_vad_paths(vad_name, repo_root):
+    """Get Bench2DriveZoo VAD config/checkpoint paths."""
+    b2d_root = repo_root / "Bench2DriveZoo"
+    if vad_name == "VAD_base":
+        return {
+            "config": b2d_root / "adzoo/vad/configs/VAD/VAD_base_e2e_b2d.py",
+            "checkpoint": b2d_root / "ckpts/vad_b2d_base.pth",
+        }
+    # VAD_tiny in this repo refers to the tiny B2D checkpoint; it still uses the B2D config
+    # (the NuScenes tiny config will not work with b2d_infos_*.pkl ann files).
+    return {
+        "config": b2d_root / "adzoo/vad/configs/VAD/VAD_base_e2e_b2d.py",
+        "checkpoint": b2d_root / "ckpts/vad_b2d_tiny.pth",
+    }
+
+
+def generate_experiment_name(vad_name, rep_method, search_algo, search_algo_params, 
+                             fitness, run_idx, base_dir):
+    """Generate experiment directory name."""
+    w = search_algo_params['num_weights_to_repair']
+    p = search_algo_params['num_particles']
+    i = search_algo_params['num_iterations']
+    
+    # Add early stop patience to search params if set
+    early_stop = search_algo_params.get('early_stop_patience')
+    if early_stop is not None and early_stop > 0:
+        search_params = f"w{w}_p{p}_i{i}_es{early_stop}"
+    else:
+        search_params = f"w{w}_p{p}_i{i}"
+    
+    if fitness == 'continuous':
+        fitness_str = 'CONT'
+    elif fitness == 'continuous2':
+        fitness_str = 'CONT2'
+    else:
+        fitness_str = 'DISC'
+    
+    # Auto-detect run_idx
+    if run_idx is None:
+        pattern = f"{vad_name}_REP_VAL_{rep_method}_{search_algo}_{search_params}_{fitness_str}_([0-9]+)"
+        max_idx = 0
+        if base_dir.exists():
+            for item in base_dir.iterdir():
+                if item.is_dir():
+                    match = re.match(pattern, item.name)
+                    if match:
+                        max_idx = max(max_idx, int(match.group(1)))
+        run_idx = max_idx + 1
+    
+    return f"{vad_name}_REP_VAL_{rep_method}_{search_algo}_{search_params}_{fitness_str}_{run_idx}"
+
+
+def generate_baseline_json(vad_name, repair_dataset, base_dir, repo_root, 
+                           cuda_device='0', regenerate=False):
+    """
+    Generate baseline JSON by evaluating original model on repair dataset.
+    
+    Args:
+        vad_name: VAD model name
+        repair_dataset: Path to repair dataset PKL file
+        base_dir: Base experiments directory (baseline JSON will be stored here)
+        repo_root: Repository root directory
+        cuda_device: CUDA device ID
+        regenerate: If True, regenerate even if file exists
+    Returns:
+        Path to baseline JSON file, or None if failed
+    """
+    vad_paths = get_vad_paths(vad_name, repo_root)
+    vad_lower = vad_name.lower()
+    
+    # Generate unique filename based on repair dataset path
+    # Use dataset filename (without extension) to create unique identifier
+    dataset_name = Path(repair_dataset).stem
+    baseline_json = (base_dir / f"{vad_lower}_baseline_{dataset_name}.json").resolve()
+    log_file = (base_dir / f"{vad_lower}_baseline_{dataset_name}.log").resolve()
+    
+    # Check if baseline already exists
+    if baseline_json.exists() and not regenerate:
+        print(f"\nBaseline JSON already exists: {baseline_json}")
+        print("Skipping baseline generation. Use --regenerate-baseline to force regeneration.")
+        return baseline_json
+    
+    print("\n" + "="*80)
+    print("Generating Baseline JSON")
+    print("="*80)
+    print(f"Repair dataset: {repair_dataset}")
+    print(f"Output: {baseline_json}")
+    
+    # Ensure parent exists even when running child process from a different cwd
+    baseline_json.parent.mkdir(parents=True, exist_ok=True)
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+
+    cmd = [
+        f"CUDA_VISIBLE_DEVICES={cuda_device}",
+        sys.executable,
+        '-u',  # Unbuffered output (force stdout/stderr to be unbuffered)
+        str(repo_root / "Bench2DriveZoo" / "adzoo" / "vad" / "test.py"),
+        str(vad_paths['config']),
+        str(vad_paths['checkpoint']),
+        '--cfg-options', f"data.test.ann_file='{repair_dataset}'",
+        '--launcher', 'none',
+        '--eval', 'bbox',
+        '--tmpdir', 'tmp',
+        '--collect-data',
+        '--data-output', str(baseline_json),
+    ]
+    
+    print(f"Command: {' '.join(cmd)}")
+    
+    b2d_root = repo_root / "Bench2DriveZoo"
+    with open(log_file, 'w', buffering=1) as f:  # Line buffering for real-time output
+        result = subprocess.run(' '.join(cmd), shell=True, cwd=b2d_root, 
+                              stdout=f, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    
+    if result.returncode != 0 or not baseline_json.exists():
+        print(f"ERROR: Baseline JSON generation failed. Check {log_file}")
+        return None
+    
+    print(f"Baseline JSON generated: {baseline_json}")
+    return baseline_json
+
+
+def run_repair(vad_name, baseline_json, exp_dir, repo_root, 
+               alpha=0.5, layers='pts_bbox_head.ego_fut_decoder.0 pts_bbox_head.ego_fut_decoder.2',
+               fitness_type='continuous', num_particles=200, num_iterations=100, 
+               num_weights_to_repair=100, rep_method='Arachne_v1', early_stop_patience=None,
+               cuda_device='0'):
+    """Run repair process."""
+    print("\n" + "="*80)
+    print("Running Repair")
+    print("="*80)
+    
+    vad_paths = get_vad_paths(vad_name, repo_root)
+    repair_dir = exp_dir / "repair"
+    repair_dir.mkdir(exist_ok=True)
+    output_dir = (repair_dir / "repair_output").resolve()
+    
+    cmd = [
+        f"CUDA_VISIBLE_DEVICES={cuda_device}",
+        sys.executable,
+        str(repo_root / "repair" / "repair_ego_fut_decoder_arachne.py"),
+        '--config', str(vad_paths['config']),
+        '--checkpoint', str(vad_paths['checkpoint']),
+        '--json', str(baseline_json),
+        '--use-vad-eval',
+        '--alpha', str(alpha),
+        '--rep-method', rep_method,
+        '--layers'] + layers.split() + [
+        '--fitness-type', fitness_type,
+        '--num-particles', str(num_particles),
+        '--num-iterations', str(num_iterations),
+        '--num-weights-to-repair', str(num_weights_to_repair),
+        '--output-dir', str(output_dir),
+    ]
+    
+    # Add early stop patience if enabled (>0). Use 0/None to disable.
+    if early_stop_patience is not None and int(early_stop_patience) > 0:
+        cmd.extend(['--early-stop-patience', str(early_stop_patience)])
+    
+    print(f"Command: {' '.join(cmd)}")
+    print(f"Using CUDA device: {cuda_device}")
+    log_file = (repair_dir / "repair.log").resolve()
+
+    # If a repaired model already exists, reuse it (avoids rerunning expensive repair steps)
+    repaired_model = (output_dir / "VAD_repaired_both_layers.pth").resolve()
+    if repaired_model.exists():
+        print(f"Repaired model already exists, reusing: {repaired_model}")
+        return repaired_model
+    
+    # Use tee command to write to both file and terminal (simpler approach)
+    # Format: command | tee log_file
+    cmd_with_tee = f"({' '.join(cmd)}) | tee {shlex.quote(str(log_file))}"
+    
+    result = subprocess.run(cmd_with_tee, shell=True, cwd=repo_root, 
+                          stderr=subprocess.STDOUT, text=True)
+    
+    repaired_model = (output_dir / "VAD_repaired_both_layers.pth").resolve()
+    
+    # Check if repaired model exists (more reliable than return code)
+    # Some scripts may exit with non-zero code due to display/X server errors
+    # but still successfully generate the model file
+    if not repaired_model.exists():
+        if result.returncode != 0:
+            print(f"ERROR: Repair failed (exit code {result.returncode}). Check {log_file}")
+        else:
+            print(f"ERROR: Repaired model not found at {repaired_model}")
+        return False
+    
+    # Warn if exit code is non-zero but model exists (likely a non-critical error)
+    if result.returncode != 0:
+        print(f"WARNING: Repair script exited with code {result.returncode}, but model file exists.")
+        print(f"  This may be due to display/X server errors (e.g., XIO errors).")
+        print(f"  Continuing with evaluation. Check {log_file} for details.")
+    
+    print(f"Repaired model: {repaired_model}")
+    return repaired_model
+
+
+def run_evaluation(vad_name, repaired_model, eval_dataset, exp_dir, repo_root, 
+                   cuda_device='0'):
+    """Run evaluation process."""
+    print("\n" + "="*80)
+    print("Running Open-loop Evaluation")
+    print("="*80)
+    
+    vad_paths = get_vad_paths(vad_name, repo_root)
+    # Store open-loop results under exp_dir/open_loop_eval (and auto-migrate legacy exp_dir/evaluation)
+    legacy_eval_dir = exp_dir / "evaluation"
+    eval_dir = exp_dir / "open_loop_eval"
+    if legacy_eval_dir.exists() and not eval_dir.exists():
+        legacy_eval_dir.rename(eval_dir)
+    eval_dir.mkdir(exist_ok=True)
+    vad_lower = vad_name.lower()
+    output_json = (eval_dir / f"{vad_lower}_rep_val.json").resolve()
+    
+    cmd = [
+        f"CUDA_VISIBLE_DEVICES={cuda_device}",
+        sys.executable,
+        '-u',  # Unbuffered output (force stdout/stderr to be unbuffered)
+        str(repo_root / "Bench2DriveZoo" / "adzoo" / "vad" / "test.py"),
+        str(vad_paths['config']),
+        str(repaired_model),
+        '--cfg-options', f"data.test.ann_file='{eval_dataset}'",
+        '--launcher', 'none',
+        '--eval', 'bbox',
+        '--tmpdir', 'tmp',
+        '--collect-data',
+        '--data-output', str(output_json),
+    ]
+    
+    print(f"Command: {' '.join(cmd)}")
+    log_file = (eval_dir / f"{vad_lower}_rep_val.log").resolve()
+    
+    b2d_root = repo_root / "Bench2DriveZoo"
+    with open(log_file, 'w', buffering=1) as f:  # Line buffering for real-time output
+        result = subprocess.run(' '.join(cmd), shell=True, cwd=b2d_root,
+                              stdout=f, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    
+    if result.returncode != 0:
+        print(f"ERROR: Evaluation failed. Check {log_file}")
+        return False
+    
+    print(f"Evaluation results: {output_json}")
+    return True
+
+
+def run_closed_loop_evaluation(vad_name, repaired_model, exp_dir, repo_root, args):
+    """
+    Scheme B: call a dedicated parameterized closed-loop shell script.
+
+    Outputs:
+      - checkpoint json: <exp_dir>/closed_loop_eval/closed_loop_eval.json
+      - saved frames/metadata: under <exp_dir>/closed_loop_eval/...
+    """
+    print("\n" + "="*80)
+    print("Running Closed-loop Evaluation")
+    print("="*80)
+
+    vad_paths = get_vad_paths(vad_name, repo_root)
+    cl_dir = exp_dir / "closed_loop_eval"
+    cl_dir.mkdir(exist_ok=True)
+
+    # Use fast or super-fast version if requested
+    if args.closed_loop_super_fast and args.closed_loop_fast:
+        print("ERROR: --closed-loop-fast and --closed-loop-super-fast are mutually exclusive")
+        return False
+    
+    if args.closed_loop_super_fast:
+        # Super-fast version: use super-fast config and super-fast agent
+        super_fast_config = vad_paths['config'].parent / vad_paths['config'].name.replace('.py', '_super_fast.py')
+        if not super_fast_config.exists():
+            print(f"ERROR: Super-fast config not found: {super_fast_config}")
+            return False
+        team_config = f"{super_fast_config.resolve()}+{repaired_model}"
+        team_agent = (repo_root / "Bench2DriveZoo/team_code/vad_b2d_agent_super_fast.py").resolve()
+        if not team_agent.exists():
+            print(f"ERROR: Super-fast agent not found: {team_agent}")
+            return False
+        print(f"Using super-fast version: agent={team_agent.name}, config={super_fast_config.name}")
+    elif args.closed_loop_fast:
+        # Fast version: use fast config and fast agent
+        fast_config = vad_paths['config'].parent / vad_paths['config'].name.replace('.py', '_fast.py')
+        if not fast_config.exists():
+            print(f"ERROR: Fast config not found: {fast_config}")
+            return False
+        team_config = f"{fast_config.resolve()}+{repaired_model}"
+        team_agent = (repo_root / "Bench2DriveZoo/team_code/vad_b2d_agent_fast.py").resolve()
+        if not team_agent.exists():
+            print(f"ERROR: Fast agent not found: {team_agent}")
+            return False
+        print(f"Using fast version: agent={team_agent.name}, config={fast_config.name}")
+    else:
+        # Normal version
+        team_config = f"{vad_paths['config'].resolve()}+{repaired_model}"
+        team_agent = Path(args.closed_loop_team_agent)
+        if not team_agent.is_absolute():
+            team_agent = repo_root / team_agent
+        team_agent = team_agent.resolve()
+        if not team_agent.exists():
+            print(f"ERROR: Closed-loop TEAM_AGENT not found: {team_agent}")
+            return False
+
+    checkpoint_json = (cl_dir / "closed_loop_eval.json").resolve()
+    save_path = str(cl_dir.resolve())
+    log_file = cl_dir / "closed_loop_eval.log"
+
+    # Use a dedicated parameterized script (do not modify run_evaluation_debug.sh)
+    script = repo_root / "leaderboard" / "scripts" / "run_closed_loop_eval.sh"
+    if not script.exists():
+        print(f"ERROR: Closed-loop script not found: {script}")
+        return False
+
+    env = os.environ.copy()
+    if args.carla_root:
+        env["CARLA_ROOT"] = str(Path(args.carla_root).expanduser())
+    if not env.get("CARLA_ROOT"):
+        print("ERROR: CARLA_ROOT is not set. Please export CARLA_ROOT or pass --carla-root.")
+        return False
+
+    cmd = [
+        "bash",
+        str(script),
+        str(args.closed_loop_port),
+        str(args.closed_loop_tm_port),
+        str(args.closed_loop_is_bench2drive),
+        str(routes_path),
+        str(team_agent),
+        team_config,
+        str(checkpoint_json),
+        save_path,
+        str(args.closed_loop_planner_type),
+        str(args.closed_loop_gpu_rank),
+    ]
+
+    print(f"Command: {' '.join(cmd)}")
+    print(f"Checkpoint JSON: {checkpoint_json}")
+    print(f"Save path: {save_path}")
+
+    with open(log_file, "w", buffering=1) as f:
+        result = subprocess.run(cmd, cwd=repo_root, env=env, stdout=f, stderr=subprocess.STDOUT, text=True)
+
+    if checkpoint_json.exists():
+        if result.returncode != 0:
+            print(f"WARNING: Closed-loop evaluator exited with code {result.returncode}, but checkpoint exists.")
+            print(f"  Check log: {log_file}")
+        else:
+            print(f"Closed-loop evaluation results: {checkpoint_json}")
+        return True
+
+    print(f"ERROR: Closed-loop evaluation failed. Check {log_file}")
+    return False
+
+
+def run_single_experiment(run_idx, vad_name, repair_dataset, eval_dataset, 
+                          base_dir, repo_root, args):
+    """Run a single experiment."""
+    # Generate experiment name
+    search_algo_params = {
+        'num_weights_to_repair': args.repair_num_weights,
+        'num_particles': args.repair_num_particles,
+        'num_iterations': args.repair_num_iterations,
+        'early_stop_patience': args.repair_early_stop_patience,
+    }
+    exp_name = generate_experiment_name(
+        vad_name, args.rep_method, args.search_algo, search_algo_params,
+        args.fitness, run_idx, base_dir
+    )
+    exp_dir = base_dir / exp_name
+    exp_dir.mkdir(exist_ok=True)
+    
+    print(f"\n{'='*80}")
+    print(f"Experiment: {exp_name}")
+    print(f"{'='*80}")
+    
+    # Step 1: Generate or load baseline JSON
+    baseline_json = generate_baseline_json(
+        vad_name, repair_dataset, base_dir, repo_root, 
+        args.eval_cuda_device, args.regenerate_baseline
+    )
+    if not baseline_json:
+        return False
+    
+    # Step 2: Run repair
+    repaired_model = run_repair(
+        vad_name, baseline_json, exp_dir, repo_root,
+        alpha=args.repair_alpha,
+        layers=args.repair_layers,
+        fitness_type=args.fitness,
+        num_particles=args.repair_num_particles,
+        num_iterations=args.repair_num_iterations,
+        num_weights_to_repair=args.repair_num_weights,
+        rep_method=args.rep_method,
+        early_stop_patience=args.repair_early_stop_patience,
+        cuda_device=args.eval_cuda_device
+    )
+    if not repaired_model:
+        return False
+    
+    # Step 3: Run evaluation
+    success = run_evaluation(
+        vad_name, repaired_model, eval_dataset, exp_dir, repo_root,
+        cuda_device=args.eval_cuda_device
+    )
+
+    if not success:
+        return False
+
+    # Step 4 (optional): Run closed-loop evaluation
+    if args.closed_loop_eval:
+        success = run_closed_loop_evaluation(
+            vad_name, repaired_model, exp_dir, repo_root, args
+        )
+
+    return success
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Automated experiment runner")
+    
+    # Naming parameters
+    parser.add_argument('--vad-name', choices=['VAD_base', 'VAD_tiny'], 
+                       default='VAD_tiny', help='VAD model name')
+    parser.add_argument('--rep-method', choices=['Arachne_v1', 'semSegRep'],
+                       default='Arachne_v1',
+                       help='Repair method: Arachne_v1 (statistical thresholds) or semSegRep (fixed threshold baseline)')
+    parser.add_argument('--search-algo', default='PSO',
+                       help='Search algorithm (for naming only)')
+    parser.add_argument('--fitness', choices=['continuous', 'continuous2', 'continuous3', 'discrete'],
+                       default='continuous',
+                       help='Fitness type: continuous (total L2), continuous2 (mean L2 + collision penalty), '
+                            'continuous3 (total L2 + collision penalty), or discrete')
+    parser.add_argument('--run-idx', type=int, default=None,
+                       help='Run index (auto-detected if not provided)')
+    parser.add_argument('--num-runs', type=int, default=1,
+                       help='Number of independent runs')
+    
+    # Paths
+    parser.add_argument('--exp-dir', type=str, default='./experiments',
+                       help='Base directory for experiments')
+    parser.add_argument('--repair-dataset', type=str,
+                       default='Bench2DriveZoo/data/infos/b2d_infos_repair_tiny.pkl',
+                       help='Repair dataset PKL file (Bench2DriveZoo).')
+    parser.add_argument('--eval-dataset', type=str,
+                       default='Bench2DriveZoo/data/infos/b2d_infos_val_tiny_rest.pkl',
+                       help='Evaluation dataset PKL file (Bench2DriveZoo).')
+    
+    # Repair parameters
+    parser.add_argument('--repair-alpha', type=float, default=0.5)
+    parser.add_argument('--repair-layers', type=str,
+                       default='pts_bbox_head.ego_fut_decoder.0 pts_bbox_head.ego_fut_decoder.2')
+    parser.add_argument('--repair-particles-multiplier', type=int, default=2,
+                       help='Multiplier for number of PSO particles (particles = multiplier * --repair-num-weights, default: 2)')
+    parser.add_argument('--repair-num-iterations', type=int, default=100)
+    parser.add_argument('--repair-early-stop-patience', type=int, default=None,
+                       help='Early stopping patience for PSO: stop if fitness does not improve for N iterations (default: None, disabled). Example: --repair-early-stop-patience 10')
+    parser.add_argument('--repair-num-weights', type=int, default=100)
+    
+    # Evaluation parameters
+    parser.add_argument('--eval-cuda-device', type=str, default='0')
+
+    # Closed-loop evaluation (leaderboard)
+    # Default False. Enable with `--closed-loop-eval True`.
+    parser.add_argument(
+        '--closed-loop-eval',
+        type=str2bool,
+        default=False,
+        help='Run closed-loop evaluation after open-loop evaluation (default: False). '
+             'Use `--closed-loop-eval True` to enable, `--closed-loop-eval False` to disable.'
+    )
+    parser.add_argument('--carla-root', type=str, default=None,
+                        help='CARLA installation root (needed for closed-loop). If omitted, uses $CARLA_ROOT.')
+    parser.add_argument('--closed-loop-routes', type=str, default='leaderboard/data/drivetransformer_bench2drive_dev10.xml',
+                        help='Routes XML for closed-loop evaluation')
+    parser.add_argument('--closed-loop-team-agent', type=str, default='Bench2DriveZoo/team_code/vad_b2d_agent.py',
+                        help='Path to TEAM_AGENT .py for leaderboard evaluation')
+    parser.add_argument('--closed-loop-fast', type=str2bool, default=False,
+                        help='Use fast version agent (1280x720, no JPEG encode/decode, no 0.8 scaling). '
+                             'Use `--closed-loop-fast True` to enable.')
+    parser.add_argument('--closed-loop-super-fast', type=str2bool, default=False,
+                        help='Use super-fast version agent (640x360, no JPEG encode/decode, no 0.8 scaling). '
+                             'Use `--closed-loop-super-fast True` to enable. '
+                             'Note: --closed-loop-fast and --closed-loop-super-fast are mutually exclusive.')
+    parser.add_argument('--closed-loop-port', type=int, default=30000)
+    parser.add_argument('--closed-loop-tm-port', type=int, default=50000)
+    parser.add_argument('--closed-loop-gpu-rank', type=int, default=0)
+    parser.add_argument('--closed-loop-planner-type', type=str, default='only_traj')
+    parser.add_argument('--closed-loop-is-bench2drive', type=str, default='True')
+    
+    # Baseline generation
+    parser.add_argument(
+        '--regenerate-baseline',
+        type=str2bool,
+        default=False,
+        help='Force regeneration of baseline JSON even if it exists (default: False). '
+             'Use `--regenerate-baseline True` to enable.'
+    )
+    
+    args = parser.parse_args()
+    
+    # Calculate repair_num_particles from multiplier and num_weights
+    args.repair_num_particles = args.repair_particles_multiplier * args.repair_num_weights
+    
+    repo_root = Path(__file__).parent.absolute()
+    base_dir = Path(args.exp_dir)
+    base_dir.mkdir(exist_ok=True)
+
+    # Closed-loop: provide a sensible default CARLA root for this repo
+    # (avoids requiring the user to export CARLA_ROOT every time).
+    if not args.carla_root:
+        candidate = repo_root / "Bench2DriveZoo" / "carla"
+        if (candidate / "CarlaUE4.sh").exists() and (candidate / "PythonAPI" / "carla" / "agents").is_dir():
+            args.carla_root = str(candidate)
+    
+    repair_dataset = Path(args.repair_dataset)
+    if not repair_dataset.is_absolute():
+        repair_dataset = repo_root / repair_dataset
+    
+    eval_dataset = Path(args.eval_dataset)
+    if not eval_dataset.is_absolute():
+        eval_dataset = repo_root / eval_dataset
+    
+    # Run experiments
+    success_count = 0
+    for run_num in range(1, args.num_runs + 1):
+        if args.num_runs > 1:
+            print(f"\n{'='*80}")
+            print(f"RUN {run_num}/{args.num_runs}")
+            print(f"{'='*80}")
+        
+        current_run_idx = args.run_idx if (args.run_idx is not None and run_num == 1) else None
+        success = run_single_experiment(
+            current_run_idx, args.vad_name, repair_dataset, eval_dataset,
+            base_dir, repo_root, args
+        )
+        
+        if success:
+            success_count += 1
+            print(f"\n✅ Run {run_num} completed successfully")
+        else:
+            print(f"\n❌ Run {run_num} FAILED")
+    
+    # Summary
+    if args.num_runs > 1:
+        print(f"\n{'='*80}")
+        print(f"SUMMARY: {success_count}/{args.num_runs} successful")
+        print(f"{'='*80}")
+    
+    return 0 if success_count == args.num_runs else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
