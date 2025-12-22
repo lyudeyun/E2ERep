@@ -470,8 +470,8 @@ def main():
                        help='Number of independent runs')
     
     # Paths
-    parser.add_argument('--exp-dir', type=str, default='./experiments',
-                       help='Base directory for experiments')
+    parser.add_argument('--exp-dir', type=str, default=None,
+                       help='Base directory for experiments. If not specified, will auto-generate based on vad-name, rep-method, and search-algo (e.g., ./vad_base_Arachne_v1_PSO_results)')
     parser.add_argument('--repair-dataset', type=str,
                        default='Bench2DriveZoo/data/infos/b2d_infos_repair_tiny.pkl',
                        help='Repair dataset PKL file (Bench2DriveZoo).')
@@ -534,6 +534,14 @@ def main():
     
     # Calculate repair_num_particles from multiplier and num_weights
     args.repair_num_particles = args.repair_particles_multiplier * args.repair_num_weights
+    
+    # Auto-generate exp_dir if not specified
+    if args.exp_dir is None:
+        vad_lower = args.vad_name.lower()
+        rep_method_clean = args.rep_method  # Keep underscores as requested
+        search_algo_clean = args.search_algo
+        args.exp_dir = f"./{vad_lower}_{rep_method_clean}_{search_algo_clean}_results"
+        print(f"Auto-generated exp-dir: {args.exp_dir}")
     
     repo_root = Path(__file__).parent.absolute()
     base_dir = Path(args.exp_dir)
