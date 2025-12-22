@@ -281,9 +281,10 @@ def extract_features(model, data_infos, threshold_good, threshold_bad,
     negative_count = collision_count + negative_no_collision_count
     total_frames_classified = positive_count + negative_count + middle_no_collision_count
     
-    if rep_method == 'Arachne_v1':
-        # 4 categories for Arachne_v1
-        print(f"\nData classification (Arachne_v1 logic - 4 categories):")
+    if rep_method in ['Arachne_v1', 'Arachne_v2']:
+        # 4 categories for Arachne_v1 and Arachne_v2 (same classification logic)
+        method_name = 'Arachne_v1' if rep_method == 'Arachne_v1' else 'Arachne_v2'
+        print(f"\nData classification ({method_name} logic - 4 categories):")
         print(f"  Category 1 - Positive (no collision, L2 < mean - 0.5*std): {positive_no_collision_count}")
         print(f"  Category 2 - Negative (collision): {collision_count}")
         print(f"  Category 3 - Negative (no collision, L2 > mean + 0.5*std): {negative_no_collision_count}")
@@ -294,7 +295,7 @@ def extract_features(model, data_infos, threshold_good, threshold_bad,
         
         if total_frames_classified != processed_frames:
             raise ValueError(
-                "Arachne_v1 classification mismatch: "
+                f"{method_name} classification mismatch: "
                 f"processed {processed_frames} valid frames but classified {total_frames_classified} "
                 f"(positive={positive_no_collision_count}, collision={collision_count}, "
                 f"negative_no_collision={negative_no_collision_count}, middle={middle_no_collision_count})."
@@ -319,7 +320,7 @@ def extract_features(model, data_infos, threshold_good, threshold_bad,
         print(f"\n  Category 2 details (collision negatives):")
         print(f"    L2 range: [{min(collision_l2):.3f}, {max(collision_l2):.3f}]")
     if negative_no_collision_l2:
-        threshold_display = collision_threshold_bad if rep_method == 'Arachne_v1' else threshold_bad
+        threshold_display = collision_threshold_bad if rep_method in ['Arachne_v1', 'Arachne_v2'] else threshold_bad
         print(f"\n  Category 3 details (L2-based negatives):")
         print(f"    L2 range: [{min(negative_no_collision_l2):.3f}, {max(negative_no_collision_l2):.3f}] (all > {threshold_display:.3f})")
     if pos_l2:
@@ -353,9 +354,13 @@ def main():
                        help='List of layer names to repair (space-separated)')
     parser.add_argument('--alpha', type=float, default=0.5,
                        help='For Arachne_v1: Alpha coefficient for threshold calculation (default: 0.5). For semSegRep: Ignored (always uses median threshold)')
-    parser.add_argument('--rep-method', choices=['Arachne_v1', 'semSegRep'],
+    parser.add_argument('--rep-method', choices=['Arachne_v1', 'Arachne_v2', 'semSegRep'],
                        default='Arachne_v1',
-                       help='Repair method: Arachne_v1 (statistical thresholds) or semSegRep (fixed threshold baseline)')
+                       help='Repair method: Arachne_v1 (statistical thresholds, GL+FI on negative only), '
+                            'Arachne_v2 (changed/unchanged method with cost_chgd/(1+cost_unchgd)), '
+                            'or semSegRep (fixed threshold baseline)')
+    parser.add_argument('--search-algo', choices=['PSO', 'DE'], default='PSO',
+                       help='Search algorithm: PSO (Particle Swarm Optimization) or DE (Differential Evolution)')
     
     parser.add_argument('--num-particles', type=int, default=100)
     parser.add_argument('--num-iterations', type=int, default=20)
@@ -367,15 +372,15 @@ def main():
     parser.add_argument('--num-weights-to-repair', type=int, default=None,
                        help='Target number of weights to repair (uses multi-layer Pareto if needed)')
     parser.add_argument('--fitness-type', type=str, default='discrete',
-                       choices=['discrete', 'continuous', 'continuous2', 'continuous3'],
+                       choices=['discrete', 'continuous', 'continuous2'],
                        help='Fitness function type: discrete (weighted frame counts), continuous (total L2 error), '
-                            'continuous2 (mean L2 + collision penalty), or continuous3 (total L2 + collision penalty)')
+                            'or continuous2 (total L2 + collision penalty)')
     args = parser.parse_args()
     
     # Check alpha parameter validity based on repair method
-    if args.rep_method == 'Arachne_v1':
+    if args.rep_method in ['Arachne_v1', 'Arachne_v2']:
         if args.alpha <= 0:
-            parser.error(f"--alpha must be > 0 for Arachne_v1, current value: {args.alpha}")
+            parser.error(f"--alpha must be > 0 for {args.rep_method}, current value: {args.alpha}")
     elif args.rep_method == 'semSegRep':
         # semSegRep always uses median threshold, alpha parameter is ignored
         print(f"  [INFO] semSegRep: --alpha parameter ({args.alpha}) is ignored, will use median threshold")
@@ -420,7 +425,7 @@ def main():
         if info.get('fut_valid_flag', False) and info.get('plan_L2_3s') is not None:
             total_valid_frames_in_json += 1
     
-    if args.rep_method == 'Arachne_v1':
+    if args.rep_method in ['Arachne_v1', 'Arachne_v2']:
         # Automatically calculate thresholds: compute L2 error statistics by actually running the model
         # This ensures thresholds are based on the same L2 values used for classification
         print("\nComputing L2 error statistics to automatically determine thresholds...")
@@ -526,6 +531,16 @@ def main():
             alpha=args.alpha,
             rep_method='Arachne_v1'
         )
+    elif args.rep_method == 'Arachne_v2':
+        # Arachne_v2 uses the same classification logic as Arachne_v1
+        # The difference is in localization: v2 uses changed/unchanged method
+        pos_feat, neg_feat = extract_features(
+            vad_model, data_infos, threshold_good, threshold_bad,
+            mean_l2=mean_l2_for_classification,
+            std_l2=std_l2_for_classification,
+            alpha=args.alpha,
+            rep_method='Arachne_v1'  # Use same classification logic as v1
+        )
     elif args.rep_method == 'semSegRep':
         # For semSegRep: simple fixed threshold classification (no collision, no statistics)
         pos_feat, neg_feat = extract_features(
@@ -625,7 +640,8 @@ def main():
         num_iterations=args.num_iterations,
         num_weights_to_repair=args.num_weights_to_repair,
         target_layers=wrapper.layer_names,  # Pass wrapper layer names to arachne
-        early_stop_patience=args.early_stop_patience
+        early_stop_patience=args.early_stop_patience,
+        optimization_algorithm=args.search_algo  # Set search algorithm (PSO or DE)
     )
     
     if args.num_weights_to_repair:
@@ -639,8 +655,24 @@ def main():
     print("\n" + "="*70)
     print("Localizing faulty weights...")
     print("="*70)
-    print(f"Using {len(neg_feat)} negative frames for Gradient Loss (GL) and Forward Impact (FI) calculation")
-    weights = arachne.localize(wrapper, input_neg, output_dir=output_dir)
+    
+    # Determine if we should use Arachne v2 (changed/unchanged method)
+    use_changed_unchanged = (args.rep_method == 'Arachne_v2')
+    
+    if use_changed_unchanged:
+        print(f"Using Arachne v2 Changed/Unchanged method:")
+        print(f"  Changed (negative) frames: {len(neg_feat)}")
+        print(f"  Unchanged (positive) frames: {len(pos_feat)}")
+        print(f"  Will compute GL and FI separately for changed and unchanged samples,")
+        print(f"  then combine using cost_chgd / (1 + cost_unchgd)")
+        weights = arachne.localize(
+            wrapper, input_neg, input_pos=input_pos, 
+            output_dir=output_dir, use_changed_unchanged=True
+        )
+    else:
+        print(f"Using {len(neg_feat)} negative frames for Gradient Loss (GL) and Forward Impact (FI) calculation")
+        weights = arachne.localize(wrapper, input_neg, output_dir=output_dir)
+    
     print(f"\nFound {len(weights)} weights to repair")
     
     # Build frame data for evaluation
@@ -651,19 +683,22 @@ def main():
         print("Building frame_data_dict with frame_identifiers=None (should get all frames)...")
         frame_data_dict = build_frame_data_dict(args.json, frame_identifiers=None)
         
-        # For Arachne_v1: positive_frames and negative_frames are not used in evaluation
+        # For Arachne_v1 and Arachne_v2: positive_frames and negative_frames are not used in evaluation
         # (evaluation uses ALL frames in frame_data_dict with threshold-based classification)
         # But we still need to pass them for API compatibility, so use None or empty lists
         # Note: The actual classification for evaluation uses the same thresholds but evaluates ALL frames
-        if args.rep_method == 'Arachne_v1':
-            # For Arachne_v1, we don't need separate frame identifiers since evaluation
+        if args.rep_method in ['Arachne_v1', 'Arachne_v2']:
+            # For Arachne_v1/v2, we don't need separate frame identifiers since evaluation
             # uses ALL frames in frame_data_dict with threshold-based classification
             positive_frames = None
             negative_frames = None
-            print(f"\nNote: For Arachne_v1, evaluation uses ALL frames in frame_data_dict")
+            print(f"\nNote: For {args.rep_method}, evaluation uses ALL frames in frame_data_dict")
             print(f"  with threshold-based classification (same as localization thresholds)")
             print(f"  Localization used: {len(pos_feat)} positive, {len(neg_feat)} negative frames")
-            print(f"    (classified using collision + statistical thresholds)")
+            if args.rep_method == 'Arachne_v2':
+                print(f"    (Arachne_v2: using changed/unchanged method for localization)")
+            else:
+                print(f"    (classified using collision + statistical thresholds)")
         else:
             # For semSegRep, use simple threshold-based extraction
             positive_frames, negative_frames = extract_frame_identifiers(
@@ -704,7 +739,8 @@ def main():
     
     # Optimize
     print("\n" + "="*70)
-    print("Optimizing weights using PSO...")
+    algo_name = args.search_algo
+    print(f"Optimizing weights using {algo_name}...")
     print("="*70)
     if args.fitness_type == 'continuous':
         # For continuous fitness, PSO uses ALL valid frames in frame_data_dict
@@ -715,18 +751,21 @@ def main():
     elif args.fitness_type == 'continuous2':
         # For continuous2 fitness, PSO uses ALL valid frames in frame_data_dict
         total_valid_frames = len(frame_data_dict) if frame_data_dict else 0
-        print(f"Fitness type: CONTINUOUS2 (minimize mean L2 error + lambda * N_col)")
+        print(f"Fitness type: CONTINUOUS2 (minimize total L2 error + lambda * N_col)")
         print(f"Using ALL {total_valid_frames} valid frames for optimization")
-        print(f"  Formula: mean_L2 + lambda * collision_count")
+        print(f"  Formula: total_L2 + lambda * collision_count")
         print(f"  (Positive/negative frames are only used for localization, not optimization)")
     else:
         # For discrete fitness, PSO uses ALL frames but evaluates them differently
         total_valid_frames = len(frame_data_dict) if frame_data_dict else 0
         print(f"Fitness type: DISCRETE (maximize non-negative frames)")
         print(f"Using ALL {total_valid_frames} valid frames for optimization")
-        if args.rep_method == 'Arachne_v1':
+        if args.rep_method in ['Arachne_v1', 'Arachne_v2']:
             print(f"  Localization frames (for GL/FI): {len(neg_feat)} negative, {len(pos_feat)} positive")
-            print(f"    (Classified using collision check + statistical thresholds: mean ± {args.alpha}*std)")
+            if args.rep_method == 'Arachne_v2':
+                print(f"    (Arachne_v2: using changed/unchanged method)")
+            else:
+                print(f"    (Classified using collision check + statistical thresholds: mean ± {args.alpha}*std)")
         else:
             print(f"  Localization frames (for GL/FI): {len(neg_feat)} negative, {len(pos_feat)} positive")
             print(f"    (Classified using fixed threshold: L2 < {threshold_good:.6f} = positive)")

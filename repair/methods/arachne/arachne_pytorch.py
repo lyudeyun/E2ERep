@@ -937,15 +937,11 @@ class ArachnePyTorch:
             fitness = total L2 error across all frames
         
         For continuous2 fitness:
-            fitness = mean L2 error + lambda * N_col
+            fitness = total L2 error + lambda * N_col
             where:
-                mean L2 error: average L2 error across all valid frames
+                total L2 error: sum of L2 errors across all valid frames
                 N_col: number of frames with collision
                 lambda: penalty coefficient (default 10.0)
-        
-        For continuous3 fitness:
-            fitness = total L2 error + lambda * N_col
-            (uses the same collision penalty as continuous2 but keeps the total L2 sum)
         
         Goal: Minimize fitness (maximize the score for discrete, minimize L2 for continuous)
         
@@ -967,7 +963,7 @@ class ArachnePyTorch:
         threshold_bad : float
             L2 threshold for negative frames
         fitness_type : str
-            Type of fitness function ('discrete', 'continuous', 'continuous2', 'continuous3')
+            Type of fitness function ('discrete', 'continuous', 'continuous2')
         rep_method : str
             Repair method name
         
@@ -1301,17 +1297,7 @@ class ArachnePyTorch:
                 else:
                     fitness = score  # Direct minimization of L2 error
             elif fitness_type == 'continuous2':
-                # Continuous2 fitness: mean L2 error + lambda * collision count (applies to all methods)
-                lambda_col = 10.0
-                
-                if valid_frame_count > 0:
-                    mean_l2_error = total_l2_error / valid_frame_count
-                    fitness = mean_l2_error + lambda_col * collision_count
-                else:
-                    # No valid L2 errors: model is broken, use penalty fitness
-                    fitness = float('inf')  # Worst possible fitness (will be rejected by PSO)
-            elif fitness_type == 'continuous3':
-                # Continuous3 fitness: total L2 error + lambda * collision count
+                # Continuous2 fitness: total L2 error + lambda * collision count
                 lambda_col = 10.0
                 
                 if valid_frame_count > 0:

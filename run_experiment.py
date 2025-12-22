@@ -156,7 +156,7 @@ def run_repair(vad_name, baseline_json, exp_dir, repo_root,
                alpha=0.5, layers='pts_bbox_head.ego_fut_decoder.0 pts_bbox_head.ego_fut_decoder.2',
                fitness_type='continuous', num_particles=200, num_iterations=100, 
                num_weights_to_repair=100, rep_method='Arachne_v1', early_stop_patience=None,
-               cuda_device='0'):
+               search_algo='PSO', cuda_device='0'):
     """Run repair process."""
     print("\n" + "="*80)
     print("Running Repair")
@@ -177,6 +177,7 @@ def run_repair(vad_name, baseline_json, exp_dir, repo_root,
         '--use-vad-eval',
         '--alpha', str(alpha),
         '--rep-method', rep_method,
+        '--search-algo', search_algo,
         '--layers'] + layers.split() + [
         '--fitness-type', fitness_type,
         '--num-particles', str(num_particles),
@@ -423,6 +424,7 @@ def run_single_experiment(run_idx, vad_name, repair_dataset, eval_dataset,
         num_weights_to_repair=args.repair_num_weights,
         rep_method=args.rep_method,
         early_stop_patience=args.repair_early_stop_patience,
+        search_algo=args.search_algo,
         cuda_device=args.eval_cuda_device
     )
     if not repaired_model:
@@ -452,15 +454,16 @@ def main():
     # Naming parameters
     parser.add_argument('--vad-name', choices=['VAD_base', 'VAD_tiny'], 
                        default='VAD_tiny', help='VAD model name')
-    parser.add_argument('--rep-method', choices=['Arachne_v1', 'semSegRep'],
+    parser.add_argument('--rep-method', choices=['Arachne_v1', 'Arachne_v2', 'semSegRep'],
                        default='Arachne_v1',
-                       help='Repair method: Arachne_v1 (statistical thresholds) or semSegRep (fixed threshold baseline)')
-    parser.add_argument('--search-algo', default='PSO',
-                       help='Search algorithm (for naming only)')
-    parser.add_argument('--fitness', choices=['continuous', 'continuous2', 'continuous3', 'discrete'],
+                       help='Repair method: Arachne_v1 (statistical thresholds, GL+FI on negative only), '
+                            'Arachne_v2 (changed/unchanged method with cost_chgd/(1+cost_unchgd)), '
+                            'or semSegRep (fixed threshold baseline)')
+    parser.add_argument('--search-algo', choices=['PSO', 'DE'], default='PSO',
+                       help='Search algorithm: PSO (Particle Swarm Optimization) or DE (Differential Evolution)')
+    parser.add_argument('--fitness', choices=['continuous', 'continuous2', 'discrete'],
                        default='continuous',
-                       help='Fitness type: continuous (total L2), continuous2 (mean L2 + collision penalty), '
-                            'continuous3 (total L2 + collision penalty), or discrete')
+                       help='Fitness type: continuous (total L2), continuous2 (total L2 + collision penalty), or discrete')
     parser.add_argument('--run-idx', type=int, default=None,
                        help='Run index (auto-detected if not provided)')
     parser.add_argument('--num-runs', type=int, default=1,
