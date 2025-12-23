@@ -83,7 +83,7 @@ def generate_experiment_name(vad_name, rep_method, search_algo, search_algo_para
 
 
 def generate_baseline_json(vad_name, repair_dataset, base_dir, repo_root, 
-                           cuda_device='0', regenerate=False):
+                           cuda_device='0', regenerate=False, target_filename=None):
     """
     Generate baseline JSON by evaluating original model on repair dataset.
     
@@ -100,11 +100,18 @@ def generate_baseline_json(vad_name, repair_dataset, base_dir, repo_root,
     vad_paths = get_vad_paths(vad_name, repo_root)
     vad_lower = vad_name.lower()
     
-    # Generate unique filename based on repair dataset path
-    # Use dataset filename (without extension) to create unique identifier
-    dataset_name = Path(repair_dataset).stem
-    baseline_json = (base_dir / f"{vad_lower}_baseline_{dataset_name}.json").resolve()
-    log_file = (base_dir / f"{vad_lower}_baseline_{dataset_name}.log").resolve()
+    # Decide baseline JSON + log file paths
+    if target_filename is not None:
+        # Use user-specified filename inside base_dir (e.g., shared baseline folder)
+        baseline_json = (base_dir / target_filename).resolve()
+        log_stem = Path(target_filename).stem
+        log_file = (base_dir / f"{log_stem}.log").resolve()
+    else:
+        # Generate unique filename based on repair dataset path
+        # Use dataset filename (without extension) to create unique identifier
+        dataset_name = Path(repair_dataset).stem
+        baseline_json = (base_dir / f"{vad_lower}_baseline_{dataset_name}.json").resolve()
+        log_file = (base_dir / f"{vad_lower}_baseline_{dataset_name}.log").resolve()
     
     # Check if baseline already exists
     if baseline_json.exists() and not regenerate:
@@ -405,11 +412,57 @@ def run_single_experiment(run_idx, vad_name, repair_dataset, eval_dataset,
     print(f"Experiment: {exp_name}")
     print(f"{'='*80}")
     
-    # Step 1: Generate or load baseline JSON
-    baseline_json = generate_baseline_json(
-        vad_name, repair_dataset, base_dir, repo_root, 
-        args.eval_cuda_device, args.regenerate_baseline
-    )
+    # Step 1: Get baseline JSON
+    # If user provides a precomputed baseline JSON, prefer it:
+    # - If the file exists: use it directly (never regenerate it, even with --regenerate-baseline).
+    # - If it does NOT exist: generate it into the same folder at the specified path.
+    # Otherwise, use a shared "baseline" folder under repo_root to cache/reuse baselines.
+    if getattr(args, 'baseline_json', None):
+        user_baseline = Path(args.baseline_json)
+        if not user_baseline.is_absolute():
+            user_baseline = repo_root / user_baseline
+        user_baseline = user_baseline.resolve()
+
+        baseline_dir = user_baseline.parent
+        baseline_name = user_baseline.name
+
+        if user_baseline.exists():
+            print(f"\nUsing provided baseline JSON: {user_baseline}")
+            baseline_json = user_baseline
+        else:
+            print(f"\nRequested baseline JSON does not exist yet: {user_baseline}")
+            print("Generating it now into the same folder.")
+            baseline_json = generate_baseline_json(
+                vad_name, repair_dataset, baseline_dir, repo_root,
+                args.eval_cuda_device, regenerate=True, target_filename=baseline_name
+            )
+    else:
+        # No explicit baseline-json provided:
+        # use a shared "baseline" folder under repo_root so that
+        # different experiments can automatically reuse the same baseline.
+        vad_lower = vad_name.lower()
+        dataset_name = Path(repair_dataset).stem
+        baseline_dir = repo_root / "baseline"
+        baseline_filename = f"{vad_lower}_baseline_{dataset_name}.json"
+        baseline_json = (baseline_dir / baseline_filename).resolve()
+
+        if baseline_json.exists():
+            # If the baseline already exists in the shared folder, always reuse it,
+            # even if --regenerate-baseline=True was passed. This avoids regenerating
+            # the same baseline JSON/log on every run.
+            print(f"\nBaseline JSON already exists in shared baseline folder: {baseline_json}")
+            print("Reusing existing baseline (no regeneration).")
+        else:
+            # File does not exist yet → generate it once into the shared baseline folder.
+            baseline_json = generate_baseline_json(
+                vad_name,
+                repair_dataset,
+                baseline_dir,
+                repo_root,
+                args.eval_cuda_device,
+                regenerate=True,
+                target_filename=baseline_filename,
+            )
     if not baseline_json:
         return False
     
@@ -521,7 +574,16 @@ def main():
     parser.add_argument('--closed-loop-planner-type', type=str, default='only_traj')
     parser.add_argument('--closed-loop-is-bench2drive', type=str, default='True')
     
-    # Baseline generation
+    # Baseline JSON control
+    parser.add_argument(
+        '--baseline-json',
+        type=str,
+        default=None,
+        help='Path to a precomputed baseline JSON file. '
+             'If set and the file exists, it will be reused directly (no regeneration). '
+             'If it does not exist, it will be generated once at that path.'
+    )
+    # Baseline generation (only used when --baseline-json is not provided)
     parser.add_argument(
         '--regenerate-baseline',
         type=str2bool,
