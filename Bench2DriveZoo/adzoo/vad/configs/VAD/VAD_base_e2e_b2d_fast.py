@@ -482,7 +482,7 @@ inference_only_pipeline = [
 
 data = dict(
     samples_per_gpu=1,
-    workers_per_gpu=6,
+    workers_per_gpu=10,
     train=dict(
 
         type=dataset_type,
