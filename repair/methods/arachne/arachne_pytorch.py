@@ -825,6 +825,7 @@ class ArachnePyTorch:
         named_modules = dict(modified_model.named_modules())
         
         # Pre-compute original weight ranges for each layer (for safety bounds)
+        # IMPORTANT: Use original method (symmetric extension) to match DE optimizer
         layer_weight_bounds = {}
         for weight_info in weights_to_repair:
             layer_name = weight_info[0]
@@ -835,10 +836,8 @@ class ArachnePyTorch:
                     weight_min = float(np.min(layer_weights))  # lb
                     weight_max = float(np.max(layer_weights))  # ub
                     weight_range = weight_max - weight_min
-                    # Allow weights to vary symmetrically: extend range by 0.5x on each side
-                    # This works correctly even when lb is negative
-                    # New range: [lb - 0.5*range, ub + 0.5*range]
-                    # This expands the range symmetrically from both ends (more conservative)
+                    # Original method: symmetric extension by 50% on each side
+                    # This matches the old PSO implementation
                     layer_weight_bounds[layer_name] = {
                         'min': weight_min - weight_range * 0.5,
                         'max': weight_max + weight_range * 0.5

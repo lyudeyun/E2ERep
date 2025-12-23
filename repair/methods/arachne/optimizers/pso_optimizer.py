@@ -48,11 +48,11 @@ class PSOOptimizer:
     
     def initialize_population(self, model, weights_to_repair):
         """
-        Initialize PSO particles.
+        Initialize PSO particles using original weight values with small perturbations.
         
-        Uses the same initialization method as DE (Arachne v2 style):
-        - Compute mean and std for each layer's entire weight matrix
-        - For each weight to repair, sample its initial value from N(mean, std)
+        For each weight to repair, initialize near its original value with small random perturbation.
+        This ensures initial population is close to the original model, providing better starting point.
+        Same method as old PSO implementation.
         
         Parameters
         ----------
@@ -66,32 +66,32 @@ class PSOOptimizer:
         particles : list
             List of particle dictionaries
         """
-        # Pre-compute mean and std for each layer (Arachne v2 style, same as DE)
+        # Pre-compute weight ranges for each layer (for bounds and initialization)
+        # Same structure as old PSO: compute extended bounds and store both original and extended ranges
         named_modules = dict(model.named_modules())
-        layer_stats = {}  # {layer_name: {'mean': float, 'std': float}}
+        layer_ranges = {}  # {layer_name: {'min': float, 'max': float, 'range': float, 'original_min': float, 'original_max': float, 'original_range': float}}
         
         for weight_info in weights_to_repair:
             layer_name = weight_info[0]
-            if layer_name not in layer_stats:
+            if layer_name not in layer_ranges:
                 if layer_name in named_modules:
                     layer = named_modules[layer_name]
                     layer_weights = layer.weight.detach().cpu().numpy()
-                    layer_stats[layer_name] = {
-                        'mean': float(np.mean(layer_weights)),
-                        'std': float(np.std(layer_weights))
+                    weight_min = float(np.min(layer_weights))
+                    weight_max = float(np.max(layer_weights))
+                    weight_range = weight_max - weight_min
+                    # Store extended bounds (same as old PSO)
+                    layer_ranges[layer_name] = {
+                        'min': weight_min - weight_range * 0.5,  # Extended bound
+                        'max': weight_max + weight_range * 0.5,  # Extended bound
+                        'range': weight_range,  # Original range
+                        'original_min': weight_min,
+                        'original_max': weight_max,
+                        'original_range': weight_range
                     }
                 else:
                     # Fallback
-                    layer_stats[layer_name] = {'mean': 0.0, 'std': 0.1}
-        
-        # Build mean_values and std_values for each weight to repair (Arachne v2 style)
-        mean_values = []
-        std_values = []
-        for weight_info in weights_to_repair:
-            layer_name = weight_info[0]
-            stats = layer_stats[layer_name]
-            mean_values.append(stats['mean'])
-            std_values.append(stats['std'])
+                    layer_ranges[layer_name] = {'min': -1.0, 'max': 1.0, 'range': 2.0, 'original_min': -1.0, 'original_max': 1.0, 'original_range': 2.0}
         
         # Initialize particles
         particles = []
@@ -103,18 +103,33 @@ class PSOOptimizer:
                 'best_fitness': float('inf')
             }
             
-            # Sample from normal distribution for each weight (Arachne v2 style, same as DE)
-            for idx, weight_info in enumerate(weights_to_repair):
+            # Initialize near original weights with small perturbations (same as old PSO)
+            for weight_info in weights_to_repair:
                 layer_name, i, j = weight_info[0], weight_info[1], weight_info[2]
                 key = (layer_name, i, j)
                 
-                # Sample from N(mean, std)
-                sampled_value = np.random.normal(loc=mean_values[idx], scale=std_values[idx], size=1)[0]
-                particle['position'][key] = float(sampled_value)
+                # Get original weight value
+                if layer_name in named_modules:
+                    layer = named_modules[layer_name]
+                    original_weight = float(layer.weight[j, i].item())
+                else:
+                    layer_info = layer_ranges.get(layer_name, {'min': -1.0, 'max': 1.0, 'original_min': -1.0, 'original_max': 1.0})
+                    original_weight = (layer_info.get('original_min', -1.0) + layer_info.get('original_max', 1.0)) / 2.0
                 
-                # Initialize velocity (small random value)
-                velocity_scale = std_values[idx] * 0.1  # Use 10% of std as velocity scale
-                particle['velocity'][key] = np.random.uniform(-velocity_scale, velocity_scale)
+                # Initialize near original with small perturbation
+                layer_info = layer_ranges.get(layer_name, {'min': -1.0, 'max': 1.0, 'range': 2.0})
+                weight_min = layer_info['min']
+                weight_max = layer_info['max']
+                weight_range = layer_info.get('range', weight_max - weight_min)
+                
+                perturbation_range = weight_range * 0.1  # 10% of weight range
+                initial_weight = original_weight + np.random.uniform(-perturbation_range, perturbation_range)
+                initial_weight = np.clip(initial_weight, weight_min, weight_max)
+                particle['position'][key] = float(initial_weight)
+                
+                # Initialize velocity (small random value, same as old PSO)
+                velocity_range = weight_range * 0.1  # 10% of weight range
+                particle['velocity'][key] = np.random.uniform(-velocity_range, velocity_range)
                 particle['best_position'][key] = particle['position'][key]
             
             particles.append(particle)
@@ -225,7 +240,8 @@ class PSOOptimizer:
                 global_best_position[key] = float(layer.weight[j, i].item())
         global_best_model = copy.deepcopy(model)
         
-        # Pre-compute bounds for each layer (Arachne v2 style, same as DE)
+        # Pre-compute bounds for each layer (original method: symmetric extension)
+        # Same as old PSO implementation: extend range by 50% on each side
         named_modules = dict(model.named_modules())
         weight_ranges = {}
         
@@ -236,16 +252,16 @@ class PSOOptimizer:
                 if layer_name in named_modules:
                     layer = named_modules[layer_name]
                     layer_weights = layer.weight.detach().cpu().numpy()
-                    min_v = float(np.min(layer_weights))
-                    max_v = float(np.max(layer_weights))
-                    # Arachne v2 bounds calculation (same as DE)
-                    min_v = min_v * 2 if min_v < 0 else min_v / 2
-                    max_v = max_v * 2 if max_v > 0 else max_v / 2
-                    weight_range = max_v - min_v
+                    weight_min = float(np.min(layer_weights))
+                    weight_max = float(np.max(layer_weights))
+                    weight_range = weight_max - weight_min
+                    # Original method: symmetric extension by 50% on each side
+                    bound_min = weight_min - weight_range * 0.5
+                    bound_max = weight_max + weight_range * 0.5
                     weight_ranges[layer_name] = {
-                        'min': min_v,
-                        'max': max_v,
-                        'velocity_max': abs(weight_range) * 0.5  # For PSO velocity clamping
+                        'min': bound_min,
+                        'max': bound_max,
+                        'velocity_max': weight_range * 0.5  # For PSO velocity clamping
                     }
                 else:
                     # Fallback

@@ -57,10 +57,10 @@ class DEOptimizer:
     
     def initialize_population(self, model, weights_to_repair):
         """
-        Initialize DE population (individuals) using Arachne v2 method.
+        Initialize DE population (individuals) using original weight values with small perturbations.
         
-        For each weight to repair, use the mean and std of its layer's entire weight matrix
-        to sample from normal distribution: N(mean, std).
+        For each weight to repair, initialize near its original value with small random perturbation.
+        This ensures initial population is close to the original model, providing better starting point.
         
         Parameters
         ----------
@@ -74,44 +74,61 @@ class DEOptimizer:
         individuals : list
             List of individual dictionaries
         """
-        # Pre-compute mean and std for each layer (Arachne v2 style)
+        # Pre-compute weight ranges for each layer (for bounds and initialization)
+        # Same structure as old PSO: compute extended bounds and store both original and extended ranges
         named_modules = dict(model.named_modules())
-        layer_stats = {}  # {layer_name: {'mean': float, 'std': float}}
+        layer_ranges = {}  # {layer_name: {'min': float, 'max': float, 'range': float, 'original_min': float, 'original_max': float, 'original_range': float}}
         
         for weight_info in weights_to_repair:
             layer_name = weight_info[0]
-            if layer_name not in layer_stats:
+            if layer_name not in layer_ranges:
                 if layer_name in named_modules:
                     layer = named_modules[layer_name]
                     layer_weights = layer.weight.detach().cpu().numpy()
-                    layer_stats[layer_name] = {
-                        'mean': float(np.mean(layer_weights)),
-                        'std': float(np.std(layer_weights))
+                    weight_min = float(np.min(layer_weights))
+                    weight_max = float(np.max(layer_weights))
+                    weight_range = weight_max - weight_min
+                    # Store extended bounds (same as old PSO)
+                    layer_ranges[layer_name] = {
+                        'min': weight_min - weight_range * 0.5,  # Extended bound
+                        'max': weight_max + weight_range * 0.5,  # Extended bound
+                        'range': weight_range,  # Original range
+                        'original_min': weight_min,
+                        'original_max': weight_max,
+                        'original_range': weight_range
                     }
                 else:
                     # Fallback
-                    layer_stats[layer_name] = {'mean': 0.0, 'std': 0.1}
-        
-        # Build mean_values and std_values for each weight to repair (Arachne v2 style)
-        mean_values = []
-        std_values = []
-        for weight_info in weights_to_repair:
-            layer_name = weight_info[0]
-            stats = layer_stats[layer_name]
-            mean_values.append(stats['mean'])
-            std_values.append(stats['std'])
+                    layer_ranges[layer_name] = {'min': -1.0, 'max': 1.0, 'range': 2.0, 'original_min': -1.0, 'original_max': 1.0, 'original_range': 2.0}
         
         # Initialize population
         individuals = []
         for _ in range(self.num_particles):
-            # Sample from normal distribution for each weight (Arachne v2 style)
+            # Initialize near original weights with small perturbations
             position = {}
-            for idx, weight_info in enumerate(weights_to_repair):
+            for weight_info in weights_to_repair:
                 layer_name, i, j = weight_info[0], weight_info[1], weight_info[2]
                 key = (layer_name, i, j)
-                # Sample from N(mean, std)
-                sampled_value = np.random.normal(loc=mean_values[idx], scale=std_values[idx], size=1)[0]
-                position[key] = float(sampled_value)
+                
+                # Get original weight value
+                if layer_name in named_modules:
+                    layer = named_modules[layer_name]
+                    original_weight = float(layer.weight[j, i].item())
+                else:
+                    layer_info = layer_ranges.get(layer_name, {'min': -1.0, 'max': 1.0, 'original_min': -1.0, 'original_max': 1.0})
+                    original_weight = (layer_info.get('original_min', -1.0) + layer_info.get('original_max', 1.0)) / 2.0
+                
+                # Initialize near original with small perturbation
+                layer_info = layer_ranges.get(layer_name, {'min': -1.0, 'max': 1.0, 'range': 2.0})
+                weight_min = layer_info['min']
+                weight_max = layer_info['max']
+                weight_range = layer_info.get('range', weight_max - weight_min)
+                
+                perturbation_range = weight_range * 0.1  # 10% of weight range
+                initial_weight = original_weight + np.random.uniform(-perturbation_range, perturbation_range)
+                initial_weight = np.clip(initial_weight, weight_min, weight_max)
+                
+                position[key] = float(initial_weight)
             
             individual = {
                 'position': position,
@@ -193,8 +210,9 @@ class DEOptimizer:
                 global_best_position[key] = float(layer.weight[j, i].item())
         global_best_model = copy.deepcopy(model)
         
-        # Pre-compute bounds for each weight to repair (Arachne v2 style)
+        # Pre-compute bounds for each weight to repair (original method: symmetric extension)
         # For each weight, use its layer's entire weight matrix min/max
+        # Then extend symmetrically by 50% on each side (same as old PSO implementation)
         named_modules = dict(model.named_modules())
         bounds = []  # List of (min, max) for each weight to repair
         
@@ -203,18 +221,20 @@ class DEOptimizer:
             if layer_name in named_modules:
                 layer = named_modules[layer_name]
                 layer_weights = layer.weight.detach().cpu().numpy()
-                min_v = float(np.min(layer_weights))
-                max_v = float(np.max(layer_weights))
-                # Arachne v2 bounds calculation
-                min_v = min_v * 2 if min_v < 0 else min_v / 2
-                max_v = max_v * 2 if max_v > 0 else max_v / 2
-                bounds.append((min_v, max_v))
+                weight_min = float(np.min(layer_weights))
+                weight_max = float(np.max(layer_weights))
+                weight_range = weight_max - weight_min
+                # Original method: symmetric extension by 50% on each side
+                bound_min = weight_min - weight_range * 0.5
+                bound_max = weight_max + weight_range * 0.5
+                bounds.append((bound_min, bound_max))
             else:
                 # Fallback
                 bounds.append((-2.0, 2.0))
         
         # Evaluate initial population
         print("Evaluating initial DE population...", flush=True)
+        initial_fitnesses = []
         for idx, individual in enumerate(individuals):
             modified_model = apply_weights_fn(
                 model, weights_to_repair, individual['position']
@@ -233,6 +253,7 @@ class DEOptimizer:
             
             individual['fitness'] = fitness
             individual['best_fitness'] = fitness
+            initial_fitnesses.append(fitness)
             
             # Update global best
             if fitness < global_best_fitness:
@@ -242,6 +263,12 @@ class DEOptimizer:
         
         fitness_history.append(global_best_fitness)
         print(f"Initial population best fitness: {global_best_fitness:.6f}", flush=True)
+        if len(initial_fitnesses) > 0:
+            print(f"  Initial population fitness range: {min(initial_fitnesses):.6f} ~ {max(initial_fitnesses):.6f}", flush=True)
+            print(f"  Initial population fitness mean: {sum(initial_fitnesses)/len(initial_fitnesses):.6f}", flush=True)
+            print(f"  Initial population unique fitness count: {len(set(initial_fitnesses))}/{len(initial_fitnesses)}", flush=True)
+            # Print first 5 fitness values for debugging
+            print(f"  First 5 fitness values: {[f'{f:.2f}' for f in initial_fitnesses[:5]]}", flush=True)
         
         # Early stopping variables
         best_fitness_so_far = global_best_fitness

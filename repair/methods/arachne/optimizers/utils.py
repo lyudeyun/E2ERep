@@ -35,10 +35,9 @@ def compute_weight_ranges(model, weights_to_repair):
                 weight_min = float(np.min(layer_weights))
                 weight_max = float(np.max(layer_weights))
                 weight_range = weight_max - weight_min
-                weight_range_extended = weight_range * 1.0
                 weight_ranges[layer_name] = {
-                    'min': weight_min - weight_range_extended * 0.5,
-                    'max': weight_max + weight_range_extended * 0.5,
+                    'min': weight_min - weight_range * 0.5,
+                    'max': weight_max + weight_range * 0.5,
                     'velocity_max': weight_range * 0.5  # For PSO
                 }
             else:
