@@ -691,12 +691,12 @@ class ArachnePyTorch:
         if use_vad_eval:
             if frame_data_dict is None:
                 raise ValueError("use_vad_eval=True requires frame_data_dict")
-            # For Arachne_v1: positive_frames and negative_frames are not used in evaluation
+            # For Arachne_v1 and Arachne_v2: positive_frames and negative_frames are not used in evaluation
             # (evaluation uses ALL frames in frame_data_dict)
             # For semSegRep: they may be needed, so check if rep_method is semSegRep
-            if rep_method != 'Arachne_v1' and (positive_frames is None or negative_frames is None):
+            if rep_method not in ['Arachne_v1', 'Arachne_v2'] and (positive_frames is None or negative_frames is None):
                 raise ValueError(f"use_vad_eval=True with rep_method={rep_method} requires positive_frames and negative_frames")
-            if rep_method == 'Arachne_v1':
+            if rep_method in ['Arachne_v1', 'Arachne_v2']:
                 print("Using open-loop VAD evaluation with saved ego_features", flush=True)
                 print("  Note: positive_frames and negative_frames are not used (evaluates ALL frames)", flush=True)
             else:
@@ -1017,18 +1017,18 @@ class ArachnePyTorch:
         
         # SIMPLE FIX: For original model evaluation, directly use positive_frames and negative_frames
         # BUT: 
-        #   - For Arachne_v1: positive_frames/negative_frames are not used (evaluates ALL frames), so disable fast path
+        #   - For Arachne_v1 and Arachne_v2: positive_frames/negative_frames are not used (evaluates ALL frames), so disable fast path
         #   - For semSegRep with median threshold: cannot use fast path because positive_frames/negative_frames
         #     were extracted using a different threshold (0.5) than what we use for evaluation (median L2)
         can_use_fast_path = (use_original_l2_for_classification and 
-                            rep_method != 'Arachne_v1' and  # Arachne_v1 doesn't use positive_frames/negative_frames
+                            rep_method not in ['Arachne_v1', 'Arachne_v2'] and  # Arachne_v1/v2 don't use positive_frames/negative_frames
                             positive_frames is not None and negative_frames is not None and 
                             len(positive_frames) > 0 and len(negative_frames) > 0 and
                             not (rep_method == 'semSegRep' and use_median_threshold))
         
         if use_original_l2_for_classification:
-            if rep_method == 'Arachne_v1':
-                # Arachne_v1 doesn't use positive_frames/negative_frames, always use normal evaluation
+            if rep_method in ['Arachne_v1', 'Arachne_v2']:
+                # Arachne_v1/v2 don't use positive_frames/negative_frames, always use normal evaluation
                 pass  # Silent, no warning needed
             elif rep_method == 'semSegRep' and use_median_threshold:
                 print(f"  [INFO] semSegRep with median threshold: Cannot use fast path (threshold mismatch), will recompute L2")
