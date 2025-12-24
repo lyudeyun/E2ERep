@@ -666,7 +666,7 @@ def main():
         print(f"  Will compute GL and FI separately for changed and unchanged samples,")
         print(f"  then combine using cost_chgd / (1 + cost_unchgd)")
         weights = arachne.localize(
-            wrapper, input_neg, input_pos=input_pos, 
+            wrapper, input_neg, input_pos=input_pos,
             output_dir=output_dir, use_changed_unchanged=True
         )
     else:

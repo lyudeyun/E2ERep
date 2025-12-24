@@ -83,7 +83,8 @@ def generate_experiment_name(vad_name, rep_method, search_algo, search_algo_para
 
 
 def generate_baseline_json(vad_name, repair_dataset, base_dir, repo_root, 
-                           cuda_device='0', regenerate=False, target_filename=None):
+                           cuda_device='0', regenerate=False,
+                           target_filename=None, cfg_options=None):
     """
     Generate baseline JSON by evaluating original model on repair dataset.
     
@@ -114,9 +115,10 @@ def generate_baseline_json(vad_name, repair_dataset, base_dir, repo_root,
         log_file = (base_dir / f"{vad_lower}_baseline_{dataset_name}.log").resolve()
     
     # Check if baseline already exists
-    if baseline_json.exists() and not regenerate:
+    # If file exists, always reuse it (ignore regenerate flag to avoid unnecessary recomputation)
+    if baseline_json.exists():
         print(f"\nBaseline JSON already exists: {baseline_json}")
-        print("Skipping baseline generation. Use --regenerate-baseline to force regeneration.")
+        print("Reusing existing baseline (regenerate flag is ignored if file exists).")
         return baseline_json
     
     print("\n" + "="*80)
@@ -129,6 +131,10 @@ def generate_baseline_json(vad_name, repair_dataset, base_dir, repo_root,
     baseline_json.parent.mkdir(parents=True, exist_ok=True)
     log_file.parent.mkdir(parents=True, exist_ok=True)
 
+    # Build cfg-options string
+    if cfg_options is None:
+        cfg_options = f"data.test.ann_file='{repair_dataset}'"
+
     cmd = [
         f"CUDA_VISIBLE_DEVICES={cuda_device}",
         sys.executable,
@@ -136,7 +142,7 @@ def generate_baseline_json(vad_name, repair_dataset, base_dir, repo_root,
         str(repo_root / "Bench2DriveZoo" / "adzoo" / "vad" / "test.py"),
         str(vad_paths['config']),
         str(vad_paths['checkpoint']),
-        '--cfg-options', f"data.test.ann_file='{repair_dataset}'",
+        '--cfg-options', cfg_options,
         '--launcher', 'none',
         '--eval', 'bbox',
         '--tmpdir', 'tmp',
@@ -144,11 +150,15 @@ def generate_baseline_json(vad_name, repair_dataset, base_dir, repo_root,
         '--data-output', str(baseline_json),
     ]
     
-    print(f"Command: {' '.join(cmd)}")
+    cmd_str = ' '.join(cmd)
+    print(f"Command: {cmd_str}")
     
     b2d_root = repo_root / "Bench2DriveZoo"
     with open(log_file, 'w', buffering=1) as f:  # Line buffering for real-time output
-        result = subprocess.run(' '.join(cmd), shell=True, cwd=b2d_root, 
+        # Also record the exact command (including cfg-options) into the log for debugging.
+        f.write(f"CMD: {cmd_str}\n")
+        f.flush()
+        result = subprocess.run(cmd_str, shell=True, cwd=b2d_root,
                               stdout=f, stderr=subprocess.STDOUT, text=True, bufsize=1)
     
     if result.returncode != 0 or not baseline_json.exists():
@@ -237,7 +247,7 @@ def run_repair(vad_name, baseline_json, exp_dir, repo_root,
 
 
 def run_evaluation(vad_name, repaired_model, eval_dataset, exp_dir, repo_root, 
-                   cuda_device='0'):
+                   cuda_device='0', use_tmpfs_data=False):
     """Run evaluation process."""
     print("\n" + "="*80)
     print("Running Open-loop Evaluation")
@@ -253,6 +263,25 @@ def run_evaluation(vad_name, repaired_model, eval_dataset, exp_dir, repo_root,
     vad_lower = vad_name.lower()
     output_json = (eval_dir / f"{vad_lower}_rep_val.json").resolve()
     
+    # Build cfg-options string (optionally override data roots to tmpfs)
+    ann_file = str(eval_dataset)
+    if use_tmpfs_data:
+        tmpfs_base = "/mnt/bench2drive_ram"
+        cfg_options = " ".join([
+            f"data_root='{tmpfs_base}/bench2drive'",
+            f"info_root='{tmpfs_base}/infos'",
+            f"map_root='{tmpfs_base}/bench2drive/maps'",
+            f"map_file='{tmpfs_base}/b2d_map_infos.pkl'",
+            f"data.test.ann_file='{ann_file}'",
+        ])
+        print("\nUsing tmpfs dataset for evaluation:")
+        print(f"  data_root={tmpfs_base}/bench2drive")
+        print(f"  info_root={tmpfs_base}/infos")
+        print(f"  map_root={tmpfs_base}/bench2drive/maps")
+        print(f"  map_file={tmpfs_base}/b2d_map_infos.pkl")
+    else:
+        cfg_options = f"data.test.ann_file='{ann_file}'"
+
     cmd = [
         f"CUDA_VISIBLE_DEVICES={cuda_device}",
         sys.executable,
@@ -260,7 +289,7 @@ def run_evaluation(vad_name, repaired_model, eval_dataset, exp_dir, repo_root,
         str(repo_root / "Bench2DriveZoo" / "adzoo" / "vad" / "test.py"),
         str(vad_paths['config']),
         str(repaired_model),
-        '--cfg-options', f"data.test.ann_file='{eval_dataset}'",
+        '--cfg-options', cfg_options,
         '--launcher', 'none',
         '--eval', 'bbox',
         '--tmpdir', 'tmp',
@@ -268,12 +297,16 @@ def run_evaluation(vad_name, repaired_model, eval_dataset, exp_dir, repo_root,
         '--data-output', str(output_json),
     ]
     
-    print(f"Command: {' '.join(cmd)}")
+    cmd_str = ' '.join(cmd)
+    print(f"Command: {cmd_str}")
     log_file = (eval_dir / f"{vad_lower}_rep_val.log").resolve()
     
     b2d_root = repo_root / "Bench2DriveZoo"
     with open(log_file, 'w', buffering=1) as f:  # Line buffering for real-time output
-        result = subprocess.run(' '.join(cmd), shell=True, cwd=b2d_root,
+        # Record the exact command (including cfg-options) into the log.
+        f.write(f"CMD: {cmd_str}\n")
+        f.flush()
+        result = subprocess.run(cmd_str, shell=True, cwd=b2d_root,
                               stdout=f, stderr=subprocess.STDOUT, text=True, bufsize=1)
     
     if result.returncode != 0:
@@ -394,6 +427,24 @@ def run_closed_loop_evaluation(vad_name, repaired_model, exp_dir, repo_root, arg
 def run_single_experiment(run_idx, vad_name, repair_dataset, eval_dataset, 
                           base_dir, repo_root, args):
     """Run a single experiment."""
+    # Helper to build cfg-options string for Bench2Drive data.
+    def _build_cfg_options(ann_file: str) -> str:
+        if getattr(args, "use_tmpfs_data", False):
+            tmpfs_base = "/mnt/bench2drive_ram"
+            print("\nUsing tmpfs dataset for baseline/evaluation:")
+            print(f"  data_root={tmpfs_base}/bench2drive")
+            print(f"  info_root={tmpfs_base}/infos")
+            print(f"  map_root={tmpfs_base}/bench2drive/maps")
+            print(f"  map_file={tmpfs_base}/b2d_map_infos.pkl")
+            return " ".join([
+                f"data_root='{tmpfs_base}/bench2drive'",
+                f"info_root='{tmpfs_base}/infos'",
+                f"map_root='{tmpfs_base}/bench2drive/maps'",
+                f"map_file='{tmpfs_base}/b2d_map_infos.pkl'",
+                f"data.test.ann_file='{ann_file}'",
+            ])
+        return f"data.test.ann_file='{ann_file}'"
+
     # Generate experiment name
     search_algo_params = {
         'num_weights_to_repair': args.repair_num_weights,
@@ -414,9 +465,10 @@ def run_single_experiment(run_idx, vad_name, repair_dataset, eval_dataset,
     
     # Step 1: Get baseline JSON
     # If user provides a precomputed baseline JSON, prefer it:
-    # - If the file exists: use it directly (never regenerate it, even with --regenerate-baseline).
+    # - If the file exists: use it directly (regenerate flag is ignored).
     # - If it does NOT exist: generate it into the same folder at the specified path.
     # Otherwise, use a shared "baseline" folder under repo_root to cache/reuse baselines.
+    # Note: If baseline JSON exists, it is always reused (regenerate flag is ignored).
     if getattr(args, 'baseline_json', None):
         user_baseline = Path(args.baseline_json)
         if not user_baseline.is_absolute():
@@ -433,8 +485,14 @@ def run_single_experiment(run_idx, vad_name, repair_dataset, eval_dataset,
             print(f"\nRequested baseline JSON does not exist yet: {user_baseline}")
             print("Generating it now into the same folder.")
             baseline_json = generate_baseline_json(
-                vad_name, repair_dataset, baseline_dir, repo_root,
-                args.eval_cuda_device, regenerate=True, target_filename=baseline_name
+                vad_name,
+                repair_dataset,
+                baseline_dir,
+                repo_root,
+                args.eval_cuda_device,
+                regenerate=True,
+                target_filename=baseline_name,
+                cfg_options=_build_cfg_options(str(repair_dataset)),
             )
     else:
         # No explicit baseline-json provided:
@@ -447,11 +505,10 @@ def run_single_experiment(run_idx, vad_name, repair_dataset, eval_dataset,
         baseline_json = (baseline_dir / baseline_filename).resolve()
 
         if baseline_json.exists():
-            # If the baseline already exists in the shared folder, always reuse it,
-            # even if --regenerate-baseline=True was passed. This avoids regenerating
-            # the same baseline JSON/log on every run.
+            # If the baseline already exists in the shared folder, always reuse it.
+            # The regenerate flag is ignored if file exists (to avoid unnecessary recomputation).
             print(f"\nBaseline JSON already exists in shared baseline folder: {baseline_json}")
-            print("Reusing existing baseline (no regeneration).")
+            print("Reusing existing baseline (regenerate flag is ignored if file exists).")
         else:
             # File does not exist yet → generate it once into the shared baseline folder.
             baseline_json = generate_baseline_json(
@@ -460,9 +517,11 @@ def run_single_experiment(run_idx, vad_name, repair_dataset, eval_dataset,
                 baseline_dir,
                 repo_root,
                 args.eval_cuda_device,
-                regenerate=True,
+                regenerate=False,  # Not used since we check existence above
                 target_filename=baseline_filename,
+                cfg_options=_build_cfg_options(str(repair_dataset)),
             )
+    
     if not baseline_json:
         return False
     
@@ -485,8 +544,13 @@ def run_single_experiment(run_idx, vad_name, repair_dataset, eval_dataset,
     
     # Step 3: Run evaluation
     success = run_evaluation(
-        vad_name, repaired_model, eval_dataset, exp_dir, repo_root,
-        cuda_device=args.eval_cuda_device
+        vad_name,
+        repaired_model,
+        eval_dataset,
+        exp_dir,
+        repo_root,
+        cuda_device=args.eval_cuda_device,
+        use_tmpfs_data=getattr(args, "use_tmpfs_data", False),
     )
 
     if not success:
@@ -545,6 +609,17 @@ def main():
     
     # Evaluation parameters
     parser.add_argument('--eval-cuda-device', type=str, default='0')
+    parser.add_argument(
+        '--use-tmpfs-data',
+        type=str2bool,
+        default=False,
+        help=(
+            'If true, assume Bench2Drive data has been copied to tmpfs at '
+            '/mnt/bench2drive_ram (see mytools/COPY_TO_TMPFS.sh) and override '
+            'data_root/info_root/map_root/map_file to use that path for both '
+            'baseline generation and evaluation.'
+        ),
+    )
 
     # Closed-loop evaluation (leaderboard)
     # Default False. Enable with `--closed-loop-eval True`.
@@ -588,8 +663,9 @@ def main():
         '--regenerate-baseline',
         type=str2bool,
         default=False,
-        help='Force regeneration of baseline JSON even if it exists (default: False). '
-             'Use `--regenerate-baseline True` to enable.'
+        help='[DEPRECATED] This flag is ignored if baseline JSON already exists. '
+             'Baseline JSON is always reused if found to avoid unnecessary recomputation. '
+             'Only used when baseline JSON does not exist yet.'
     )
     
     args = parser.parse_args()
@@ -608,6 +684,41 @@ def main():
     repo_root = Path(__file__).parent.absolute()
     base_dir = Path(args.exp_dir)
     base_dir.mkdir(exist_ok=True)
+
+    # If using tmpfs data, sanity-check that the in-memory dataset exists.
+    if getattr(args, "use_tmpfs_data", False):
+        tmpfs_base = Path("/mnt/bench2drive_ram")
+        data_root = tmpfs_base / "bench2drive"
+        info_root = tmpfs_base / "infos"
+        map_root = tmpfs_base / "bench2drive" / "maps"
+        map_file = tmpfs_base / "b2d_map_infos.pkl"
+
+        print("\n[use-tmpfs-data] Enabled. Expecting dataset under /mnt/bench2drive_ram ...")
+        missing = []
+        if not (data_root.is_dir() and any(data_root.iterdir())):
+            missing.append(str(data_root))
+        if not (info_root.is_dir() and any(info_root.iterdir())):
+            missing.append(str(info_root))
+        if not (map_root.is_dir() and any(map_root.iterdir())):
+            missing.append(str(map_root))
+        if not map_file.is_file():
+            missing.append(str(map_file))
+
+        if missing:
+            print("ERROR: --use-tmpfs-data is True, but the following paths are missing or empty:")
+            for p in missing:
+                print(f"  - {p}")
+            print("\nPlease first load the Bench2Drive dataset into memory, e.g.:")
+            print("  cd", repo_root)
+            print("  sudo bash mytools/COPY_TO_TMPFS.sh")
+            print("Then re-run this script with --use-tmpfs-data=True.")
+            return 1
+        else:
+            print("Found tmpfs dataset:")
+            print(f"  data_root={data_root}")
+            print(f"  info_root={info_root}")
+            print(f"  map_root={map_root}")
+            print(f"  map_file={map_file}")
 
     # Closed-loop: provide a sensible default CARLA root for this repo
     # (avoids requiring the user to export CARLA_ROOT every time).
