@@ -578,9 +578,10 @@ def main():
                             'or semSegRep (fixed threshold baseline)')
     parser.add_argument('--search-algo', choices=['PSO', 'DE'], default='PSO',
                        help='Search algorithm: PSO (Particle Swarm Optimization) or DE (Differential Evolution)')
-    parser.add_argument('--fitness', choices=['continuous', 'continuous2', 'discrete'],
+    parser.add_argument('--fitness', choices=['continuous', 'continuous2', 'discrete', 'all'],
                        default='continuous',
-                       help='Fitness type: continuous (total L2), continuous2 (total L2 + collision penalty), or discrete')
+                       help='Fitness type: continuous (total L2), continuous2 (total L2 + collision penalty), '
+                            'discrete (success rate), or all (run all three types sequentially)')
     parser.add_argument('--run-idx', type=int, default=None,
                        help='Run index (auto-detected if not provided)')
     parser.add_argument('--num-runs', type=int, default=1,
@@ -736,32 +737,88 @@ def main():
         eval_dataset = repo_root / eval_dataset
     
     # Run experiments
-    success_count = 0
-    for run_num in range(1, args.num_runs + 1):
+    # If fitness is 'all', run all three fitness types sequentially
+    if args.fitness == 'all':
+        fitness_types = ['discrete', 'continuous', 'continuous2']
+        total_success_count = 0
+        total_experiments = len(fitness_types) * args.num_runs
+        
+        print(f"\n{'='*80}")
+        print(f"Running experiments for ALL fitness types: {fitness_types}")
+        print(f"Total experiments: {total_experiments} ({len(fitness_types)} types × {args.num_runs} runs)")
+        print(f"{'='*80}")
+        
+        for fitness_type in fitness_types:
+            print(f"\n{'='*80}")
+            print(f"FITNESS TYPE: {fitness_type.upper()}")
+            print(f"{'='*80}")
+            
+            # Create a copy of args with modified fitness
+            import copy
+            fitness_args = copy.deepcopy(args)
+            fitness_args.fitness = fitness_type
+            
+            # Run experiments for this fitness type
+            fitness_success_count = 0
+            for run_num in range(1, args.num_runs + 1):
+                if args.num_runs > 1:
+                    print(f"\n{'='*80}")
+                    print(f"FITNESS: {fitness_type.upper()} | RUN {run_num}/{args.num_runs}")
+                    print(f"{'='*80}")
+                
+                current_run_idx = args.run_idx if (args.run_idx is not None and run_num == 1) else None
+                success = run_single_experiment(
+                    current_run_idx, args.vad_name, repair_dataset, eval_dataset,
+                    base_dir, repo_root, fitness_args
+                )
+                
+                if success:
+                    fitness_success_count += 1
+                    total_success_count += 1
+                    print(f"\n✅ Fitness {fitness_type} | Run {run_num} completed successfully")
+                else:
+                    print(f"\n❌ Fitness {fitness_type} | Run {run_num} FAILED")
+            
+            # Summary for this fitness type
+            if args.num_runs > 1:
+                print(f"\n{'='*80}")
+                print(f"FITNESS {fitness_type.upper()} SUMMARY: {fitness_success_count}/{args.num_runs} successful")
+                print(f"{'='*80}")
+        
+        # Overall summary
+        print(f"\n{'='*80}")
+        print(f"OVERALL SUMMARY: {total_success_count}/{total_experiments} successful")
+        print(f"{'='*80}")
+        
+        return 0 if total_success_count == total_experiments else 1
+    else:
+        # Normal single fitness type execution
+        success_count = 0
+        for run_num in range(1, args.num_runs + 1):
+            if args.num_runs > 1:
+                print(f"\n{'='*80}")
+                print(f"RUN {run_num}/{args.num_runs}")
+                print(f"{'='*80}")
+            
+            current_run_idx = args.run_idx if (args.run_idx is not None and run_num == 1) else None
+            success = run_single_experiment(
+                current_run_idx, args.vad_name, repair_dataset, eval_dataset,
+                base_dir, repo_root, args
+            )
+            
+            if success:
+                success_count += 1
+                print(f"\n✅ Run {run_num} completed successfully")
+            else:
+                print(f"\n❌ Run {run_num} FAILED")
+        
+        # Summary
         if args.num_runs > 1:
             print(f"\n{'='*80}")
-            print(f"RUN {run_num}/{args.num_runs}")
+            print(f"SUMMARY: {success_count}/{args.num_runs} successful")
             print(f"{'='*80}")
         
-        current_run_idx = args.run_idx if (args.run_idx is not None and run_num == 1) else None
-        success = run_single_experiment(
-            current_run_idx, args.vad_name, repair_dataset, eval_dataset,
-            base_dir, repo_root, args
-        )
-        
-        if success:
-            success_count += 1
-            print(f"\n✅ Run {run_num} completed successfully")
-        else:
-            print(f"\n❌ Run {run_num} FAILED")
-    
-    # Summary
-    if args.num_runs > 1:
-        print(f"\n{'='*80}")
-        print(f"SUMMARY: {success_count}/{args.num_runs} successful")
-        print(f"{'='*80}")
-    
-    return 0 if success_count == args.num_runs else 1
+        return 0 if success_count == args.num_runs else 1
 
 
 if __name__ == "__main__":
