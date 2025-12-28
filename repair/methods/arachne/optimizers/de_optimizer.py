@@ -146,7 +146,7 @@ class DEOptimizer:
                  threshold_good=0.5, threshold_bad=1.0, fitness_type='discrete',
                  rep_method='Arachne_v1', output_dir=None,
                  evaluate_fitness_fn=None, evaluate_fitness_vad_fn=None,
-                 apply_weights_fn=None):
+                 apply_weights_fn=None, time_horizon=3):
         """
         Run DE optimization.
         
@@ -176,7 +176,7 @@ class DEOptimizer:
                 model, frame_data_dict,
                 positive_frames, negative_frames,
                 threshold_good, threshold_bad, fitness_type, rep_method,
-                use_original_l2_for_classification=True
+                use_original_l2_for_classification=True, time_horizon=time_horizon
             )
             # Handle both return formats: (fitness, frame_counts) or just fitness
             if isinstance(result, tuple) and len(result) == 2:
@@ -244,7 +244,8 @@ class DEOptimizer:
                 fitness = evaluate_fitness_vad_fn(
                     modified_model, frame_data_dict,
                     positive_frames, negative_frames,
-                    threshold_good, threshold_bad, fitness_type, rep_method
+                    threshold_good, threshold_bad, fitness_type, rep_method,
+                    time_horizon=time_horizon
                 )
             else:
                 fitness = evaluate_fitness_fn(
@@ -370,7 +371,8 @@ class DEOptimizer:
                     trial_fitness = evaluate_fitness_vad_fn(
                         trial_model, frame_data_dict,
                         positive_frames, negative_frames,
-                        threshold_good, threshold_bad, fitness_type, rep_method
+                        threshold_good, threshold_bad, fitness_type, rep_method,
+                        time_horizon=time_horizon
                     )
                 else:
                     trial_fitness = evaluate_fitness_fn(

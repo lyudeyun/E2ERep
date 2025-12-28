@@ -47,7 +47,7 @@ def get_vad_paths(vad_name, repo_root):
 
 
 def generate_experiment_name(vad_name, rep_method, search_algo, search_algo_params, 
-                             fitness, run_idx, base_dir):
+                             fitness, run_idx, base_dir, time_horizon=3):
     """Generate experiment directory name."""
     w = search_algo_params['num_weights_to_repair']
     p = search_algo_params['num_particles']
@@ -67,9 +67,13 @@ def generate_experiment_name(vad_name, rep_method, search_algo, search_algo_para
     else:
         fitness_str = 'DISC'
     
+    # Add time_horizon to experiment name (e.g., t1s, t2s, t3s)
+    # Place it before rep_method since it's a prerequisite for localization and search
+    time_horizon_str = f"t{time_horizon}s"
+    
     # Auto-detect run_idx
     if run_idx is None:
-        pattern = f"{vad_name}_REP_VAL_{rep_method}_{search_algo}_{search_params}_{fitness_str}_([0-9]+)"
+        pattern = f"{vad_name}_REP_VAL_{time_horizon_str}_{rep_method}_{search_algo}_{search_params}_{fitness_str}_([0-9]+)"
         max_idx = 0
         if base_dir.exists():
             for item in base_dir.iterdir():
@@ -79,7 +83,7 @@ def generate_experiment_name(vad_name, rep_method, search_algo, search_algo_para
                         max_idx = max(max_idx, int(match.group(1)))
         run_idx = max_idx + 1
     
-    return f"{vad_name}_REP_VAL_{rep_method}_{search_algo}_{search_params}_{fitness_str}_{run_idx}"
+    return f"{vad_name}_REP_VAL_{time_horizon_str}_{rep_method}_{search_algo}_{search_params}_{fitness_str}_{run_idx}"
 
 
 def generate_baseline_json(vad_name, repair_dataset, base_dir, repo_root, 
@@ -173,7 +177,7 @@ def run_repair(vad_name, baseline_json, exp_dir, repo_root,
                alpha=0.5, layers='pts_bbox_head.ego_fut_decoder.0 pts_bbox_head.ego_fut_decoder.2',
                fitness_type='continuous', num_particles=200, num_iterations=100, 
                num_weights_to_repair=100, rep_method='Arachne_v1', early_stop_patience=None,
-               search_algo='PSO', cuda_device='0'):
+               search_algo='PSO', cuda_device='0', time_horizon=3):
     """Run repair process."""
     print("\n" + "="*80)
     print("Running Repair")
@@ -206,6 +210,9 @@ def run_repair(vad_name, baseline_json, exp_dir, repo_root,
     # Add early stop patience if enabled (>0). Use 0/None to disable.
     if early_stop_patience is not None and int(early_stop_patience) > 0:
         cmd.extend(['--early-stop-patience', str(early_stop_patience)])
+    
+    # Add time horizon parameter
+    cmd.extend(['--time-horizon', str(time_horizon)])
     
     print(f"Command: {' '.join(cmd)}")
     print(f"Using CUDA device: {cuda_device}")
@@ -454,7 +461,8 @@ def run_single_experiment(run_idx, vad_name, repair_dataset, eval_dataset,
     }
     exp_name = generate_experiment_name(
         vad_name, args.rep_method, args.search_algo, search_algo_params,
-        args.fitness, run_idx, base_dir
+        args.fitness, run_idx, base_dir,
+        time_horizon=getattr(args, 'time_horizon', 3)
     )
     exp_dir = base_dir / exp_name
     exp_dir.mkdir(exist_ok=True)
@@ -537,7 +545,8 @@ def run_single_experiment(run_idx, vad_name, repair_dataset, eval_dataset,
         rep_method=args.rep_method,
         early_stop_patience=args.repair_early_stop_patience,
         search_algo=args.search_algo,
-        cuda_device=args.eval_cuda_device
+        cuda_device=args.eval_cuda_device,
+        time_horizon=getattr(args, 'time_horizon', 3)
     )
     if not repaired_model:
         return False
@@ -607,6 +616,9 @@ def main():
     parser.add_argument('--repair-early-stop-patience', type=int, default=None,
                        help='Early stopping patience for PSO: stop if fitness does not improve for N iterations (default: None, disabled). Example: --repair-early-stop-patience 10')
     parser.add_argument('--repair-num-weights', type=int, default=100)
+    parser.add_argument('--time-horizon', type=int, choices=[1, 2, 3], default=3,
+                       help='Time horizon for L2 error and collision: 1s (2 timesteps), 2s (4 timesteps), or 3s (6 timesteps, default). '
+                            'This affects both L2 error computation and collision detection.')
     
     # Evaluation parameters
     parser.add_argument('--eval-cuda-device', type=str, default='0')

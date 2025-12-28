@@ -117,7 +117,7 @@ def load_vad_model(config_path, checkpoint_path):
 
 
 def extract_features(model, data_infos, threshold_good, threshold_bad, 
-                     mean_l2=None, std_l2=None, alpha=0.5, rep_method='Arachne_v1'):
+                     mean_l2=None, std_l2=None, alpha=0.5, rep_method='Arachne_v1', time_horizon=3):
     """
     Extract frame features and compute L2 errors for localization-time classification.
     
@@ -219,8 +219,15 @@ def extract_features(model, data_infos, threshold_good, threshold_bad,
             # Convert delta to absolute positions using cumsum before computing L2 error
             pred_mode_absolute = torch.cumsum(pred_mode, dim=0)  # [fut_ts, 2]
             
-            # Compute L2 error
-            min_len = min(int(pred_mode_absolute.shape[0]), int(gt_traj.shape[0]))
+            # Compute L2 error for the specified time horizon
+            # Each timestep = 0.5s, so:
+            # 1s = 2 timesteps (2 trajectory points)
+            # 2s = 4 timesteps (4 trajectory points)
+            # 3s = 6 timesteps (6 trajectory points, full trajectory)
+            # Dictionary mapping: {time_horizon_in_seconds: number_of_timesteps}
+            timesteps_for_horizon = {1: 2, 2: 4, 3: 6}  # {1秒: 2步, 2秒: 4步, 3秒: 6步}
+            num_timesteps = timesteps_for_horizon.get(time_horizon, 6)
+            min_len = min(num_timesteps, int(pred_mode_absolute.shape[0]), int(gt_traj.shape[0]))
             l2_error = torch.norm(pred_mode_absolute[:min_len] - gt_traj[:min_len], dim=1).mean().item()
             
             # Classification logic
@@ -245,12 +252,10 @@ def extract_features(model, data_infos, threshold_good, threshold_bad,
                 #    - If L2_error > mean + 0.5*std: frame = negative
                 #    - Else: frame = neutral
                 
-                # Check for collision
-                has_collision = False
-                col_1s = info.get('plan_obj_box_col_1s', 0.0)
-                col_2s = info.get('plan_obj_box_col_2s', 0.0)
-                col_3s = info.get('plan_obj_box_col_3s', 0.0)
-                has_collision = (col_1s > 0) or (col_2s > 0) or (col_3s > 0)
+                # Check for collision using the same time horizon as L2 error
+                collision_field = f'plan_obj_box_col_{time_horizon}s'
+                col_value = info.get(collision_field, 0.0)
+                has_collision = (col_value > 0)
                 
                 if has_collision:
                     # Collision frames are always negative (strong system-level metric)
@@ -375,6 +380,9 @@ def main():
                        choices=['discrete', 'continuous', 'continuous2'],
                        help='Fitness function type: discrete (weighted frame counts), continuous (total L2 error), '
                             'or continuous2 (total L2 + collision penalty)')
+    parser.add_argument('--time-horizon', type=int, choices=[1, 2, 3], default=3,
+                       help='Time horizon for L2 error and collision: 1s (2 timesteps), 2s (4 timesteps), or 3s (6 timesteps, default). '
+                            'This affects both L2 error computation and collision detection (plan_obj_box_col_Xs).')
     args = parser.parse_args()
     
     # Check alpha parameter validity based on repair method
@@ -420,9 +428,11 @@ def main():
     
     # Calculate thresholds based on repair method
     # Also count total valid frames in JSON (for later validation)
+    # Use the corresponding L2 field based on time_horizon
+    l2_field = f'plan_L2_{args.time_horizon}s'
     total_valid_frames_in_json = 0
     for info in data_infos:
-        if info.get('fut_valid_flag', False) and info.get('plan_L2_3s') is not None:
+        if info.get('fut_valid_flag', False) and info.get(l2_field) is not None:
             total_valid_frames_in_json += 1
     
     if args.rep_method in ['Arachne_v1', 'Arachne_v2']:
@@ -458,8 +468,12 @@ def main():
                 # Convert delta to absolute positions using cumsum before computing L2 error
                 pred_mode_absolute = torch.cumsum(pred_mode, dim=0)  # Convert delta to absolute positions
                 
-                # Compute L2 error
-                min_len = min(int(pred_mode_absolute.shape[0]), int(gt_traj.shape[0]))
+                # Compute L2 error for the specified time horizon
+                # Each timestep = 0.5s: 1s=2 points, 2s=4 points, 3s=6 points (full trajectory)
+                # Dictionary mapping: {time_horizon_in_seconds: number_of_timesteps}
+                timesteps_for_horizon = {1: 2, 2: 4, 3: 6}  # {1秒: 2步, 2秒: 4步, 3秒: 6步}
+                num_timesteps = timesteps_for_horizon.get(args.time_horizon, 6)
+                min_len = min(num_timesteps, int(pred_mode_absolute.shape[0]), int(gt_traj.shape[0]))
                 l2_error = torch.norm(pred_mode_absolute[:min_len] - gt_traj[:min_len], dim=1).mean().item()
                 
                 if not np.isnan(l2_error) and not np.isinf(l2_error):
@@ -503,7 +517,12 @@ def main():
                 cmd_idx = int(np.clip(cmd_idx, 0, ego_fut_mode - 1))
                 pred_mode = pred_traj[cmd_idx]
                 pred_mode_absolute = torch.cumsum(pred_mode, dim=0)
-                min_len = min(int(pred_mode_absolute.shape[0]), int(gt_traj.shape[0]))
+                # Compute L2 error for the specified time horizon
+                # Each timestep = 0.5s: 1s=2 points, 2s=4 points, 3s=6 points (full trajectory)
+                # Dictionary mapping: {time_horizon_in_seconds: number_of_timesteps}
+                timesteps_for_horizon = {1: 2, 2: 4, 3: 6}  # {1秒: 2步, 2秒: 4步, 3秒: 6步}
+                num_timesteps = timesteps_for_horizon.get(args.time_horizon, 6)
+                min_len = min(num_timesteps, int(pred_mode_absolute.shape[0]), int(gt_traj.shape[0]))
                 l2_error = torch.norm(pred_mode_absolute[:min_len] - gt_traj[:min_len], dim=1).mean().item()
                 if not np.isnan(l2_error) and not np.isinf(l2_error):
                     l2_errors.append(float(l2_error))
@@ -529,7 +548,8 @@ def main():
             mean_l2=mean_l2_for_classification,
             std_l2=std_l2_for_classification,
             alpha=args.alpha,
-            rep_method='Arachne_v1'
+            rep_method='Arachne_v1',
+            time_horizon=args.time_horizon
         )
     elif args.rep_method == 'Arachne_v2':
         # Arachne_v2 uses the same classification logic as Arachne_v1
@@ -539,7 +559,8 @@ def main():
             mean_l2=mean_l2_for_classification,
             std_l2=std_l2_for_classification,
             alpha=args.alpha,
-            rep_method='Arachne_v1'  # Use same classification logic as v1
+            rep_method='Arachne_v1',  # Use same classification logic as v1
+            time_horizon=args.time_horizon
         )
     elif args.rep_method == 'semSegRep':
         # For semSegRep: simple fixed threshold classification (no collision, no statistics)
@@ -548,7 +569,8 @@ def main():
             mean_l2=None,
             std_l2=None,
             alpha=args.alpha,
-            rep_method='semSegRep'
+            rep_method='semSegRep',
+            time_horizon=args.time_horizon
         )
     
     # Check if there are enough positive/negative frames
@@ -780,7 +802,8 @@ def main():
         threshold_good=threshold_good,
         threshold_bad=threshold_bad,
         fitness_type=args.fitness_type,
-        rep_method=args.rep_method
+        rep_method=args.rep_method,
+        time_horizon=getattr(args, 'time_horizon', 3)
     )
     
     # With open-loop evaluation, repaired is always the wrapper model

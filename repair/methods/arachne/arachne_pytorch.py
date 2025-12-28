@@ -641,7 +641,7 @@ class ArachnePyTorch:
     def optimize(self, model, weights_to_repair, input_neg, input_pos, output_dir=None, verbose=1,
                  use_vad_eval=False, frame_data_dict=None, 
                  positive_frames=None, negative_frames=None, threshold_good=0.5, threshold_bad=1.0,
-                 fitness_type='discrete', rep_method='Arachne_v1'):
+                 fitness_type='discrete', rep_method='Arachne_v1', time_horizon=3):
         """
         Optimize weights using optimization algorithm (PSO or DE).
         
@@ -791,7 +791,8 @@ class ArachnePyTorch:
             output_dir=output_dir,
             evaluate_fitness_fn=self._evaluate_fitness,
             evaluate_fitness_vad_fn=self._evaluate_fitness_vad_openloop,
-            apply_weights_fn=self._apply_weight_adjustments
+            apply_weights_fn=self._apply_weight_adjustments,
+            time_horizon=time_horizon
         )
         
         # Save repaired model and fitness history
@@ -919,7 +920,7 @@ class ArachnePyTorch:
     def _evaluate_fitness_vad_openloop(self, repaired_layers, frame_data_dict, 
                                         positive_frames, negative_frames,
                                         threshold_good, threshold_bad, fitness_type='discrete',
-                                        rep_method='Arachne_v1', use_original_l2_for_classification=False):
+                                        rep_method='Arachne_v1', use_original_l2_for_classification=False, time_horizon=3):
         """
         Evaluate fitness using open-loop evaluation (faster).
         
@@ -988,10 +989,11 @@ class ArachnePyTorch:
         actual_threshold_bad = threshold_bad
         use_median_threshold = False
         if rep_method == 'semSegRep' and threshold_good == threshold_bad:
-            # Calculate median L2 error from original JSON data (plan_L2_3s)
+            # Calculate median L2 error from original JSON data (plan_L2_Xs based on time_horizon)
+            l2_field = f'plan_L2_{time_horizon}s'
             all_original_l2 = []
             for frame_data in frame_data_dict.values():
-                original_l2 = frame_data.get('plan_L2_3s', None)
+                original_l2 = frame_data.get(l2_field, None)
                 if original_l2 is not None and not np.isnan(original_l2) and not np.isinf(original_l2):
                     all_original_l2.append(original_l2)
             if len(all_original_l2) > 0:
@@ -1196,7 +1198,7 @@ class ArachnePyTorch:
                     batch_cmd_tensor = torch.tensor(batch_cmd_indices, dtype=torch.long, device=device)
                     
                     # Use _compute_l2_error_gpu which handles all shape cases correctly (same as old version)
-                    batch_l2_errors = self._compute_l2_error_gpu(batch_pred_traj, batch_gt_tensor, batch_cmd_tensor)
+                    batch_l2_errors = self._compute_l2_error_gpu(batch_pred_traj, batch_gt_tensor, batch_cmd_tensor, time_horizon=time_horizon)
                     batch_l2_errors_np = batch_l2_errors.cpu().numpy()
                     
                     # Process each frame in batch for classification and statistics (same as old version)
@@ -1206,17 +1208,21 @@ class ArachnePyTorch:
                         
                         # For original model evaluation, use pre-computed L2 from JSON for consistency
                         if use_original_l2_for_classification:
-                            original_l2 = frame_data.get('plan_L2_3s', None)
+                            l2_field = f'plan_L2_{time_horizon}s'
+                            original_l2 = frame_data.get(l2_field, None)
                             if original_l2 is not None and not np.isnan(original_l2) and not np.isinf(original_l2):
                                 l2_error = float(original_l2)
                             else:
-                                # Fallback to computed L2 if plan_L2_3s is missing
+                                # Fallback to computed L2 if plan_L2_Xs is missing
                                 l2_error = float(batch_l2_errors_np[b_idx])
                         else:
                             # For particle evaluation, use computed L2 error so fitness reflects model changes
                             l2_error = float(batch_l2_errors_np[b_idx])
                         
-                        has_collision = batch_has_collision[b_idx]  # Python bool, not tensor
+                        # Check collision using the same time horizon as L2 error
+                        collision_field = f'plan_obj_box_col_{time_horizon}s'
+                        col_value = frame_data.get(collision_field, 0.0)
+                        has_collision = (col_value > 0)  # Python bool, not tensor
                         
                         # Track inf values
                         if np.isinf(l2_error) or l2_error == float('inf'):
@@ -1372,7 +1378,7 @@ class ArachnePyTorch:
         
         return float(l2_error)
     
-    def _compute_l2_error_gpu(self, pred_traj, gt_traj, cmd_idx):
+    def _compute_l2_error_gpu(self, pred_traj, gt_traj, cmd_idx, time_horizon=3):
         """
         Compute L2 error on GPU (faster for batch processing).
         
@@ -1388,6 +1394,8 @@ class ArachnePyTorch:
             Ground truth trajectory (ABSOLUTE positions), shape: (batch, 6, 2)
         cmd_idx : int or torch.Tensor
             Command index to select (for multi-mode predictions), shape: (batch,) if Tensor
+        time_horizon : int
+            Time horizon in seconds: 1s=2 timesteps, 2s=4 timesteps, 3s=6 timesteps (default: 3)
         
         Returns
         -------
@@ -1395,8 +1403,10 @@ class ArachnePyTorch:
             L2 errors for each sample, shape: (batch,)
         """
         batch_size = pred_traj.shape[0]
-        # B2D fixed planning horizon: 6 future steps
-        timesteps = 6
+        # B2D fixed planning horizon: 6 future steps (full trajectory)
+        # But we only use the specified time_horizon for L2 calculation
+        timesteps_for_horizon = {1: 2, 2: 4, 3: 6}  # {1秒: 2步, 2秒: 4步, 3秒: 6步}
+        timesteps = timesteps_for_horizon.get(time_horizon, 6)
         
         # Accept B2D flattened output: (batch, 72) -> (batch, 6, 6, 2) -> select cmd -> (batch, 6, 2)
         if pred_traj.dim() == 2:
@@ -1459,8 +1469,8 @@ class ArachnePyTorch:
                     padded_gt[:, :min_timesteps, :] = gt_traj[:, :min_timesteps, :]
                     gt_traj = padded_gt.expand(batch_size, -1, -1)
         
-        # Handle shape mismatches
-        min_len = min(pred_traj_abs.shape[1], gt_traj.shape[1])
+        # Handle shape mismatches and apply time_horizon
+        min_len = min(timesteps, pred_traj_abs.shape[1], gt_traj.shape[1])
         if min_len == 0:
             return torch.full((batch_size,), float('inf'), device=pred_traj_abs.device, dtype=pred_traj_abs.dtype)
         pred_traj_abs = pred_traj_abs[:, :min_len, :]
@@ -1470,7 +1480,7 @@ class ArachnePyTorch:
         diff = pred_traj_abs - gt_traj
         l2_distances = torch.sqrt(torch.sum(diff**2, dim=2))  # (batch, timesteps)
         
-        # Return average L2 error over all timesteps: (batch,)
+        # Return average L2 error over specified time horizon: (batch,)
         return torch.mean(l2_distances, dim=1)
     
     def compute_l2_statistics(self, model, frame_data_dict, threshold_good=0.5, threshold_bad=2.0):
@@ -1794,17 +1804,21 @@ def build_frame_data_dict(json_file, frame_identifiers=None):
             continue
         
         # Build frame data
+        # Save all L2 fields (1s, 2s, 3s) so evaluation can use the appropriate one based on time_horizon
         frame_data = {
             'ego_features': np.array(frame['ego_features'], dtype=np.float32),
+            'plan_L2_1s': frame.get('plan_L2_1s', frame.get('plan_L2_3s', 0.0)),  # Fallback to 3s if 1s not available
+            'plan_L2_2s': frame.get('plan_L2_2s', frame.get('plan_L2_3s', 0.0)),  # Fallback to 3s if 2s not available
             'plan_L2_3s': frame.get('plan_L2_3s', 0.0),
             'ego_fut_cmd_idx': frame.get('ego_fut_cmd_idx', 0),  # 保存指令索引
         }
         
-        # Add collision information if available
+        # Add collision information if available (save all time horizons)
         col_1s = frame.get('plan_obj_box_col_1s', 0.0)
         col_2s = frame.get('plan_obj_box_col_2s', 0.0)
         col_3s = frame.get('plan_obj_box_col_3s', 0.0)
-        frame_data['has_collision'] = (col_1s > 0) or (col_2s > 0) or (col_3s > 0)
+        # Note: has_collision is deprecated, evaluation will use the appropriate collision field based on time_horizon
+        frame_data['has_collision'] = (col_1s > 0) or (col_2s > 0) or (col_3s > 0)  # Keep for backward compatibility
         frame_data['plan_obj_box_col_1s'] = float(col_1s) if isinstance(col_1s, (int, float)) else 0.0
         frame_data['plan_obj_box_col_2s'] = float(col_2s) if isinstance(col_2s, (int, float)) else 0.0
         frame_data['plan_obj_box_col_3s'] = float(col_3s) if isinstance(col_3s, (int, float)) else 0.0
