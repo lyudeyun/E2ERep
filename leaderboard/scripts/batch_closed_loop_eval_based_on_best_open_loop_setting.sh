@@ -201,6 +201,7 @@ export CARLA_SERVER="${CARLA_ROOT}/CarlaUE4.sh"
 export PYTHONPATH=$PYTHONPATH:"${CARLA_ROOT}/PythonAPI"
 export PYTHONPATH=$PYTHONPATH:"${CARLA_ROOT}/PythonAPI/carla"
 export PYTHONPATH=$PYTHONPATH:"${CARLA_ROOT}/PythonAPI/carla/dist/carla-0.9.15-py3.7-linux-x86_64.egg"
+export PYTHONPATH=$PYTHONPATH:"${REPO_ROOT}"  # 添加 REPO_ROOT 以支持 Bench2DriveZoo 模块导入
 export PYTHONPATH=$PYTHONPATH:leaderboard
 export PYTHONPATH=$PYTHONPATH:leaderboard/team_code
 export PYTHONPATH=$PYTHONPATH:scenario_runner
