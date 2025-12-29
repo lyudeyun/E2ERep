@@ -175,6 +175,9 @@ if [ "${USE_FAST_VERSION}" = "1" ] && [ "${USE_SUPER_FAST_VERSION}" = "1" ]; the
   exit 2
 fi
 
+# 确定 REPO_ROOT（需要在检查 CARLA_ROOT 之前定义）
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
 # 检查 CARLA_ROOT，如果未设置，尝试使用默认路径
 if [ -z "${CARLA_ROOT:-}" ]; then
   # 尝试使用默认路径：Bench2DriveZoo/carla
@@ -205,8 +208,7 @@ export SCENARIO_RUNNER_ROOT=scenario_runner
 export LEADERBOARD_ROOT=leaderboard
 export CHALLENGE_TRACK_CODENAME=SENSORS
 
-# 确定使用的 agent 和 config
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# 确定使用的 agent 和 config（REPO_ROOT 已在前面定义）
 if [ "${USE_SUPER_FAST_VERSION}" = "1" ]; then
   VERSION_NAME="super_fast"
   TEAM_AGENT="${REPO_ROOT}/Bench2DriveZoo/team_code/vad_b2d_agent_super_fast.py"
