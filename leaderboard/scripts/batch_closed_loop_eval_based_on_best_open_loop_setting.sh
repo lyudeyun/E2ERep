@@ -175,10 +175,22 @@ if [ "${USE_FAST_VERSION}" = "1" ] && [ "${USE_SUPER_FAST_VERSION}" = "1" ]; the
   exit 2
 fi
 
-# 检查 CARLA_ROOT
+# 检查 CARLA_ROOT，如果未设置，尝试使用默认路径
 if [ -z "${CARLA_ROOT:-}" ]; then
-  echo "ERROR: CARLA_ROOT is not set. Please export CARLA_ROOT=/path/to/CARLA" 1>&2
-  exit 1
+  # 尝试使用默认路径：Bench2DriveZoo/carla
+  DEFAULT_CARLA_ROOT="${REPO_ROOT}/Bench2DriveZoo/carla"
+  if [ -f "${DEFAULT_CARLA_ROOT}/CarlaUE4.sh" ] && [ -d "${DEFAULT_CARLA_ROOT}/PythonAPI/carla/agents" ]; then
+    export CARLA_ROOT="${DEFAULT_CARLA_ROOT}"
+    echo "INFO: CARLA_ROOT not set, using default: ${CARLA_ROOT}"
+  else
+    echo "ERROR: CARLA_ROOT is not set and default path not found." 1>&2
+    echo "" 1>&2
+    echo "Please set CARLA_ROOT environment variable:" 1>&2
+    echo "  export CARLA_ROOT=/path/to/carla" 1>&2
+    echo "" 1>&2
+    echo "Or ensure CARLA is installed at: ${DEFAULT_CARLA_ROOT}" 1>&2
+    exit 1
+  fi
 fi
 
 # 设置环境变量
