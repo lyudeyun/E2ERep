@@ -188,6 +188,9 @@ def extract_features(model, data_infos, threshold_good, threshold_bad,
         # semSegRep: fixed threshold baseline
         collision_threshold_good = threshold_good
         collision_threshold_bad = threshold_bad
+        print(f"  Using fixed threshold for classification:")
+        print(f"    threshold_good = {threshold_good:.6f}")
+        print(f"    threshold_bad = {threshold_bad:.6f}")
     
     with torch.no_grad():
         for info in data_infos:
@@ -289,7 +292,7 @@ def extract_features(model, data_infos, threshold_good, threshold_bad,
     if rep_method in ['Arachne_v1', 'Arachne_v2']:
         # 4 categories for Arachne_v1 and Arachne_v2 (same classification logic)
         method_name = 'Arachne_v1' if rep_method == 'Arachne_v1' else 'Arachne_v2'
-        print(f"\nData classification ({method_name} logic - 4 categories):")
+        print(f"\nData classification ({method_name} logic - 4 categories, time_horizon={time_horizon}s):")
         print(f"  Category 1 - Positive (no collision, L2 < mean - 0.5*std): {positive_no_collision_count}")
         print(f"  Category 2 - Negative (collision): {collision_count}")
         print(f"  Category 3 - Negative (no collision, L2 > mean + 0.5*std): {negative_no_collision_count}")
@@ -297,6 +300,7 @@ def extract_features(model, data_infos, threshold_good, threshold_bad,
         print(f"  Total positive: {positive_count}")
         print(f"  Total negative (Category 2 + 3): {negative_count}")
         print(f"  Total frames: {total_frames_classified}")
+        print(f"  Processed frames: {processed_frames}")
         
         if total_frames_classified != processed_frames:
             raise ValueError(
@@ -307,7 +311,7 @@ def extract_features(model, data_infos, threshold_good, threshold_bad,
             )
     else:
         # 2 categories for semSegRep (simple fixed threshold, no neutral)
-        print(f"\nData classification (semSegRep logic - 2 categories, fixed threshold={threshold_good:.6f}):")
+        print(f"\nData classification (semSegRep logic - 2 categories, time_horizon={time_horizon}s, fixed threshold={threshold_good:.6f}):")
         print(f"  Positive (L2 < {threshold_good:.6f}): {len(pos_feat)}")
         print(f"  Negative (L2 >= {threshold_good:.6f}): {len(neg_feat)}")
         print(f"  Total frames: {len(pos_feat) + len(neg_feat)}")
@@ -734,6 +738,19 @@ def main():
         
         print(f"\nData for evaluation (all frames):")
         print(f"  Total frames in dict: {len(frame_data_dict)}")
+        
+        # Critical check: frame_data_dict must not be empty
+        if len(frame_data_dict) == 0:
+            print(f"\nERROR: frame_data_dict is EMPTY! Cannot proceed with evaluation.")
+            print(f"  JSON file: {args.json}")
+            print(f"  JSON file contains {total_valid_frames_in_json} valid frames in total")
+            print("\nPossible causes:")
+            print("  1. JSON file is empty or corrupted")
+            print("  2. All frames missing required fields (ego_features, ground_truth, etc.)")
+            print("  3. frame_id matching issue in build_frame_data_dict")
+            print("  4. JSON file path is incorrect")
+            print("\nSuggestion: Check the JSON file and verify it contains valid frame data.")
+            sys.exit(1)
         
         # Sanity check
         if len(frame_data_dict) < 100:

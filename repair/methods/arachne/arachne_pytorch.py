@@ -988,6 +988,7 @@ class ArachnePyTorch:
         actual_threshold_good = threshold_good
         actual_threshold_bad = threshold_bad
         use_median_threshold = False
+        
         if rep_method == 'semSegRep' and threshold_good == threshold_bad:
             # Calculate median L2 error from original JSON data (plan_L2_Xs based on time_horizon)
             l2_field = f'plan_L2_{time_horizon}s'
@@ -1105,56 +1106,79 @@ class ArachnePyTorch:
                 # Fall through to normal evaluation
                 pass
         
-        with torch.no_grad():
-            # OPTIMIZED: Batch processing for GPU acceleration
-            # Determine batch size: use configured value or auto-detect based on GPU memory
-            if self.eval_batch_size is not None:
-                batch_size = self.eval_batch_size
-            else:
-                # Auto-detect batch size based on GPU memory
-                if device.type == 'cuda':
-                    # Get GPU memory info
-                    gpu_memory_gb = torch.cuda.get_device_properties(device).total_memory / (1024**3)
-                    # Conservative estimate: ~50MB per batch (for features + predictions + intermediates)
-                    # For 32GB GPU: ~640, but use 256 as safe default
-                    # For 16GB GPU: ~320, but use 128 as safe default
-                    # For 8GB GPU: ~160, but use 64 as safe default
-                    if gpu_memory_gb >= 24:
-                        batch_size = 256  # Large GPU (V100, A100, etc.)
-                    elif gpu_memory_gb >= 12:
-                        batch_size = 128  # Medium GPU (RTX 3090, etc.)
-                    else:
-                        batch_size = 64   # Small GPU or default (RTX 3080, T4, etc.)
+        # Determine batch size: use configured value or auto-detect based on GPU memory
+        # Move outside with torch.no_grad() to ensure it's in function scope
+        if self.eval_batch_size is not None:
+            batch_size = self.eval_batch_size
+        else:
+            # Auto-detect batch size based on GPU memory
+            if device.type == 'cuda':
+                # Get GPU memory info
+                gpu_memory_gb = torch.cuda.get_device_properties(device).total_memory / (1024**3)
+                # Conservative estimate: ~50MB per batch (for features + predictions + intermediates)
+                # For 32GB GPU: ~640, but use 256 as safe default
+                # For 16GB GPU: ~320, but use 128 as safe default
+                # For 8GB GPU: ~160, but use 64 as safe default
+                if gpu_memory_gb >= 24:
+                    batch_size = 256  # Large GPU (V100, A100, etc.)
+                elif gpu_memory_gb >= 12:
+                    batch_size = 128  # Medium GPU (RTX 3090, etc.)
                 else:
-                    batch_size = 32  # CPU: smaller batch size
-            
-            frame_items = list(frame_data_dict.items())
-            total_frames = len(frame_items)
-            
-            # Pre-allocate lists for batch processing
-            all_ego_features = []
-            all_gt_trajectories = []
-            all_cmd_indices = []
-            all_has_collision = []
-            all_frame_data = []  # Store frame_data for later lookup
-            
-            # Collect all data (same as old version)
-            for (token, scene_name), frame_data in frame_items:
-                # Convert to numpy arrays (same as old version)
-                ego_features = np.array(frame_data['ego_features'], dtype=np.float32)
-                gt_trajectory = np.array(frame_data.get('gt_future_traj', []), dtype=np.float32)
-                # Use ego_fut_cmd_idx to match old version
-                cmd_idx = frame_data.get('ego_fut_cmd_idx', 0)
-                all_ego_features.append(ego_features)
-                all_gt_trajectories.append(gt_trajectory)
-                all_cmd_indices.append(cmd_idx)
-                all_has_collision.append(frame_data.get('has_collision', False))
-                all_frame_data.append(frame_data)  # Store frame_data for later lookup
-            
-            # Batch process
-            total_l2_error = 0.0
-            valid_frame_count = 0
-            
+                    batch_size = 64   # Small GPU or default (RTX 3080, T4, etc.)
+            else:
+                batch_size = 32  # CPU: smaller batch size
+        
+        frame_items = list(frame_data_dict.items())
+        total_frames = len(frame_items)
+        
+        # Check if frame_data_dict is empty
+        if total_frames == 0:
+            print(f"  [WARNING] frame_data_dict is empty! No frames to evaluate.")
+            if use_original_l2_for_classification:
+                frame_counts = {
+                    'positive_no_collision': 0,
+                    'middle_no_collision': 0,
+                    'negative_no_collision': 0,
+                    'collision': 0,
+                    'total_evaluated': 0
+                }
+                return float('inf'), frame_counts  # Return worst fitness
+            return float('inf')  # Return worst fitness
+        
+        # Pre-allocate lists for batch processing
+        all_ego_features = []
+        all_gt_trajectories = []
+        all_cmd_indices = []
+        all_has_collision = []
+        all_frame_data = []  # Store frame_data for later lookup
+        
+        # Collect all data (same as old version)
+        for (token, scene_name), frame_data in frame_items:
+            # Convert to numpy arrays (same as old version)
+            ego_features = np.array(frame_data['ego_features'], dtype=np.float32)
+            gt_trajectory = np.array(frame_data.get('gt_future_traj', []), dtype=np.float32)
+            # Use ego_fut_cmd_idx to match old version
+            cmd_idx = frame_data.get('ego_fut_cmd_idx', 0)
+            all_ego_features.append(ego_features)
+            all_gt_trajectories.append(gt_trajectory)
+            all_cmd_indices.append(cmd_idx)
+            all_has_collision.append(frame_data.get('has_collision', False))
+            all_frame_data.append(frame_data)  # Store frame_data for later lookup
+        
+        # Batch process
+        total_l2_error = 0.0
+        valid_frame_count = 0
+        # Initialize frame count variables
+        positive_no_collision_count = 0
+        middle_no_collision_count = 0
+        negative_no_collision_count = 0
+        collision_count = 0
+        error_count = 0
+        inf_count = 0
+        shape_errors = []
+        
+        # Process batches in no_grad context
+        with torch.no_grad():
             for batch_start in range(0, total_frames, batch_size):
                 batch_end = min(batch_start + batch_size, total_frames)
                 batch_ego_features = all_ego_features[batch_start:batch_end]
@@ -1186,7 +1210,8 @@ class ArachnePyTorch:
                                 padding = torch.zeros(batch_sz, 36 - batch_pred_traj.shape[1], device=batch_pred_traj.device)
                                 batch_pred_traj = torch.cat([batch_pred_traj, padding], dim=1)
                     
-                    # Prepare GT trajectories tensor: (batch, 6, 2) (same as old version)
+                    # Prepare GT trajectories tensor: (batch, 6, 2)
+                    # Always use full 6 timesteps, _compute_l2_error_gpu will slice based on time_horizon
                     batch_gt_tensor = torch.zeros(len(batch_gt_trajectories), 6, 2, dtype=torch.float32, device=device)
                     for i, gt_traj in enumerate(batch_gt_trajectories):
                         if len(gt_traj.shape) == 1:
@@ -1207,13 +1232,16 @@ class ArachnePyTorch:
                         frame_data = all_frame_data[frame_idx]
                         
                         # For original model evaluation, use pre-computed L2 from JSON for consistency
+                        # Use the L2 field that matches the time_horizon (plan_L2_1s, plan_L2_2s, or plan_L2_3s)
                         if use_original_l2_for_classification:
                             l2_field = f'plan_L2_{time_horizon}s'
                             original_l2 = frame_data.get(l2_field, None)
+                            
+                            # Use pre-computed L2 from JSON if available and valid
                             if original_l2 is not None and not np.isnan(original_l2) and not np.isinf(original_l2):
                                 l2_error = float(original_l2)
                             else:
-                                # Fallback to computed L2 if plan_L2_Xs is missing
+                                # Fallback to computed L2 if plan_L2_Xs is missing or invalid
                                 l2_error = float(batch_l2_errors_np[b_idx])
                         else:
                             # For particle evaluation, use computed L2 error so fitness reflects model changes
@@ -1257,7 +1285,7 @@ class ArachnePyTorch:
                                 continue
                             
                             # Classify frame based on L2 error (same logic as localization for non-collision frames)
-                            # For original model: uses plan_L2_3s from JSON (consistent with baseline)
+                            # For original model: uses plan_L2_{time_horizon}s from JSON
                             # For particles: uses computed L2 error (reflects model changes)
                             if l2_error < actual_threshold_good:
                                 positive_no_collision_count += 1
@@ -1270,48 +1298,48 @@ class ArachnePyTorch:
                     error_count += 1
                     shape_errors.append(str(e))
                     continue
+        
+        # Compute fitness based on type (after all batches are processed)
+        total_frames_evaluated = positive_no_collision_count + middle_no_collision_count + negative_no_collision_count + collision_count
+        
+        if fitness_type == 'discrete':
+            # Discrete fitness definition:
+            # fitness = -(w1 * N_pos - w2 * N_(neg-no col) - w3 * N_mid - lambda * N_col)
+            # We want to maximize this value, but PSO minimizes, so we negate it
+            w1 = 1.0
+            w2 = 1.0
+            w3 = 0.5
+            lambda_col = 10.0
             
-            # Compute fitness based on type (same as old version)
-            total_frames_evaluated = positive_no_collision_count + middle_no_collision_count + negative_no_collision_count + collision_count
+            score = (w1 * positive_no_collision_count -
+                     w2 * negative_no_collision_count -
+                     w3 * middle_no_collision_count -
+                     lambda_col * collision_count)
             
-            if fitness_type == 'discrete':
-                # Discrete fitness definition:
-                # fitness = -(w1 * N_pos - w2 * N_(neg-no col) - w3 * N_mid - lambda * N_col)
-                # We want to maximize this value, but PSO minimizes, so we negate it
-                w1 = 1.0
-                w2 = 1.0
-                w3 = 0.5
-                lambda_col = 10.0
-                
-                score = (w1 * positive_no_collision_count -
-                         w2 * negative_no_collision_count -
-                         w3 * middle_no_collision_count -
-                         lambda_col * collision_count)
-                
-                fitness = -score  # Negate because PSO minimizes (we want to maximize score)
-            elif fitness_type == 'continuous':
-                # Continuous fitness: total L2 error across all frames
-                # Lower L2 error is better, PSO minimizes directly
-                score = total_l2_error
-                
-                # BUG FIX: If total_l2_error is 0.0 but no valid L2 errors were accumulated,
-                # this means all frames had NaN/Inf errors (model is broken), not perfect fitness!
-                # Return a large penalty value instead of 0.0
-                if score == 0.0 and valid_frame_count == 0:
-                    fitness = float('inf')  # Worst possible fitness (will be rejected by PSO)
-                else:
-                    fitness = score  # Direct minimization of L2 error
-            elif fitness_type == 'continuous2':
-                # Continuous2 fitness: total L2 error + lambda * collision count
-                lambda_col = 10.0
-                
-                if valid_frame_count > 0:
-                    fitness = total_l2_error + lambda_col * collision_count
-                else:
-                    # No valid L2 errors: model is broken, use penalty fitness
-                    fitness = float('inf')  # Worst possible fitness (will be rejected by PSO)
+            fitness = -score  # Negate because PSO minimizes (we want to maximize score)
+        elif fitness_type == 'continuous':
+            # Continuous fitness: total L2 error across all frames
+            # Lower L2 error is better, PSO minimizes directly
+            score = total_l2_error
+            
+            # BUG FIX: If total_l2_error is 0.0 but no valid L2 errors were accumulated,
+            # this means all frames had NaN/Inf errors (model is broken), not perfect fitness!
+            # Return a large penalty value instead of 0.0
+            if score == 0.0 and valid_frame_count == 0:
+                fitness = float('inf')  # Worst possible fitness (will be rejected by PSO)
             else:
-                raise ValueError(f"Unknown fitness_type: {fitness_type}")
+                fitness = score  # Direct minimization of L2 error
+        elif fitness_type == 'continuous2':
+            # Continuous2 fitness: total L2 error + lambda * collision count
+            lambda_col = 10.0
+            
+            if valid_frame_count > 0:
+                fitness = total_l2_error + lambda_col * collision_count
+            else:
+                # No valid L2 errors: model is broken, use penalty fitness
+                fitness = float('inf')  # Worst possible fitness (will be rejected by PSO)
+        else:
+            raise ValueError(f"Unknown fitness_type: {fitness_type}")
         
         # Return fitness and frame counts for logging (only for original model evaluation)
         if use_original_l2_for_classification:
@@ -1322,6 +1350,7 @@ class ArachnePyTorch:
                 'collision': collision_count,
                 'total_evaluated': total_frames_evaluated
             }
+            
             return float(fitness), frame_counts
         
         return float(fitness)
@@ -1409,35 +1438,41 @@ class ArachnePyTorch:
         timesteps = timesteps_for_horizon.get(time_horizon, 6)
         
         # Accept B2D flattened output: (batch, 72) -> (batch, 6, 6, 2) -> select cmd -> (batch, 6, 2)
+        # We'll slice to timesteps later after converting to absolute positions
         if pred_traj.dim() == 2:
             if pred_traj.shape[-1] != 72:
                 raise RuntimeError(
                     f"Unsupported pred_traj shape {tuple(pred_traj.shape)}. "
                     f"Expected (batch, 72) for B2D."
                 )
-            pred_traj = pred_traj.view(batch_size, 6, timesteps, 2)
+            # Model always outputs full 6 timesteps: reshape to (batch, 6 commands, 6 timesteps, 2)
+            pred_traj = pred_traj.view(batch_size, 6, 6, 2)
+            # Select command
             if isinstance(cmd_idx, torch.Tensor):
                 cmd_idx_clamped = torch.clamp(cmd_idx.long(), 0, 5)
                 pred_traj = pred_traj[torch.arange(batch_size, device=pred_traj.device), cmd_idx_clamped]
             else:
                 cmd_idx_clamped = max(0, min(5, int(cmd_idx)))
                 pred_traj = pred_traj[:, cmd_idx_clamped]
+            # Now pred_traj is (batch, 6, 2)
         elif pred_traj.dim() == 4:
-            # Explicit: (batch, 6, 6, 2)
-            if pred_traj.shape[1:] != (6, timesteps, 2):
+            # Explicit: (batch, 6, 6, 2) - model always outputs full 6 timesteps
+            if pred_traj.shape[1:] != (6, 6, 2):
                 raise RuntimeError(
                     f"Unsupported pred_traj shape {tuple(pred_traj.shape)}. "
                     f"Expected (batch, 6, 6, 2) for B2D."
                 )
+            # Select command
             if isinstance(cmd_idx, torch.Tensor):
                 cmd_idx_clamped = torch.clamp(cmd_idx.long(), 0, 5)
                 pred_traj = pred_traj[torch.arange(batch_size, device=pred_traj.device), cmd_idx_clamped]
             else:
                 cmd_idx_clamped = max(0, min(5, int(cmd_idx)))
                 pred_traj = pred_traj[:, cmd_idx_clamped]
+            # Now pred_traj is (batch, 6, 2)
         elif pred_traj.dim() == 3:
             # Already selected trajectory: (batch, 6, 2)
-            if pred_traj.shape[1:] != (timesteps, 2):
+            if pred_traj.shape[1:] != (6, 2):
                 raise RuntimeError(
                     f"Unsupported pred_traj shape {tuple(pred_traj.shape)}. "
                     f"Expected (batch, 6, 2) for selected B2D traj."
@@ -1455,7 +1490,8 @@ class ArachnePyTorch:
         # Convert delta to absolute positions using cumsum
         pred_traj_abs = torch.cumsum(pred_traj, dim=1)
         
-        # Ensure gt_traj has correct shape: (batch, timesteps, 2)
+        # Ensure gt_traj has correct shape: (batch, 6, 2)
+        # GT always has 6 timesteps, we'll slice to timesteps later
         if gt_traj.dim() == 2:
             # Single trajectory: expand to batch
             if gt_traj.shape == (6, 2):
@@ -1469,7 +1505,8 @@ class ArachnePyTorch:
                     padded_gt[:, :min_timesteps, :] = gt_traj[:, :min_timesteps, :]
                     gt_traj = padded_gt.expand(batch_size, -1, -1)
         
-        # Handle shape mismatches and apply time_horizon
+        # Slice both pred and gt to timesteps based on time_horizon
+        # Both should be (batch, 6, 2) at this point, slice to (batch, timesteps, 2)
         min_len = min(timesteps, pred_traj_abs.shape[1], gt_traj.shape[1])
         if min_len == 0:
             return torch.full((batch_size,), float('inf'), device=pred_traj_abs.device, dtype=pred_traj_abs.dtype)
