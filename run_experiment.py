@@ -696,7 +696,7 @@ def main():
     
     repo_root = Path(__file__).parent.absolute()
     base_dir = Path(args.exp_dir)
-    base_dir.mkdir(exist_ok=True)
+    base_dir.mkdir(parents=True, exist_ok=True)  # 递归创建父目录（如果不存在）
 
     # If using tmpfs data, sanity-check that the in-memory dataset exists.
     if getattr(args, "use_tmpfs_data", False):
