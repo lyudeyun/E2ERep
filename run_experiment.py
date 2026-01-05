@@ -150,6 +150,7 @@ def generate_baseline_json(vad_name, repair_dataset, base_dir, repo_root,
         '--launcher', 'none',
         '--eval', 'bbox',
         '--tmpdir', 'tmp',
+        '--eval-options', 'jsonfile_prefix=None',  # Disable test/ directory creation
         '--collect-data',
         '--data-output', str(baseline_json),
     ]
@@ -300,6 +301,7 @@ def run_evaluation(vad_name, repaired_model, eval_dataset, exp_dir, repo_root,
         '--launcher', 'none',
         '--eval', 'bbox',
         '--tmpdir', 'tmp',
+        '--eval-options', 'jsonfile_prefix=None',  # Disable test/ directory creation
         '--collect-data',
         '--data-output', str(output_json),
     ]

@@ -1298,48 +1298,48 @@ class ArachnePyTorch:
                     error_count += 1
                     shape_errors.append(str(e))
                     continue
-        
+            
         # Compute fitness based on type (after all batches are processed)
-        total_frames_evaluated = positive_no_collision_count + middle_no_collision_count + negative_no_collision_count + collision_count
-        
-        if fitness_type == 'discrete':
-            # Discrete fitness definition:
-            # fitness = -(w1 * N_pos - w2 * N_(neg-no col) - w3 * N_mid - lambda * N_col)
-            # We want to maximize this value, but PSO minimizes, so we negate it
-            w1 = 1.0
-            w2 = 1.0
-            w3 = 0.5
-            lambda_col = 10.0
+            total_frames_evaluated = positive_no_collision_count + middle_no_collision_count + negative_no_collision_count + collision_count
             
-            score = (w1 * positive_no_collision_count -
-                     w2 * negative_no_collision_count -
-                     w3 * middle_no_collision_count -
-                     lambda_col * collision_count)
-            
-            fitness = -score  # Negate because PSO minimizes (we want to maximize score)
-        elif fitness_type == 'continuous':
-            # Continuous fitness: total L2 error across all frames
-            # Lower L2 error is better, PSO minimizes directly
-            score = total_l2_error
-            
-            # BUG FIX: If total_l2_error is 0.0 but no valid L2 errors were accumulated,
-            # this means all frames had NaN/Inf errors (model is broken), not perfect fitness!
-            # Return a large penalty value instead of 0.0
-            if score == 0.0 and valid_frame_count == 0:
-                fitness = float('inf')  # Worst possible fitness (will be rejected by PSO)
+            if fitness_type == 'discrete':
+                # Discrete fitness definition:
+                # fitness = -(w1 * N_pos - w2 * N_(neg-no col) - w3 * N_mid - lambda * N_col)
+                # We want to maximize this value, but PSO minimizes, so we negate it
+                w1 = 1.0
+                w2 = 1.0
+                w3 = 0.5
+                lambda_col = 10.0
+                
+                score = (w1 * positive_no_collision_count -
+                         w2 * negative_no_collision_count -
+                         w3 * middle_no_collision_count -
+                         lambda_col * collision_count)
+                
+                fitness = -score  # Negate because PSO minimizes (we want to maximize score)
+            elif fitness_type == 'continuous':
+                # Continuous fitness: total L2 error across all frames
+                # Lower L2 error is better, PSO minimizes directly
+                score = total_l2_error
+                
+                # BUG FIX: If total_l2_error is 0.0 but no valid L2 errors were accumulated,
+                # this means all frames had NaN/Inf errors (model is broken), not perfect fitness!
+                # Return a large penalty value instead of 0.0
+                if score == 0.0 and valid_frame_count == 0:
+                    fitness = float('inf')  # Worst possible fitness (will be rejected by PSO)
+                else:
+                    fitness = score  # Direct minimization of L2 error
+            elif fitness_type == 'continuous2':
+                # Continuous2 fitness: total L2 error + lambda * collision count
+                lambda_col = 10.0
+                
+                if valid_frame_count > 0:
+                    fitness = total_l2_error + lambda_col * collision_count
+                else:
+                    # No valid L2 errors: model is broken, use penalty fitness
+                    fitness = float('inf')  # Worst possible fitness (will be rejected by PSO)
             else:
-                fitness = score  # Direct minimization of L2 error
-        elif fitness_type == 'continuous2':
-            # Continuous2 fitness: total L2 error + lambda * collision count
-            lambda_col = 10.0
-            
-            if valid_frame_count > 0:
-                fitness = total_l2_error + lambda_col * collision_count
-            else:
-                # No valid L2 errors: model is broken, use penalty fitness
-                fitness = float('inf')  # Worst possible fitness (will be rejected by PSO)
-        else:
-            raise ValueError(f"Unknown fitness_type: {fitness_type}")
+                raise ValueError(f"Unknown fitness_type: {fitness_type}")
         
         # Return fitness and frame counts for logging (only for original model evaluation)
         if use_original_l2_for_classification:
