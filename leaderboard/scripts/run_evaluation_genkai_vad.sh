@@ -90,6 +90,13 @@ fi
 
 echo -e "**************\033[36m Single-GPU multi-process eval on genkai \033[0m **************"
 
+# 确保输出目录存在（避免评估器一开始写checkpoint失败导致直接退出）
+CHECKPOINT_DIR="${ALGO}_b2d_${PLANNER_TYPE}"
+mkdir -p "${CHECKPOINT_DIR}"
+mkdir -p "${SAVE_PATH}"
+echo "CHECKPOINT_DIR=$(readlink -f "${CHECKPOINT_DIR}" 2>/dev/null || echo "${CHECKPOINT_DIR}")"
+echo "SAVE_PATH=$(readlink -f "${SAVE_PATH}" 2>/dev/null || echo "${SAVE_PATH}")"
+
 # 启动 GPU 监控（如果可用）
 start_gpu_monitor
 
@@ -111,7 +118,7 @@ for ((i=0; i<length; i++)); do
     PORT=$((BASE_PORT + i * 150))
     TM_PORT=$((BASE_TM_PORT + i * 150))
     ROUTES="${BASE_ROUTES}_${TASK_LIST[$i]}_${ALGO}_${PLANNER_TYPE}.xml"
-    CHECKPOINT_ENDPOINT="${ALGO}_b2d_${PLANNER_TYPE}/${BASE_CHECKPOINT_ENDPOINT}_${TASK_LIST[$i]}.json"
+    CHECKPOINT_ENDPOINT="${CHECKPOINT_DIR}/${BASE_CHECKPOINT_ENDPOINT}_${TASK_LIST[$i]}.json"
     GPU_RANK=${GPU_RANK_LIST[$i]}
 
     echo -e "\033[32m ALGO: $ALGO \033[0m"
@@ -125,12 +132,13 @@ for ((i=0; i<length; i++)); do
     echo -e "\033[32m bash leaderboard/scripts/run_evaluation.sh $PORT $TM_PORT $IS_BENCH2DRIVE $ROUTES $TEAM_AGENT $TEAM_CONFIG $CHECKPOINT_ENDPOINT $SAVE_PATH $PLANNER_TYPE $GPU_RANK \033[0m"
     echo -e "***********************************************************************************"
 
+    # stdout/stderr 都写入同一个log，方便排查（之前的 2>&1 > file 会丢掉stdout/stderr顺序）
     bash -e leaderboard/scripts/run_evaluation.sh \
         "$PORT" "$TM_PORT" "$IS_BENCH2DRIVE" \
         "$ROUTES" "$TEAM_AGENT" "$TEAM_CONFIG" \
         "$CHECKPOINT_ENDPOINT" "$SAVE_PATH" \
         "$PLANNER_TYPE" "$GPU_RANK" \
-        2>&1 > "${BASE_ROUTES}_${TASK_LIST[$i]}_${ALGO}_${PLANNER_TYPE}_genkai_single_gpu.log" &
+        > "${BASE_ROUTES}_${TASK_LIST[$i]}_${ALGO}_${PLANNER_TYPE}_genkai_single_gpu.log" 2>&1 &
 
     # 给 CARLA 一点时间启动，避免一下子起太多导致崩溃
     sleep 5
