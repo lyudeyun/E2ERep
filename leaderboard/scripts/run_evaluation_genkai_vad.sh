@@ -20,7 +20,7 @@ BASE_ROUTES=leaderboard/data/bench2drive220
 # 如果你想用 fast / super-fast 版本，可以参考 run_evaluation_debug.sh 里的写法替换下两行
 TEAM_AGENT=leaderboard/team_code/vad_b2d_agent.py
 # 注意：这里的 YOUR_CKPT_PATH 需要你手动改成在超算上实际存放 ckpt 的路径前缀
-TEAM_CONFIG=Bench2DriveZoo/adzoo/vad/configs/VAD/VAD_base_e2e_b2d.py+YOUR_CKPT_PATH/vad_b2d_base.pth
+TEAM_CONFIG=Bench2DriveZoo/adzoo/vad/configs/VAD/VAD_base_e2e_b2d.py+Bench2DriveZoo/ckpts/vad_b2d_base.pth
 
 BASE_CHECKPOINT_ENDPOINT=eval_bench2drive220
 PLANNER_TYPE=traj
@@ -33,8 +33,8 @@ SAVE_PATH=./eval_bench2drive220_${ALGO}_${PLANNER_TYPE}_genkai_single_gpu
 
 # 是否开启 GPU 监控（默认开启）。如不需要可以在外面 export ENABLE_GPU_MONITOR=0
 ENABLE_GPU_MONITOR=${ENABLE_GPU_MONITOR:-1}
-# 监控间隔（秒）
-GPU_MONITOR_INTERVAL=${GPU_MONITOR_INTERVAL:-30}
+# 监控间隔（秒），默认 300 秒（5 分钟）
+GPU_MONITOR_INTERVAL=${GPU_MONITOR_INTERVAL:-300}
 # 监控日志文件
 GPU_MONITOR_LOG=${GPU_MONITOR_LOG:-gpu_monitor_genkai.log}
 
