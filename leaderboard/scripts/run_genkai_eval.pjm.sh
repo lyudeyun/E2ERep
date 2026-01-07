@@ -34,6 +34,13 @@ export DISPLAY=
 # 设 libjpeg.so.8（部分环境需要 conda 里的 libjpeg）
 export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
 
+# CARLA 启动参数（超算上 Vulkan 容易出问题时，建议用 -opengl）
+export CARLA_EXTRA_ARGS="${CARLA_EXTRA_ARGS:--opengl}"
+# CARLA 启动后等待时间（秒），超算首次启动可能更慢，建议 >= 60
+export CARLA_STARTUP_SLEEP="${CARLA_STARTUP_SLEEP:-60}"
+# 把 CARLA server 的 stdout/stderr 落盘，方便定位启动失败原因
+export CARLA_SERVER_LOG_DIR="${CARLA_SERVER_LOG_DIR:-${PWD}/carla_server_logs}"
+
 # 可选：如果不想保存图片，可以设置 SAVE_PATH 为空（但需要修改脚本逻辑）
 # export SAVE_PATH=
 
