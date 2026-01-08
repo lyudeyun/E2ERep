@@ -32,7 +32,8 @@ fi
 export DISPLAY=
 
 # 设 libjpeg.so.8（部分环境需要 conda 里的 libjpeg）
-export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
+# 兼容：即便未来加了 `set -u`，也不因 LD_LIBRARY_PATH 未定义而崩
+export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 
 # CARLA 启动参数（超算上 Vulkan 容易出问题时，建议用 -opengl）
 export CARLA_EXTRA_ARGS="${CARLA_EXTRA_ARGS:--opengl}"
