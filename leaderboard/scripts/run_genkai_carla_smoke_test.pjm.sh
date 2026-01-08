@@ -114,6 +114,7 @@ sleep "${CARLA_STARTUP_SLEEP}"
 
 # 等待端口就绪 + 进程仍存活（比盲等更可靠）
 echo "[SMOKE] waiting for CARLA to listen on localhost:${PORT} (timeout=${CARLA_READY_TIMEOUT}s)"
+set +e
 python - <<PY
 import os, socket, sys, time
 port = int(${PORT})
@@ -146,6 +147,29 @@ while True:
             sys.exit(3)
         time.sleep(2)
 PY
+RC=$?
+set -e
+
+if [ "${RC}" -ne 0 ]; then
+  echo "[SMOKE] =================================================="
+  echo "[SMOKE][FAIL] CARLA not ready (rc=${RC}). Dump diagnostics:"
+  echo "[SMOKE]   CARLA_PID=${CARLA_PID}"
+  echo "[SMOKE]   SERVER_LOG=${SERVER_LOG}"
+  echo "[SMOKE] =================================================="
+  ps -p "${CARLA_PID}" -o pid,ppid,stat,etime,cmd || true
+  pgrep -a "CarlaUE4-Linux-Shipping" || true
+  echo "[SMOKE] server log tail (for quick diagnosis):"
+  tail -n 400 "${SERVER_LOG}" || true
+  echo "[SMOKE] probing UE4 Saved/Logs (if any):"
+  UE4_LOG_DIR="${CARLA_ROOT}/CarlaUE4/Saved/Logs"
+  if [ -d "${UE4_LOG_DIR}" ]; then
+    ls -lh "${UE4_LOG_DIR}" || true
+    tail -n 200 "${UE4_LOG_DIR}"/*.log 2>/dev/null || true
+  else
+    echo "[SMOKE] ${UE4_LOG_DIR} does not exist"
+  fi
+  exit "${RC}"
+fi
 
 echo "[SMOKE] server log tail (for quick diagnosis):"
 tail -n 200 "${SERVER_LOG}" || true
