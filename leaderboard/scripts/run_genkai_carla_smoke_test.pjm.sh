@@ -41,7 +41,9 @@ fi
 export DISPLAY=
 
 # 部分环境需要 conda 里的 libjpeg/libstdc++ 等
-export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
+# 注意：脚本使用了 `set -u`，当 LD_LIBRARY_PATH 未定义时直接引用会报 “未割り当ての変数”
+# 用安全的参数展开：若原变量存在则追加，否则只设置 conda 的 lib
+export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 
 # 建议先用 -opengl 绕开 Vulkan 相关问题；如需改回 Vulkan：export CARLA_EXTRA_ARGS=""
 export CARLA_EXTRA_ARGS="${CARLA_EXTRA_ARGS:--opengl}"
