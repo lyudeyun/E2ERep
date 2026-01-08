@@ -45,11 +45,17 @@ export DISPLAY=
 # 用安全的参数展开：若原变量存在则追加，否则只设置 conda 的 lib
 export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 
-# 建议先用 -opengl 绕开 Vulkan 相关问题；如需改回 Vulkan：export CARLA_EXTRA_ARGS=""
-export CARLA_EXTRA_ARGS="${CARLA_EXTRA_ARGS:--opengl}"
+# 建议先用 -opengl 绕开 Vulkan 相关问题；
+# 另外加上 -log/-stdout 尽量把 UE4 日志打到 stdout/stderr，方便我们在 SERVER_LOG 里直接定位问题。
+# 如需改回 Vulkan：export CARLA_EXTRA_ARGS=""
+export CARLA_EXTRA_ARGS="${CARLA_EXTRA_ARGS:--opengl -log -stdout}"
 
 # CARLA 启动后等待时间（秒）：节点慢的话可以改大，比如 120
 export CARLA_STARTUP_SLEEP="${CARLA_STARTUP_SLEEP:-60}"
+# 连接等待（秒）：有些节点第一次启动（编译 shader/加载资源）会明显更慢
+export CARLA_READY_TIMEOUT="${CARLA_READY_TIMEOUT:-180}"
+# carla.Client 超时时间（秒）
+export CARLA_CLIENT_TIMEOUT="${CARLA_CLIENT_TIMEOUT:-60}"
 
 # 日志目录
 LOGDIR="${PWD}/carla_server_logs"
@@ -100,13 +106,63 @@ cleanup() {
 }
 trap cleanup EXIT
 
+echo "[SMOKE] CARLA_PID=${CARLA_PID}"
+ps -p "${CARLA_PID}" -o pid,ppid,stat,etime,cmd || true
+pgrep -a "CarlaUE4-Linux-Shipping" || true
+
 sleep "${CARLA_STARTUP_SLEEP}"
+
+# 等待端口就绪 + 进程仍存活（比盲等更可靠）
+echo "[SMOKE] waiting for CARLA to listen on localhost:${PORT} (timeout=${CARLA_READY_TIMEOUT}s)"
+python - <<PY
+import os, socket, sys, time
+port = int(${PORT})
+timeout = int(os.environ.get("CARLA_READY_TIMEOUT", "180"))
+pid = int(${CARLA_PID})
+
+def is_pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+start = time.time()
+while True:
+    if not is_pid_alive(pid):
+        print(f"[SMOKE][FAIL] CARLA process exited early (pid={pid}).")
+        sys.exit(2)
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(0.5)
+    try:
+        s.connect(("127.0.0.1", port))
+        s.close()
+        print("[SMOKE] port is open.")
+        sys.exit(0)
+    except Exception:
+        s.close()
+        if time.time() - start > timeout:
+            print(f"[SMOKE][FAIL] port {port} not open within {timeout}s.")
+            sys.exit(3)
+        time.sleep(2)
+PY
+
+echo "[SMOKE] server log tail (for quick diagnosis):"
+tail -n 200 "${SERVER_LOG}" || true
+echo "[SMOKE] probing UE4 Saved/Logs (if any):"
+UE4_LOG_DIR="${CARLA_ROOT}/CarlaUE4/Saved/Logs"
+if [ -d "${UE4_LOG_DIR}" ]; then
+  ls -lh "${UE4_LOG_DIR}" || true
+  tail -n 200 "${UE4_LOG_DIR}"/*.log 2>/dev/null || true
+else
+  echo "[SMOKE] ${UE4_LOG_DIR} does not exist"
+fi
 
 # 连接测试：能 get_world 就算 smoke test 通过
 python - <<PY
 import carla
 client = carla.Client("localhost", ${PORT})
-client.set_timeout(10.0)
+client.set_timeout(float(${CARLA_CLIENT_TIMEOUT}))
 world = client.get_world()
 print("OK: connected. map =", world.get_map().name)
 PY
