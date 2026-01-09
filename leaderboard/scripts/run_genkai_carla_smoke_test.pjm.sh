@@ -36,6 +36,7 @@ if [ ! -f "${UE4_BIN}" ]; then
   echo "[SMOKE][FAIL] UE4 binary not found: ${UE4_BIN}" >&2
   exit 11
 fi
+chmod +x "${UE4_BIN}" 2>/dev/null || true
 
 # -------- genkai 环境兼容性设置 --------
 # CarlaUE4.sh 有时会调用 `xdg-user-dir`，超算环境可能不存在；提供最小 stub。
@@ -102,14 +103,18 @@ echo "  SERVER_LOG=${SERVER_LOG}"
 echo "=================================================="
 
 # 启动 CARLA server（用 setsid，方便 kill 整个进程组）
-setsid env -u LD_LIBRARY_PATH "${CARLA_ROOT}/CarlaUE4.sh" -RenderOffScreen -nosound \
+setsid env -u LD_LIBRARY_PATH "${UE4_BIN}" CarlaUE4 -RenderOffScreen -nosound \
   -carla-rpc-port="${PORT}" -graphicsadapter=0 ${CARLA_EXTRA_ARGS} \
   > "${SERVER_LOG}" 2>&1 &
 CARLA_PID=$!
 sleep 2
 
-# 尝试抓到真正的 UE4 进程（有时 CarlaUE4.sh/setsid 是中间 wrapper）
-UE4_PID="$(pgrep -n -f 'CarlaUE4-Linux-Shipping' 2>/dev/null || true)"
+# 现在我们直接启动 UE4 二进制：CARLA_PID 就是 UE4 进程号（仍保留一次 pgrep 做双重确认）
+UE4_PID="${CARLA_PID}"
+UE4_PID_PGREP="$(pgrep -n -f 'CarlaUE4-Linux-Shipping' 2>/dev/null || true)"
+if [ -n "${UE4_PID_PGREP}" ]; then
+  UE4_PID="${UE4_PID_PGREP}"
+fi
 export UE4_PID="${UE4_PID}"
 if [ -n "${UE4_PID}" ]; then
   echo "[SMOKE] UE4_PID=${UE4_PID}"
@@ -211,8 +216,9 @@ if [ "${RC}" -ne 0 ]; then
   echo "[SMOKE] quick probe (15s) with LD_DEBUG=libs (prints real loader error if any):"
   set +e
   timeout 15s env -u LD_LIBRARY_PATH LIBGL_DEBUG=verbose LD_DEBUG=libs \
-    "${CARLA_ROOT}/CarlaUE4.sh" -RenderOffScreen -nosound -carla-rpc-port="${PORT}" \
-    -graphicsadapter=0 ${CARLA_EXTRA_ARGS} 2>&1 | head -n 200 || true
+    "${UE4_BIN}" CarlaUE4 -RenderOffScreen -nosound -carla-rpc-port="${PORT}" \
+    -graphicsadapter=0 ${CARLA_EXTRA_ARGS} 2>&1 | head -n 240 || true
+  echo "[SMOKE] quick probe rc=$?"
   set -e
   echo "[SMOKE] SERVER_LOG file info:"
   ls -lh "${SERVER_LOG}" 2>/dev/null || true
