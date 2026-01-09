@@ -25,6 +25,18 @@ cd /home/pj25001076/ku50002427/git/B2DRepair
 # -------------------- CARLA_ROOT（按需修改） --------------------
 export CARLA_ROOT=/home/pj25001076/ku50002427/git/B2DRepair/Bench2DriveZoo/carla
 
+# -------------------- 预检查（尽早失败，给出明确报错） --------------------
+CARLA_SH="${CARLA_ROOT}/CarlaUE4.sh"
+UE4_BIN="${CARLA_ROOT}/CarlaUE4/Binaries/Linux/CarlaUE4-Linux-Shipping"
+if [ ! -f "${CARLA_SH}" ]; then
+  echo "[SMOKE][FAIL] CarlaUE4.sh not found: ${CARLA_SH}" >&2
+  exit 10
+fi
+if [ ! -f "${UE4_BIN}" ]; then
+  echo "[SMOKE][FAIL] UE4 binary not found: ${UE4_BIN}" >&2
+  exit 11
+fi
+
 # -------- genkai 环境兼容性设置 --------
 # CarlaUE4.sh 有时会调用 `xdg-user-dir`，超算环境可能不存在；提供最小 stub。
 if ! command -v xdg-user-dir >/dev/null 2>&1; then
@@ -40,10 +52,10 @@ fi
 # 无显示环境下运行 CARLA
 export DISPLAY=
 
-# 部分环境需要 conda 里的 libjpeg/libstdc++ 等
-# 注意：脚本使用了 `set -u`，当 LD_LIBRARY_PATH 未定义时直接引用会报 “未割り当ての変数”
-# 用安全的参数展开：若原变量存在则追加，否则只设置 conda 的 lib
-export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+# 部分环境需要 conda 里的 libjpeg/libstdc++ 等，但 UE4/显卡驱动相关库通常更依赖系统路径。
+# 为避免 conda 的库“覆盖”系统/驱动库，这里把 conda 的 lib **追加** 到 LD_LIBRARY_PATH 末尾。
+# 注意：脚本使用了 `set -u`，当 LD_LIBRARY_PATH 未定义时直接引用会报错；因此用安全展开。
+export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+${LD_LIBRARY_PATH}:}${CONDA_PREFIX}/lib"
 
 # 建议先用 -opengl 绕开 Vulkan 相关问题；
 # 另外加上 -log/-stdout 尽量把 UE4 日志打到 stdout/stderr，方便我们在 SERVER_LOG 里直接定位问题。
@@ -94,6 +106,16 @@ setsid "${CARLA_ROOT}/CarlaUE4.sh" -RenderOffScreen -nosound \
   -carla-rpc-port="${PORT}" -graphicsadapter=0 ${CARLA_EXTRA_ARGS} \
   > "${SERVER_LOG}" 2>&1 &
 CARLA_PID=$!
+sleep 2
+
+# 尝试抓到真正的 UE4 进程（有时 CarlaUE4.sh/setsid 是中间 wrapper）
+UE4_PID="$(pgrep -n -f 'CarlaUE4-Linux-Shipping' 2>/dev/null || true)"
+export UE4_PID="${UE4_PID}"
+if [ -n "${UE4_PID}" ]; then
+  echo "[SMOKE] UE4_PID=${UE4_PID}"
+else
+  echo "[SMOKE] UE4_PID not found yet."
+fi
 
 cleanup() {
   set +e
@@ -120,6 +142,8 @@ import os, socket, sys, time
 port = int(${PORT})
 timeout = int(os.environ.get("CARLA_READY_TIMEOUT", "180"))
 pid = int(${CARLA_PID})
+ue4_pid_env = os.environ.get("UE4_PID", "").strip()
+ue4_pid = int(ue4_pid_env) if ue4_pid_env.isdigit() else None
 
 def is_pid_alive(pid: int) -> bool:
     try:
@@ -130,9 +154,15 @@ def is_pid_alive(pid: int) -> bool:
 
 start = time.time()
 while True:
-    if not is_pid_alive(pid):
-        print(f"[SMOKE][FAIL] CARLA process exited early (pid={pid}).")
-        sys.exit(2)
+    # 优先监控真正的 UE4 进程；否则退化为监控 wrapper pid
+    if ue4_pid is not None:
+        if not is_pid_alive(ue4_pid):
+            print(f"[SMOKE][FAIL] UE4 process exited early (ue4_pid={ue4_pid}).")
+            sys.exit(2)
+    else:
+        if not is_pid_alive(pid):
+            print(f"[SMOKE][FAIL] CARLA process exited early (pid={pid}).")
+            sys.exit(2)
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(0.5)
     try:
@@ -154,10 +184,33 @@ if [ "${RC}" -ne 0 ]; then
   echo "[SMOKE] =================================================="
   echo "[SMOKE][FAIL] CARLA not ready (rc=${RC}). Dump diagnostics:"
   echo "[SMOKE]   CARLA_PID=${CARLA_PID}"
+  echo "[SMOKE]   UE4_PID=${UE4_PID:-}"
   echo "[SMOKE]   SERVER_LOG=${SERVER_LOG}"
   echo "[SMOKE] =================================================="
+  echo "[SMOKE] process snapshot:"
   ps -p "${CARLA_PID}" -o pid,ppid,stat,etime,cmd || true
+  if [ -n "${UE4_PID:-}" ]; then
+    ps -p "${UE4_PID}" -o pid,ppid,stat,etime,cmd || true
+  fi
   pgrep -a "CarlaUE4-Linux-Shipping" || true
+  echo "[SMOKE] CarlaUE4.sh/setsid exit code (if already exited):"
+  set +e
+  wait "${CARLA_PID}" 2>/dev/null
+  echo "[SMOKE] wait(CARLA_PID=${CARLA_PID}) rc=$?"
+  set -e
+  echo "[SMOKE] UE4 binary info:"
+  file "${UE4_BIN}" 2>/dev/null || true
+  echo "[SMOKE] UE4 binary missing shared libs (if any):"
+  ldd "${UE4_BIN}" 2>/dev/null | grep -E 'not found|ld-linux|libstdc\+\+|libgcc_s|libGL|libEGL|libX|libxcb|libvulkan|libdrm' || true
+  echo "[SMOKE] env (key vars):"
+  env | grep -E '^(CONDA|PATH|LD_LIBRARY_PATH|DISPLAY|CUDA|NVIDIA|VULKAN|__GL)=' || true
+  echo "[SMOKE] GPU visibility (if available):"
+  nvidia-smi -L 2>/dev/null || true
+  echo "[SMOKE] SERVER_LOG file info:"
+  ls -lh "${SERVER_LOG}" 2>/dev/null || true
+  stat "${SERVER_LOG}" 2>/dev/null || true
+  echo "[SMOKE] SERVER_LOG head:"
+  head -n 80 "${SERVER_LOG}" 2>/dev/null || true
   echo "[SMOKE] server log tail (for quick diagnosis):"
   tail -n 400 "${SERVER_LOG}" || true
   echo "[SMOKE] probing UE4 Saved/Logs (if any):"
