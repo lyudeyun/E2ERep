@@ -52,10 +52,10 @@ fi
 # 无显示环境下运行 CARLA
 export DISPLAY=
 
-# 部分环境需要 conda 里的 libjpeg/libstdc++ 等，但 UE4/显卡驱动相关库通常更依赖系统路径。
-# 为避免 conda 的库“覆盖”系统/驱动库，这里把 conda 的 lib **追加** 到 LD_LIBRARY_PATH 末尾。
-# 注意：脚本使用了 `set -u`，当 LD_LIBRARY_PATH 未定义时直接引用会报错；因此用安全展开。
-export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+${LD_LIBRARY_PATH}:}${CONDA_PREFIX}/lib"
+# 重要：在超算上，conda 的运行时库（libgcc_s/libstdc++ 等）有时会导致 UE4 在极早期直接退出且不留日志。
+# 因此默认 **不改** 当前 shell 的 LD_LIBRARY_PATH，并在启动 CARLA server 时使用一个“干净环境”
+#（等价于 env -u LD_LIBRARY_PATH），让 UE4 优先走系统/驱动栈的库。
+ORIG_LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}"
 
 # 建议先用 -opengl 绕开 Vulkan 相关问题；
 # 另外加上 -log/-stdout 尽量把 UE4 日志打到 stdout/stderr，方便我们在 SERVER_LOG 里直接定位问题。
@@ -102,7 +102,7 @@ echo "  SERVER_LOG=${SERVER_LOG}"
 echo "=================================================="
 
 # 启动 CARLA server（用 setsid，方便 kill 整个进程组）
-setsid "${CARLA_ROOT}/CarlaUE4.sh" -RenderOffScreen -nosound \
+setsid env -u LD_LIBRARY_PATH "${CARLA_ROOT}/CarlaUE4.sh" -RenderOffScreen -nosound \
   -carla-rpc-port="${PORT}" -graphicsadapter=0 ${CARLA_EXTRA_ARGS} \
   > "${SERVER_LOG}" 2>&1 &
 CARLA_PID=$!
@@ -204,8 +204,16 @@ if [ "${RC}" -ne 0 ]; then
   ldd "${UE4_BIN}" 2>/dev/null | grep -E 'not found|ld-linux|libstdc\+\+|libgcc_s|libGL|libEGL|libX|libxcb|libvulkan|libdrm' || true
   echo "[SMOKE] env (key vars):"
   env | grep -E '^(CONDA|PATH|LD_LIBRARY_PATH|DISPLAY|CUDA|NVIDIA|VULKAN|__GL)=' || true
+  echo "[SMOKE] note: CARLA server started with env -u LD_LIBRARY_PATH"
+  echo "[SMOKE] ORIG_LD_LIBRARY_PATH=${ORIG_LD_LIBRARY_PATH}"
   echo "[SMOKE] GPU visibility (if available):"
   nvidia-smi -L 2>/dev/null || true
+  echo "[SMOKE] quick probe (15s) with LD_DEBUG=libs (prints real loader error if any):"
+  set +e
+  timeout 15s env -u LD_LIBRARY_PATH LIBGL_DEBUG=verbose LD_DEBUG=libs \
+    "${CARLA_ROOT}/CarlaUE4.sh" -RenderOffScreen -nosound -carla-rpc-port="${PORT}" \
+    -graphicsadapter=0 ${CARLA_EXTRA_ARGS} 2>&1 | head -n 200 || true
+  set -e
   echo "[SMOKE] SERVER_LOG file info:"
   ls -lh "${SERVER_LOG}" 2>/dev/null || true
   stat "${SERVER_LOG}" 2>/dev/null || true
