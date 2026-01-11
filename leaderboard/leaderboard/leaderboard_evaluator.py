@@ -22,7 +22,6 @@ import pkg_resources
 import sys
 import carla
 import signal
-import shlex
 
 from srunner.scenariomanager.carla_data_provider import *
 from srunner.scenariomanager.timer import GameTime
@@ -39,7 +38,6 @@ import subprocess
 import time
 import random
 from datetime import datetime
-import socket
 
 sensors_to_icons = {
     'sensor.camera.rgb':        'carla_camera',
@@ -62,13 +60,6 @@ def find_free_port(starting_port):
                 return port
         except OSError:
             port += 1
-
-def _is_port_listening(host: str, port: int, timeout_s: float = 1.0) -> bool:
-    try:
-        with socket.create_connection((host, port), timeout=timeout_s):
-            return True
-    except Exception:
-        return False
 
 def get_weather_id(weather_conditions):
     from xml.etree import ElementTree as ET
@@ -209,41 +200,11 @@ class LeaderboardEvaluator(object):
         """
         self.carla_path = os.environ["CARLA_ROOT"]
         args.port = find_free_port(args.port)
-        # Cluster-friendly options (optional via env vars):
-        # - CARLA_EXTRA_ARGS: e.g. "-opengl" when Vulkan is problematic
-        # - CARLA_STARTUP_SLEEP: seconds to wait before first client connection attempt
-        # - CARLA_SERVER_LOG_DIR: if set, redirect CARLA server stdout/stderr to a file under this directory
-        extra_args = os.environ.get("CARLA_EXTRA_ARGS", "").strip()
-        startup_sleep = float(os.environ.get("CARLA_STARTUP_SLEEP", "30"))
-        server_log_dir = os.environ.get("CARLA_SERVER_LOG_DIR", "").strip()
-
-        server_log_redir = ""
-        if server_log_dir:
-            os.makedirs(server_log_dir, exist_ok=True)
-            server_log_path = os.path.join(server_log_dir, f"carla_server_port{args.port}_gpu{args.gpu_rank}.log")
-            server_log_redir = f" > {shlex.quote(server_log_path)} 2>&1"
-
         cmd1 = f"{os.path.join(self.carla_path, 'CarlaUE4.sh')} -RenderOffScreen -nosound -carla-rpc-port={args.port} -graphicsadapter={args.gpu_rank}"
-        if extra_args:
-            cmd1 += f" {extra_args}"
-        cmd1 += server_log_redir
         self.server = subprocess.Popen(cmd1, shell=True, preexec_fn=os.setsid)
         print(cmd1, self.server.returncode, flush=True)
         atexit.register(os.killpg, self.server.pid, signal.SIGKILL)
-        time.sleep(startup_sleep)
-
-        # Early diagnostics: on clusters CARLA may exit immediately or fail to bind the port.
-        rc = self.server.poll()
-        if rc is not None:
-            print(f"[CARLA] server exited early: returncode={rc}", flush=True)
-            if server_log_dir:
-                print(f"[CARLA] server log dir: {server_log_dir}", flush=True)
-            raise RuntimeError("CARLA server exited before client connection. See CARLA server log / UE4 logs for details.")
-        if not _is_port_listening(args.host, args.port, timeout_s=1.0):
-            print(f"[CARLA] server not listening on {args.host}:{args.port} after {startup_sleep}s (pid={self.server.pid})", flush=True)
-            if server_log_dir:
-                print(f"[CARLA] server log dir: {server_log_dir}", flush=True)
-            # Don't abort immediately; carla.Client may still succeed if startup is slow, but this is a strong signal.
+        time.sleep(30)
             
         attempts = 0
         num_max_restarts = 20
