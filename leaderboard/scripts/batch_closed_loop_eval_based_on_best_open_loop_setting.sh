@@ -418,8 +418,14 @@ for i in "${!MATCHED_EXPERIMENTS[@]}"; do
   echo "[${task_num}/${TOTAL_TASKS}] 评估: ${exp_name}"
   echo "  PTH文件: ${pth_file}"
   
-  # 构建输出路径：在每个实验目录下创建 closed_loop_eval/ 文件夹（与 open_loop_eval/ 并列）
-  cl_dir="${exp_dir}/closed_loop_eval"
+  # 构建输出路径：避免不同 routes XML 的结果互相覆盖
+  # 规则：在每个实验目录下创建 closed_loop_eval_<ROUTES_BASENAME>/ 文件夹（与 open_loop_eval/ 并列）
+  # 例：ROUTES=leaderboard/data/bench2drive220.xml -> closed_loop_eval_bench2drive220/
+  routes_base="$(basename "${ROUTES}")"
+  routes_stem="${routes_base%.xml}"
+  # 兜底：把奇怪字符替换成下划线，保证目录名安全
+  routes_tag="$(echo "${routes_stem}" | sed 's/[^A-Za-z0-9._-]/_/g')"
+  cl_dir="${exp_dir}/closed_loop_eval_${routes_tag}"
   checkpoint_json="${cl_dir}/closed_loop_eval.json"
   save_path="${cl_dir}"
   log_file="${cl_dir}/closed_loop_eval.log"
