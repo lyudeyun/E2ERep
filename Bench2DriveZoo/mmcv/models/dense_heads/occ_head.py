@@ -427,7 +427,8 @@ class OccHead(BaseModule):
         if no_query:
             # output all zero results
             out_dict['seg_out'] = torch.zeros((1, 5, 1, 200, 200),device=bev_feat.device).long()  # [1, 5, 1, 200, 200]
-            out_dict['ins_seg_out'] = torch.zeros((1, 5, 1, 200, 200),device=bev_feat.device).long()  # [1, 5, 200, 200]
+            # Fix: ins_seg_out should be 4D [b, t, h, w], not 5D [b, t, 1, h, w]
+            out_dict['ins_seg_out'] = torch.zeros((1, 5, 200, 200),device=bev_feat.device).long()  # [1, 5, 200, 200]
             return out_dict
 
 

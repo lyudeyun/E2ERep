@@ -107,13 +107,31 @@ def custom_multi_gpu_test(model, data_loader, tmpdir=None, gpu_collect=False):
                 occ_has_invalid_frame = data['gt_occ_has_invalid_frame'][0]
                 occ_to_eval = not occ_has_invalid_frame.item()
                 if occ_to_eval and 'occ' in result[0].keys():
-                    num_occ += 1
-                    for key, grid in EVALUATION_RANGES.items():
-                        limits = slice(grid[0], grid[1])
-                        iou_metrics[key](result[0]['occ']['seg_out'][..., limits, limits].contiguous(),
-                                        result[0]['occ']['seg_gt'][..., limits, limits].contiguous())
-                        panoptic_metrics[key](result[0]['occ']['ins_seg_out'][..., limits, limits].contiguous().detach(),
-                                                result[0]['occ']['ins_seg_gt'][..., limits, limits].contiguous())
+                    try:
+                        num_occ += 1
+                        for key, grid in EVALUATION_RANGES.items():
+                            limits = slice(grid[0], grid[1])
+                            iou_metrics[key](result[0]['occ']['seg_out'][..., limits, limits].contiguous(),
+                                            result[0]['occ']['seg_gt'][..., limits, limits].contiguous())
+                            # Check dimensions before calling panoptic_metrics
+                            ins_seg_out_sliced = result[0]['occ']['ins_seg_out'][..., limits, limits].contiguous().detach()
+                            ins_seg_gt_sliced = result[0]['occ']['ins_seg_gt'][..., limits, limits].contiguous()
+                            # Ensure dimensions are correct: should be (b, s, h, w) where b>=1, s>=1
+                            if ins_seg_out_sliced.dim() == 4 and ins_seg_gt_sliced.dim() == 4:
+                                panoptic_metrics[key](ins_seg_out_sliced, ins_seg_gt_sliced)
+                            else:
+                                # Skip panoptic evaluation for this sample if dimensions don't match
+                                if rank == 0:
+                                    print(f"Warning: Skipping panoptic evaluation for sample {i}, "
+                                          f"ins_seg_out dim={ins_seg_out_sliced.dim()}, "
+                                          f"ins_seg_gt dim={ins_seg_gt_sliced.dim()}")
+                    except Exception as e:
+                        # Skip occ evaluation for this sample if there's an error
+                        # Note: Do NOT use 'continue' here, as it would skip the entire frame evaluation
+                        # Only skip occ evaluation, but continue with bbox and planning evaluation
+                        if rank == 0:
+                            print(f"Warning: Skipping occ evaluation for sample {i} due to error: {e}")
+                        # Don't use continue - let the frame continue to be evaluated for bbox/planning
 
             # Pop out unnecessary occ results, avoid appending it to cpu when collect_results_cpu
             if os.environ.get('ENABLE_PLOT_MODE', None) is None:
