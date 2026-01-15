@@ -149,7 +149,7 @@ _num_levels_ = 4
 bev_h_ = 200
 bev_w_ = 200
 queue_length = 4 # each sequence contains `queue_length` frames.
-total_epochs = 6
+total_epochs = 60
 
 model = dict(
     type='VAD',

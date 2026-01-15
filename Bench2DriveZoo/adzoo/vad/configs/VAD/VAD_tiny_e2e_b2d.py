@@ -145,10 +145,10 @@ input_modality = dict(
 _dim_ = 256
 _pos_dim_ = _dim_//2
 _ffn_dim_ = _dim_*2
-_num_levels_ = 4
-bev_h_ = 200
-bev_w_ = 200
-queue_length = 4 # each sequence contains `queue_length` frames.
+_num_levels_ = 1
+bev_h_ = 100
+bev_w_ = 100
+queue_length = 3 # each sequence contains `queue_length` frames.
 total_epochs = 60
 
 model = dict(
@@ -160,14 +160,14 @@ model = dict(
         type='ResNet',
         depth=50,
         num_stages=4,
-        out_indices=(1, 2, 3),
+        out_indices=(3,),
         frozen_stages=1,
         norm_cfg=dict(type='BN', requires_grad=False),
         norm_eval=True,
         style='pytorch'),
     img_neck=dict(
         type='FPN',
-        in_channels=[512, 1024, 2048],
+        in_channels=[2048],
         out_channels=_dim_,
         start_level=0,
         add_extra_convs='on_output',
@@ -197,10 +197,10 @@ model = dict(
                         type='MultiheadAttention',
                         embed_dims=_dim_,
                         num_heads=8,
-                        dropout=0.0),
+                        dropout=0.1),
                 ],
                 feedforward_channels=_ffn_dim_,
-                ffn_dropout=0.0,
+                ffn_dropout=0.1,
                 operation_order=('cross_attn', 'norm', 'ffn', 'norm'))),
         ego_map_decoder=dict(
             type='CustomTransformerDecoder',
@@ -213,10 +213,10 @@ model = dict(
                         type='MultiheadAttention',
                         embed_dims=_dim_,
                         num_heads=8,
-                        dropout=0.0),
+                        dropout=0.1),
                 ],
                 feedforward_channels=_ffn_dim_,
-                ffn_dropout=0.0,
+                ffn_dropout=0.1,
                 operation_order=('cross_attn', 'norm', 'ffn', 'norm'))),
         motion_decoder=dict(
             type='CustomTransformerDecoder',
@@ -229,10 +229,10 @@ model = dict(
                         type='MultiheadAttention',
                         embed_dims=_dim_,
                         num_heads=8,
-                        dropout=0.0),
+                        dropout=0.1),
                 ],
                 feedforward_channels=_ffn_dim_,
-                ffn_dropout=0.0,
+                ffn_dropout=0.1,
                 operation_order=('cross_attn', 'norm', 'ffn', 'norm'))),
         motion_map_decoder=dict(
             type='CustomTransformerDecoder',
@@ -245,10 +245,10 @@ model = dict(
                         type='MultiheadAttention',
                         embed_dims=_dim_,
                         num_heads=8,
-                        dropout=0.0),
+                        dropout=0.1),
                 ],
                 feedforward_channels=_ffn_dim_,
-                ffn_dropout=0.0,
+                ffn_dropout=0.1,
                 operation_order=('cross_attn', 'norm', 'ffn', 'norm'))),
         use_pe=True,
         bev_h=bev_h_,
@@ -279,7 +279,7 @@ model = dict(
             embed_dims=_dim_,
             encoder=dict(
                 type='BEVFormerEncoder',
-                num_layers=6,
+                num_layers=3,
                 pc_range=point_cloud_range,
                 num_points_in_pillar=4,
                 return_intermediate=False,
@@ -302,12 +302,12 @@ model = dict(
                         )
                     ],
                     feedforward_channels=_ffn_dim_,
-                    ffn_dropout=0.0,
+                    ffn_dropout=0.1,
                     operation_order=('self_attn', 'norm', 'cross_attn', 'norm',
                                      'ffn', 'norm'))),
             decoder=dict(
                 type='DetectionTransformerDecoder',
-                num_layers=6,
+                num_layers=3,
                 return_intermediate=True,
                 transformerlayers=dict(
                     type='DetrTransformerDecoderLayer',
@@ -316,19 +316,19 @@ model = dict(
                             type='MultiheadAttention',
                             embed_dims=_dim_,
                             num_heads=8,
-                            dropout=0.0),
+                            dropout=0.1),
                         dict(
                             type='CustomMSDeformableAttention',
                             embed_dims=_dim_,
                             num_levels=1),
                     ],
                     feedforward_channels=_ffn_dim_,
-                    ffn_dropout=0.0,
+                    ffn_dropout=0.1,
                     operation_order=('self_attn', 'norm', 'cross_attn', 'norm',
                                      'ffn', 'norm'))),
             map_decoder=dict(
                 type='MapDetectionTransformerDecoder',
-                num_layers=6,
+                num_layers=3,
                 return_intermediate=True,
                 transformerlayers=dict(
                     type='DetrTransformerDecoderLayer',
@@ -337,14 +337,14 @@ model = dict(
                             type='MultiheadAttention',
                             embed_dims=_dim_,
                             num_heads=8,
-                            dropout=0.0),
-                         dict(
+                            dropout=0.1),
+                        dict(
                             type='CustomMSDeformableAttention',
                             embed_dims=_dim_,
                             num_levels=1),
                     ],
                     feedforward_channels=_ffn_dim_,
-                    ffn_dropout=0.0,
+                    ffn_dropout=0.1,
                     operation_order=('self_attn', 'norm', 'cross_attn', 'norm',
                                      'ffn', 'norm')))),
         bbox_coder=dict(
@@ -462,18 +462,17 @@ test_pipeline = [
                        'ego_lcf_feat','gt_attr_labels'])])
 ]
 
-# Super-fast version: Remove 0.8 scaling, use 640x360 directly from CARLA
 inference_only_pipeline = [
     dict(type='LoadMultiViewImageFromFiles', to_float32=True),
     dict(type='NormalizeMultiviewImage', **img_norm_cfg),
     dict(type='PadMultiViewImage', size_divisor=32),
     dict(
         type='MultiScaleFlipAug3D',
-        img_scale=(640, 360),  # Super-fast version: Direct 640x360 from CARLA, no scaling
+        img_scale=(1600, 900),
         pts_scale_ratio=1,
         flip=False,
         transforms=[
-            # Removed RandomScaleImageMultiViewImage - images are already 640x360 from CARLA
+            dict(type='RandomScaleImageMultiViewImage', scales=[0.8]),
             dict(type='PadMultiViewImage', size_divisor=32),
             dict(type='VADFormatBundle3D', class_names=class_names, with_label=False, with_ego=True),
             dict(type='CustomCollect3D', keys=[ 'img', 'ego_fut_cmd'])])
