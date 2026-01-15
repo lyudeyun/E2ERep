@@ -197,9 +197,14 @@ class PlanningHeadSingleMode(nn.Module):
             assert occ_mask is not None
             sdc_traj_all = self.collision_optimization(sdc_traj_all, occ_mask)
         
+        # Export ego_features (plan_query) for repair/analysis purposes
+        # plan_query shape: [1, 1, embed_dims] -> [1, embed_dims] for compatibility with VAD format
+        ego_features = plan_query.squeeze(0)  # [1, embed_dims]
+        
         return dict(
             sdc_traj=sdc_traj_all,
             sdc_traj_all=sdc_traj_all,
+            ego_features=ego_features,  # [1, embed_dims] - equivalent to VAD's ego_features
         )
 
     def collision_optimization(self, sdc_traj_all, occ_mask):

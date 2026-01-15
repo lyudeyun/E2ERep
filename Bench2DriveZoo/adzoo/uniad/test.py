@@ -2,6 +2,8 @@ import argparse
 import torch
 import os
 import warnings
+import json
+import numpy as np
 from torch.nn.parallel.distributed import DistributedDataParallel
 from mmcv.utils import get_dist_info, init_dist, wrap_fp16_model, set_random_seed, Config, DictAction, load_checkpoint
 from mmcv.fileio.io import dump
@@ -53,6 +55,25 @@ def parse_args():
         choices=['none', 'pytorch', 'slurm', 'mpi'],
         default='none',
         help='job launcher')
+    parser.add_argument(
+        '--cfg-options',
+        nargs='+',
+        action=DictAction,
+        help='override some settings in the used config, the key-value pair '
+        'in xxx=yyy format will be merged into config file. If the value to '
+        'be overwritten is a list, it should be like key="[a,b]" or key=a,b '
+        'It also allows nested list/tuple values, e.g. key="[(a,b),(c,d)]" '
+        'Note that the quotation marks are necessary and that no white space '
+        'is allowed.')
+    parser.add_argument(
+        '--collect-data',
+        action='store_true',
+        help='Collect per-frame planning metrics and intermediate info into a JSON file.')
+    parser.add_argument(
+        '--data-output',
+        type=str,
+        default=None,
+        help='Output JSON path used with --collect-data (e.g., baseline/uniad_baseline.json).')
     parser.add_argument('--local-rank', type=int, default=0)
     args = parser.parse_args()
     if 'LOCAL_RANK' not in os.environ:
@@ -63,6 +84,8 @@ def parse_args():
 def main():
     args = parse_args()
     cfg = Config.fromfile(args.config)
+    if args.cfg_options is not None:
+        cfg.merge_from_dict(args.cfg_options)
 
     cfg.model.pretrained = None
     cfg.data.test.test_mode = True
@@ -121,7 +144,7 @@ def main():
                                         device_ids=[torch.cuda.current_device()],
                                         broadcast_buffers=False,
                                         )
-        outputs = custom_multi_gpu_test(model, data_loader, args.tmpdir, args.gpu_collect)
+        outputs = custom_multi_gpu_test(model, data_loader, args.tmpdir, args.gpu_collect, collect_data=args.collect_data)
 
 
 
@@ -139,6 +162,21 @@ def main():
                 eval_kwargs.pop(key, None)
             eval_kwargs.update(dict(metric=args.eval, **kwargs))
             print(dataset.evaluate(outputs, **eval_kwargs))
+
+        # Optional: collect per-frame info (planning metrics etc.) into a JSON list
+        if args.collect_data:
+            if not args.data_output:
+                print('WARNING: --collect-data set but --data-output not provided; skip saving JSON.')
+            else:
+                # Get collected data from outputs if available
+                collected_data = outputs.get('collected_data', [])
+                if collected_data:
+                    os.makedirs(os.path.dirname(args.data_output) or '.', exist_ok=True)
+                    with open(args.data_output, 'w', encoding='utf-8') as f:
+                        json.dump(collected_data, f, indent=2)
+                    print(f'\nCollected data saved to {args.data_output} (num_frames={len(collected_data)})')
+                else:
+                    print('WARNING: No collected data found in outputs. Make sure test_utils.py collects per-frame data.')
 
 
 if __name__ == '__main__':
