@@ -12,9 +12,27 @@ fi
 
 echo "Using hf from: $(command -v hf)"
 
-# 2) 输出目录
-OUT_DIR="Bench2Drive-val"
+# 2) 输出目录与模式
+# 用法:
+#   ./download_val.sh              # 仅下载验证集 50 个 clips
+#   ./download_val.sh all           # 下载完整数据集（谨慎，体积巨大）
+MODE="${1:-val}"
+if [[ "$MODE" == "all" ]]; then
+  OUT_DIR="Bench2Drive-all"
+else
+  OUT_DIR="Bench2Drive-val"
+fi
 mkdir -p "$OUT_DIR"
+
+if [[ "$MODE" == "all" ]]; then
+  echo "Downloading full dataset to: $OUT_DIR ..."
+  hf download rethinklab/Bench2Drive \
+    --repo-type dataset \
+    --local-dir "$OUT_DIR" \
+    --force-download
+  echo "✅ Full dataset downloaded to: $OUT_DIR"
+  exit 0
+fi
 
 # 3) 这 50 个 validation clips（去掉前面的 v1/）
 clips=(
@@ -82,4 +100,4 @@ for clip in "${clips[@]}"; do
   echo "Done: $fname"
 done
 
-echo "✅ All validation clips downloaded to: $OUT_DIR"
+echo "✅ All clips downloaded to: $OUT_DIR"
