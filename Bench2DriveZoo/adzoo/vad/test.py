@@ -8,6 +8,7 @@ import os
 import json
 import torch
 import warnings
+from mmcv.models.dense_heads.planning_head_plugin.metric_stp3 import PlanningMetric
 import numpy as np
 from mmcv.utils import get_dist_info, init_dist, wrap_fp16_model, set_random_seed, Config, DictAction, load_checkpoint
 from mmcv.models import build_model, fuse_conv_bn
@@ -101,6 +102,11 @@ def parse_args():
         type=str,
         default=None,
         help='Output JSON path used with --collect-data (e.g., data/infos/repair_preprocessing.json).')
+    parser.add_argument(
+        '--occ-output-dir',
+        type=str,
+        default=None,
+        help='Optional directory to save per-frame occupancy/segmentation for collision recomputation.')
     parser.add_argument(
         '--print-collected',
         type=int,
@@ -445,6 +451,28 @@ def main():
                                 pass
                         predictions = []
 
+                    # Optional: save occupancy/segmentation for collision recomputation
+                    occ_path = None
+                    if args.occ_output_dir:
+                        try:
+                            anns = dataset.get_ann_info(batch_idx)
+                            gt_bboxes_3d = anns.get('gt_bboxes_3d', None)
+                            attr_labels = anns.get('attr_labels', None)
+                            if gt_bboxes_3d is not None and attr_labels is not None:
+                                pm = PlanningMetric()
+                                attr_t = torch.as_tensor(attr_labels, dtype=torch.float32).unsqueeze(0)
+                                seg, ped = pm.get_label(gt_bboxes_3d, attr_t)
+                                occ = torch.logical_or(seg, ped).to(torch.uint8).squeeze(0).cpu().numpy()
+                                os.makedirs(args.occ_output_dir, exist_ok=True)
+                                safe_folder = folder if folder else 'unknown_scene'
+                                occ_scene_dir = osp.join(args.occ_output_dir, safe_folder)
+                                os.makedirs(occ_scene_dir, exist_ok=True)
+                                occ_path = osp.join(occ_scene_dir, f"{int(frame_idx):06d}.npz")
+                                if not osp.exists(occ_path):
+                                    np.savez_compressed(occ_path, occ=occ)
+                        except Exception as e:
+                            print(f"[collect-data] WARN: failed to save occ/seg for frame {batch_idx}: {e}")
+
                     item = {
                         'batch_idx': int(batch_idx),
                         'scenario_idx': int(scenario_idx),
@@ -472,6 +500,8 @@ def main():
                         'ego_fut_masks': ego_fut_masks,
                         'town_name': str(town_name),
                     }
+                    if occ_path is not None:
+                        item['occ_path'] = str(occ_path)
                     collected.append(item)
 
                 os.makedirs(os.path.dirname(args.data_output) or '.', exist_ok=True)
