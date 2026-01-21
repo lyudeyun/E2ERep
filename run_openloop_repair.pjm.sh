@@ -14,7 +14,7 @@ set -euo pipefail
 # module load cuda
 
 # ==== Conda 环境 ====
-source ~/.bashrc
+source /home/pj25001076/ku50002427/miniconda3/etc/profile.d/conda.sh
 conda activate b2d_zoo
 
 # ==== 进入工程 ====
