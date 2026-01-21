@@ -16,7 +16,7 @@ set -euo pipefail
 # ==== Conda 环境 ====
 source /home/pj25001076/ku50002427/miniconda3/etc/profile.d/conda.sh
 conda activate b2d_zoo
-export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
+export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}"
 
 # ==== 进入工程 ====
 cd /home/pj25001076/ku50002427/git/B2DRepair || exit 1
