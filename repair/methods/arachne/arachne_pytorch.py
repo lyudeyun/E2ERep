@@ -4,6 +4,8 @@
 import torch
 import torch.nn as nn
 import numpy as np
+import os
+import multiprocessing as mp
 from pathlib import Path
 import json
 from tqdm import tqdm
@@ -11,6 +13,48 @@ import matplotlib
 matplotlib.use('Agg')  # Use non-interactive backend (no X server needed)
 import matplotlib.pyplot as plt
 import copy
+from mmcv.models.dense_heads.planning_head_plugin.metric_stp3 import PlanningMetric
+
+# ---------------------------------------------------------------------
+# Collision helpers for multiprocessing
+# ---------------------------------------------------------------------
+_COLLISION_METRIC = None
+
+
+def _init_collision_worker():
+    global _COLLISION_METRIC
+    if _COLLISION_METRIC is None:
+        _COLLISION_METRIC = PlanningMetric()
+
+
+def _compute_collision_from_occ(args):
+    """
+    Args:
+        args: (occ_path, pred_abs_np, gt_abs_np, time_horizon)
+    Returns:
+        (ok: bool, result_or_error: bool|str)
+    """
+    try:
+        occ_path, pred_abs_np, gt_abs_np, time_horizon = args
+        if not occ_path or not os.path.exists(occ_path):
+            return False, f"Missing occ_path for collision recomputation: {occ_path}"
+        metric = _COLLISION_METRIC or PlanningMetric()
+        occ_np = np.load(occ_path)['occ']
+        occ_t = torch.from_numpy(occ_np)
+        if occ_t.dim() == 3:
+            occ_t = occ_t.unsqueeze(0)
+        pred_t = torch.from_numpy(pred_abs_np).unsqueeze(0)
+        gt_t = torch.from_numpy(gt_abs_np).unsqueeze(0)
+        _, obj_box_coll = metric.evaluate_coll(pred_t, gt_t, occ_t)
+        if time_horizon == 1:
+            col_value = float(obj_box_coll[:2].mean().item())
+        elif time_horizon == 2:
+            col_value = float(obj_box_coll[:4].mean().item())
+        else:
+            col_value = float(obj_box_coll[:6].mean().item())
+        return True, (col_value > 0)
+    except Exception as e:
+        return False, f"Failed to compute collision from occ_path={occ_path}: {e}"
 
 # Import optimizers
 # Handle both relative import (when used as package) and absolute import (when used as standalone module)
@@ -46,6 +90,10 @@ class ArachnePyTorch:
         self.de_crossover_rate = 0.9  # CR in [0, 1], typically 0.9
         self.de_mutation_factor = 0.8  # F in [0, 2], typically 0.5-1.0
         self.de_strategy = 'rand/1/bin'  # DE strategy: 'rand/1/bin', 'best/1/bin', 'rand/2/bin', etc.
+        self._fitness_eval_counter = 0
+        self.collision_num_workers = 0  # 0/1 = serial, >1 = parallel collision evaluation
+        self._collision_pool = None
+        self._collision_pool_workers = None
     
     def set_options(self, **kwargs):
         """Set options for Arachne."""
@@ -94,6 +142,29 @@ class ArachnePyTorch:
         if 'de_strategy' in kwargs:
             # DE strategy: 'rand/1/bin', 'best/1/bin', 'rand/2/bin', etc.
             self.de_strategy = kwargs['de_strategy']
+        if 'collision_num_workers' in kwargs:
+            self.collision_num_workers = int(kwargs['collision_num_workers'])
+
+    def _get_collision_pool(self):
+        """Lazily create a process pool for collision evaluation."""
+        if self.collision_num_workers is None or self.collision_num_workers <= 1:
+            return None
+        if self._collision_pool is not None and self._collision_pool_workers == self.collision_num_workers:
+            return self._collision_pool
+        # Recreate pool if worker count changed
+        if self._collision_pool is not None:
+            try:
+                self._collision_pool.close()
+                self._collision_pool.join()
+            except Exception:
+                pass
+        ctx = mp.get_context("spawn")
+        self._collision_pool = ctx.Pool(
+            processes=self.collision_num_workers,
+            initializer=_init_collision_worker
+        )
+        self._collision_pool_workers = self.collision_num_workers
+        return self._collision_pool
     
     def localize(self, model, input_neg, input_pos=None, output_dir=None, verbose=1, use_changed_unchanged=False):
         """
@@ -385,13 +456,11 @@ class ArachnePyTorch:
             pareto_mask = self._identify_pareto(scores)
             pareto_indices = np.where(pareto_mask)[0]
         
-        # Save visualization
+        # Save visualization (always show the first Pareto front)
         if output_dir is not None:
             output_dir = Path(output_dir)
             output_dir.mkdir(parents=True, exist_ok=True)
-            # Create mask for visualization
-            pareto_mask = np.zeros(len(scores), dtype=bool)
-            pareto_mask[pareto_indices] = True
+            pareto_mask = self._identify_pareto(scores)
             self._save_pareto_front(scores, pareto_mask, output_dir)
         
         # Extract Pareto-optimal weights
@@ -481,14 +550,13 @@ class ArachnePyTorch:
         else:
             pareto_mask = self._identify_pareto(scores)
             pareto_indices = np.where(pareto_mask)[0]
-        
-            # Save visualization
-            if output_dir is not None:
-                output_dir = Path(output_dir)
-                output_dir.mkdir(parents=True, exist_ok=True)
-                pareto_mask = np.zeros(len(scores), dtype=bool)
-                pareto_mask[pareto_indices] = True
-                self._save_pareto_front_changed_unchanged(scores, pareto_mask, output_dir, matched_pool)
+
+        # Save visualization (always show the first Pareto front)
+        if output_dir is not None:
+            output_dir = Path(output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            pareto_mask = self._identify_pareto(scores)
+            self._save_pareto_front_changed_unchanged(scores, pareto_mask, output_dir, matched_pool)
         
         # Extract Pareto-optimal weights
         weights_to_repair = []
@@ -1168,6 +1236,7 @@ class ArachnePyTorch:
         # Batch process
         total_l2_error = 0.0
         valid_frame_count = 0
+        planning_metric = None
         # Initialize frame count variables
         positive_no_collision_count = 0
         middle_no_collision_count = 0
@@ -1225,6 +1294,27 @@ class ArachnePyTorch:
                     # Use _compute_l2_error_gpu which handles all shape cases correctly (same as old version)
                     batch_l2_errors = self._compute_l2_error_gpu(batch_pred_traj, batch_gt_tensor, batch_cmd_tensor, time_horizon=time_horizon)
                     batch_l2_errors_np = batch_l2_errors.cpu().numpy()
+                    batch_pred_abs = self._pred_traj_to_abs_gpu(batch_pred_traj, batch_cmd_tensor)
+
+                    # Optional: parallel collision computation on CPU
+                    collision_flags = None
+                    if self.collision_num_workers is not None and self.collision_num_workers > 1:
+                        pool = self._get_collision_pool()
+                        tasks = []
+                        for b_idx in range(batch_end - batch_start):
+                            frame_idx = batch_start + b_idx
+                            frame_data = all_frame_data[frame_idx]
+                            occ_path = frame_data.get('occ_path', None)
+                            pred_abs_np = batch_pred_abs[b_idx:b_idx + 1, :6, :2].detach().cpu().numpy()[0]
+                            gt_abs_np = batch_gt_tensor[b_idx:b_idx + 1, :6, :2].detach().cpu().numpy()[0]
+                            tasks.append((occ_path, pred_abs_np, gt_abs_np, time_horizon))
+                        results = pool.map(_compute_collision_from_occ, tasks)
+                        bad = [r for r in results if not r[0]]
+                        if bad:
+                            error_count += 1
+                            shape_errors.append(bad[0][1])
+                            continue
+                        collision_flags = [r[1] for r in results]
                     
                     # Process each frame in batch for classification and statistics (same as old version)
                     for b_idx in range(batch_end - batch_start):
@@ -1247,10 +1337,40 @@ class ArachnePyTorch:
                             # For particle evaluation, use computed L2 error so fitness reflects model changes
                             l2_error = float(batch_l2_errors_np[b_idx])
                         
-                        # Check collision using the same time horizon as L2 error
-                        collision_field = f'plan_obj_box_col_{time_horizon}s'
-                        col_value = frame_data.get(collision_field, 0.0)
-                        has_collision = (col_value > 0)  # Python bool, not tensor
+                        # Check collision using saved occ; must exist for dynamic collision
+                        if collision_flags is not None:
+                            has_collision = collision_flags[b_idx]
+                        else:
+                            occ_path = frame_data.get('occ_path', None)
+                            if not occ_path or not os.path.exists(occ_path):
+                                raise ValueError(
+                                    f"Missing occ_path for collision recomputation: {occ_path}. "
+                                    "Please regenerate JSON with --occ-output-dir."
+                                )
+                            try:
+                                if planning_metric is None:
+                                    planning_metric = PlanningMetric()
+                                occ_np = np.load(occ_path)['occ']
+                                occ_t = torch.from_numpy(occ_np)
+                                if occ_t.dim() == 3:
+                                    occ_t = occ_t.unsqueeze(0)
+                                pred_abs = batch_pred_abs[b_idx:b_idx + 1, :6, :2]
+                                gt_abs = batch_gt_tensor[b_idx:b_idx + 1, :6, :2]
+                                # Ensure collision inputs are on the same device (CPU is safest here).
+                                if pred_abs.device.type != 'cpu' or gt_abs.device.type != 'cpu' or occ_t.device.type != 'cpu':
+                                    pred_abs = pred_abs.cpu()
+                                    gt_abs = gt_abs.cpu()
+                                    occ_t = occ_t.cpu()
+                                _, obj_box_coll = planning_metric.evaluate_coll(pred_abs, gt_abs, occ_t)
+                                if time_horizon == 1:
+                                    col_value = float(obj_box_coll[:2].mean().item())
+                                elif time_horizon == 2:
+                                    col_value = float(obj_box_coll[:4].mean().item())
+                                else:
+                                    col_value = float(obj_box_coll[:6].mean().item())
+                                has_collision = (col_value > 0)
+                            except Exception as e:
+                                raise RuntimeError(f"Failed to compute collision from occ_path={occ_path}: {e}")
                         
                         # Track inf values
                         if np.isinf(l2_error) or l2_error == float('inf'):
@@ -1300,6 +1420,10 @@ class ArachnePyTorch:
                     continue
             
         # Compute fitness based on type (after all batches are processed)
+            if error_count > 0:
+                print(f"  [WARNING] {error_count} batch(es) failed during evaluation.")
+                if shape_errors:
+                    print(f"  [WARNING] Sample error: {shape_errors[0]}")
             total_frames_evaluated = positive_no_collision_count + middle_no_collision_count + negative_no_collision_count + collision_count
             
             if fitness_type == 'discrete':
@@ -1352,7 +1476,14 @@ class ArachnePyTorch:
             }
             
             return float(fitness), frame_counts
-        
+        # Debug: print per-individual L2 and collision statistics
+        self._fitness_eval_counter += 1
+        mean_l2 = (total_l2_error / valid_frame_count) if valid_frame_count > 0 else float('inf')
+        print(
+            f"[fitness-debug] eval#{self._fitness_eval_counter} "
+            f"total_l2={total_l2_error:.6f} mean_l2={mean_l2:.6f} "
+            f"collision_count={collision_count} valid_frames={valid_frame_count}"
+        )
         return float(fitness)
     
     def _compute_l2_error(self, pred_traj, gt_traj, cmd_idx=0):
@@ -1406,6 +1537,36 @@ class ArachnePyTorch:
         l2_error = np.mean(np.linalg.norm(pred_traj - gt_traj, axis=-1))
         
         return float(l2_error)
+
+    def _pred_traj_to_abs_gpu(self, pred_traj, cmd_idx):
+        """
+        Convert raw VAD decoder output to absolute trajectory for collision evaluation.
+        Returns shape (batch, 6, 2).
+        """
+        if pred_traj.dim() == 2:
+            if pred_traj.shape[1] == 12:
+                pred_traj = pred_traj.view(-1, 6, 2)
+            elif pred_traj.shape[1] == 72:
+                pred_traj = pred_traj.view(-1, 6, 6, 2)
+            else:
+                steps = max(1, pred_traj.shape[1] // 2)
+                pred_traj = pred_traj.view(-1, steps, 2)
+
+        if pred_traj.dim() == 4:
+            if isinstance(cmd_idx, torch.Tensor):
+                cmd_idx_clamped = torch.clamp(cmd_idx.long(), 0, pred_traj.shape[1] - 1)
+                pred_traj = pred_traj[torch.arange(pred_traj.shape[0], device=pred_traj.device), cmd_idx_clamped]
+            else:
+                cmd_idx_clamped = max(0, min(pred_traj.shape[1] - 1, int(cmd_idx)))
+                pred_traj = pred_traj[:, cmd_idx_clamped]
+        elif pred_traj.dim() == 3 and pred_traj.shape[-1] == 2:
+            pass
+        else:
+            raise RuntimeError(f"Unsupported pred_traj shape {tuple(pred_traj.shape)}")
+
+        # VAD decoder outputs delta; convert to absolute
+        pred_traj = torch.cumsum(pred_traj, dim=1)
+        return pred_traj
     
     def _compute_l2_error_gpu(self, pred_traj, gt_traj, cmd_idx, time_horizon=3):
         """
@@ -1859,6 +2020,9 @@ def build_frame_data_dict(json_file, frame_identifiers=None):
         frame_data['plan_obj_box_col_1s'] = float(col_1s) if isinstance(col_1s, (int, float)) else 0.0
         frame_data['plan_obj_box_col_2s'] = float(col_2s) if isinstance(col_2s, (int, float)) else 0.0
         frame_data['plan_obj_box_col_3s'] = float(col_3s) if isinstance(col_3s, (int, float)) else 0.0
+        occ_path = frame.get('occ_path', None)
+        if occ_path:
+            frame_data['occ_path'] = str(occ_path)
         
         # Add ground truth trajectory if available
         gt_traj = None
