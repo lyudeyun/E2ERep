@@ -384,6 +384,9 @@ def main():
                        choices=['discrete', 'continuous', 'continuous2'],
                        help='Fitness function type: discrete (weighted frame counts), continuous (total L2 error), '
                             'or continuous2 (total L2 + collision penalty)')
+    parser.add_argument('--collision-num-workers', type=int, default=None,
+                       help='Number of worker processes for collision evaluation. '
+                            'If omitted, auto-choose a safe default.')
     parser.add_argument('--time-horizon', type=int, choices=[1, 2, 3], default=3,
                        help='Time horizon for L2 error and collision: 1s (2 timesteps), 2s (4 timesteps), or 3s (6 timesteps, default). '
                             'This affects both L2 error computation and collision detection (plan_obj_box_col_Xs).')
@@ -397,9 +400,17 @@ def main():
         # semSegRep always uses median threshold, alpha parameter is ignored
         print(f"  [INFO] semSegRep: --alpha parameter ({args.alpha}) is ignored, will use median threshold")
     
+    if args.collision_num_workers is None:
+        print("[WARN] --collision-num-workers not set; defaulting to 1 (serial). "
+              "This may be slow. Consider setting it explicitly, e.g. --collision-num-workers 8.")
+        args.collision_num_workers = 1
+    if args.collision_num_workers < 1:
+        parser.error("--collision-num-workers must be >= 1")
+
     print("="*70)
     print(f"Repair Method: {args.rep_method}")
     print(f"Repair VAD layers: {', '.join(args.layers)}")
+    print(f"Collision workers: {args.collision_num_workers}")
     print("="*70)
     
     # Load model
@@ -667,7 +678,8 @@ def main():
         num_weights_to_repair=args.num_weights_to_repair,
         target_layers=wrapper.layer_names,  # Pass wrapper layer names to arachne
         early_stop_patience=args.early_stop_patience,
-        optimization_algorithm=args.search_algo  # Set search algorithm (PSO or DE)
+        optimization_algorithm=args.search_algo,  # Set search algorithm (PSO or DE)
+        collision_num_workers=args.collision_num_workers
     )
     
     if args.num_weights_to_repair:
