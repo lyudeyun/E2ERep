@@ -86,9 +86,10 @@ def generate_experiment_name(vad_name, rep_method, search_algo, search_algo_para
     return f"{vad_name}_REP_VAL_{time_horizon_str}_{rep_method}_{search_algo}_{search_params}_{fitness_str}_{run_idx}"
 
 
-def generate_baseline_json(vad_name, repair_dataset, base_dir, repo_root, 
+def generate_baseline_json(vad_name, repair_dataset, base_dir, repo_root,
                            cuda_device='0', regenerate=False,
-                           target_filename=None, cfg_options=None):
+                           target_filename=None, cfg_options=None,
+                           occ_output_dir=None):
     """
     Generate baseline JSON by evaluating original model on repair dataset.
     
@@ -154,6 +155,8 @@ def generate_baseline_json(vad_name, repair_dataset, base_dir, repo_root,
         '--collect-data',
         '--data-output', str(baseline_json),
     ]
+    if occ_output_dir:
+        cmd.extend(['--occ-output-dir', str(occ_output_dir)])
     
     cmd_str = ' '.join(cmd)
     print(f"Command: {cmd_str}")
@@ -175,10 +178,10 @@ def generate_baseline_json(vad_name, repair_dataset, base_dir, repo_root,
 
 
 def run_repair(vad_name, baseline_json, exp_dir, repo_root, 
-               alpha=0.5, layers='pts_bbox_head.ego_fut_decoder.0 pts_bbox_head.ego_fut_decoder.2',
-               fitness_type='continuous', num_particles=200, num_iterations=100, 
-               num_weights_to_repair=100, rep_method='Arachne_v1', early_stop_patience=None,
-               search_algo='PSO', cuda_device='0', time_horizon=3):
+              alpha=0.5, layers='pts_bbox_head.ego_fut_decoder.0 pts_bbox_head.ego_fut_decoder.2',
+              fitness_type='continuous', num_particles=200, num_iterations=100, 
+              num_weights_to_repair=100, rep_method='Arachne_v1', early_stop_patience=None,
+              search_algo='PSO', cuda_device='0', time_horizon=3, collision_num_workers=None):
     """Run repair process."""
     print("\n" + "="*80)
     print("Running Repair")
@@ -214,6 +217,10 @@ def run_repair(vad_name, baseline_json, exp_dir, repo_root,
     
     # Add time horizon parameter
     cmd.extend(['--time-horizon', str(time_horizon)])
+
+    # Optional: collision worker parallelism
+    if collision_num_workers is not None:
+        cmd.extend(['--collision-num-workers', str(collision_num_workers)])
     
     print(f"Command: {' '.join(cmd)}")
     print(f"Using CUDA device: {cuda_device}")
@@ -254,8 +261,8 @@ def run_repair(vad_name, baseline_json, exp_dir, repo_root,
     return repaired_model
 
 
-def run_evaluation(vad_name, repaired_model, eval_dataset, exp_dir, repo_root, 
-                   cuda_device='0', use_tmpfs_data=False):
+def run_evaluation(vad_name, repaired_model, eval_dataset, exp_dir, repo_root,
+                   cuda_device='0', use_tmpfs_data=False, occ_output_dir=None):
     """Run evaluation process."""
     print("\n" + "="*80)
     print("Running Open-loop Evaluation")
@@ -305,6 +312,8 @@ def run_evaluation(vad_name, repaired_model, eval_dataset, exp_dir, repo_root,
         '--collect-data',
         '--data-output', str(output_json),
     ]
+    if occ_output_dir:
+        cmd.extend(['--occ-output-dir', str(occ_output_dir)])
     
     cmd_str = ' '.join(cmd)
     print(f"Command: {cmd_str}")
@@ -503,6 +512,7 @@ def run_single_experiment(run_idx, vad_name, repair_dataset, eval_dataset,
                 regenerate=True,
                 target_filename=baseline_name,
                 cfg_options=_build_cfg_options(str(repair_dataset)),
+                occ_output_dir=args.occ_output_dir,
             )
     else:
         # No explicit baseline-json provided:
@@ -530,6 +540,7 @@ def run_single_experiment(run_idx, vad_name, repair_dataset, eval_dataset,
                 regenerate=False,  # Not used since we check existence above
                 target_filename=baseline_filename,
                 cfg_options=_build_cfg_options(str(repair_dataset)),
+                occ_output_dir=args.occ_output_dir,
             )
     
     if not baseline_json:
@@ -548,7 +559,8 @@ def run_single_experiment(run_idx, vad_name, repair_dataset, eval_dataset,
         early_stop_patience=args.repair_early_stop_patience,
         search_algo=args.search_algo,
         cuda_device=args.eval_cuda_device,
-        time_horizon=getattr(args, 'time_horizon', 3)
+        time_horizon=getattr(args, 'time_horizon', 3),
+        collision_num_workers=getattr(args, 'collision_num_workers', None)
     )
     if not repaired_model:
         return False
@@ -562,6 +574,7 @@ def run_single_experiment(run_idx, vad_name, repair_dataset, eval_dataset,
         repo_root,
         cuda_device=args.eval_cuda_device,
         use_tmpfs_data=getattr(args, "use_tmpfs_data", False),
+        occ_output_dir=args.eval_occ_output_dir,
     )
 
     if not success:
@@ -618,6 +631,9 @@ def main():
     parser.add_argument('--repair-early-stop-patience', type=int, default=None,
                        help='Early stopping patience for PSO: stop if fitness does not improve for N iterations (default: None, disabled). Example: --repair-early-stop-patience 10')
     parser.add_argument('--repair-num-weights', type=int, default=100)
+    parser.add_argument('--collision-num-workers', type=int, default=None,
+                       help='Number of worker processes for collision evaluation in repair. '
+                            'If omitted, repair script auto-chooses a default.')
     parser.add_argument('--time-horizon', type=int, choices=[1, 2, 3], default=3,
                        help='Time horizon for L2 error and collision: 1s (2 timesteps), 2s (4 timesteps), or 3s (6 timesteps, default). '
                             'This affects both L2 error computation and collision detection.')
@@ -682,11 +698,27 @@ def main():
              'Baseline JSON is always reused if found to avoid unnecessary recomputation. '
              'Only used when baseline JSON does not exist yet.'
     )
+    parser.add_argument(
+        '--occ-output-dir',
+        type=str,
+        required=True,
+        help='Directory to save per-frame occupancy/segmentation for baseline JSON generation.'
+    )
+    parser.add_argument(
+        '--eval-occ-output-dir',
+        type=str,
+        default=None,
+        help='Optional directory to save occupancy during open-loop evaluation.'
+    )
     
     args = parser.parse_args()
     
     # Calculate repair_num_particles from multiplier and num_weights
     args.repair_num_particles = args.repair_particles_multiplier * args.repair_num_weights
+
+    # Decide occ output dirs (baseline vs eval)
+    baseline_occ_output_dir = args.occ_output_dir
+    eval_occ_output_dir = args.eval_occ_output_dir
     
     # Auto-generate exp_dir if not specified
     if args.exp_dir is None:
