@@ -15,6 +15,8 @@ import matplotlib.pyplot as plt
 import copy
 from mmcv.models.dense_heads.planning_head_plugin.metric_stp3 import PlanningMetric
 
+REPO_ROOT = Path(__file__).resolve().parents[3]
+
 # ---------------------------------------------------------------------
 # Collision helpers for multiprocessing
 # ---------------------------------------------------------------------
@@ -36,6 +38,7 @@ def _compute_collision_from_occ(args):
     """
     try:
         occ_path, pred_abs_np, gt_abs_np, time_horizon = args
+        occ_path = _resolve_occ_path(occ_path)
         if not occ_path or not os.path.exists(occ_path):
             return False, f"Missing occ_path for collision recomputation: {occ_path}"
         metric = _COLLISION_METRIC or PlanningMetric()
@@ -55,6 +58,14 @@ def _compute_collision_from_occ(args):
         return True, (col_value > 0)
     except Exception as e:
         return False, f"Failed to compute collision from occ_path={occ_path}: {e}"
+
+
+def _resolve_occ_path(occ_path):
+    if not occ_path:
+        return occ_path
+    if os.path.isabs(occ_path):
+        return occ_path
+    return str(REPO_ROOT / occ_path)
 
 # Import optimizers
 # Handle both relative import (when used as package) and absolute import (when used as standalone module)
@@ -1341,7 +1352,7 @@ class ArachnePyTorch:
                         if collision_flags is not None:
                             has_collision = collision_flags[b_idx]
                         else:
-                            occ_path = frame_data.get('occ_path', None)
+                            occ_path = _resolve_occ_path(frame_data.get('occ_path', None))
                             if not occ_path or not os.path.exists(occ_path):
                                 raise ValueError(
                                     f"Missing occ_path for collision recomputation: {occ_path}. "
