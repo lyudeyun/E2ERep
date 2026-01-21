@@ -3,7 +3,7 @@
 #PJM -L gpu=1
 #PJM -L "elapse=24:00:00"
 #PJM -j
-#PJM -o logs/repair_job_%j.log
+#PJM -o repair_job_%j.log
 #PJM -m e
 #PJM --mail-list lyudeyun@gmail.com
 
