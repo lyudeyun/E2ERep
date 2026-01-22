@@ -376,8 +376,11 @@ def main():
     parser.add_argument('--early-stop-patience', type=int, default=5,
                        help='Early stopping patience: stop if fitness does not improve for N iterations (default: 5, enabled). Set to 0 or None to disable. Example: --early-stop-patience 5')
     parser.add_argument('--output-dir', default='./repair_both_layers')
-    parser.add_argument('--use-vad-eval', action='store_true',
-                       help='Use actual VAD evaluation for fitness (slow but accurate)')
+    parser.add_argument(
+        '--use-cached-eval',
+        action='store_true',
+        help='Use cached JSON/occ evaluation for fitness (default: on).'
+    )
     parser.add_argument('--num-weights-to-repair', type=int, default=None,
                        help='Target number of weights to repair (uses multi-layer Pareto if needed)')
     parser.add_argument('--fitness-type', type=str, default='discrete',
@@ -391,6 +394,11 @@ def main():
                        help='Time horizon for L2 error and collision: 1s (2 timesteps), 2s (4 timesteps), or 3s (6 timesteps, default). '
                             'This affects both L2 error computation and collision detection (plan_obj_box_col_Xs).')
     args = parser.parse_args()
+    # Default to True (cached eval is on by default)
+    # If user doesn't specify --use-cached-eval, it will be False from store_true,
+    # so we set it to True as default
+    if not args.use_cached_eval:
+        args.use_cached_eval = True
     
     # Check alpha parameter validity based on repair method
     if args.rep_method in ['Arachne_v1', 'Arachne_v2']:
@@ -717,7 +725,7 @@ def main():
     frame_data_dict = None
     positive_frames = None
     negative_frames = None
-    if args.use_vad_eval:
+    if args.use_cached_eval:
         print("Building frame_data_dict with frame_identifiers=None (should get all frames)...")
         frame_data_dict = build_frame_data_dict(args.json, frame_identifiers=None)
         
@@ -824,10 +832,10 @@ def main():
     
     repaired, fitness_history = arachne.optimize(
         wrapper, weights, input_neg, input_pos, output_dir, verbose=1,
-        use_vad_eval=args.use_vad_eval,
-        frame_data_dict=frame_data_dict if args.use_vad_eval else None,
-        positive_frames=positive_frames if args.use_vad_eval else None,
-        negative_frames=negative_frames if args.use_vad_eval else None,
+        use_vad_eval=args.use_cached_eval,
+        frame_data_dict=frame_data_dict if args.use_cached_eval else None,
+        positive_frames=positive_frames if args.use_cached_eval else None,
+        negative_frames=negative_frames if args.use_cached_eval else None,
         threshold_good=threshold_good,
         threshold_bad=threshold_bad,
         fitness_type=args.fitness_type,
@@ -839,7 +847,7 @@ def main():
     repaired_wrapper = repaired
     
     # Compute L2 error statistics before and after optimization
-    if args.use_vad_eval and frame_data_dict and original_stats:
+    if args.use_cached_eval and frame_data_dict and original_stats:
         print("\n" + "="*70)
         print("L2 ERROR STATISTICS COMPARISON")
         print("="*70)
