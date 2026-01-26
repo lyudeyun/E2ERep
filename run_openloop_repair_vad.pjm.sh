@@ -27,6 +27,7 @@ mkdir -p logs
 # ==== 运行（方案A：单卡并行两个实验）====
 CUDA_VISIBLE_DEVICES=0 \
 python3 run_experiment.py \
+  --model-type VAD \
   --vad-name VAD_base \
   --rep-method Arachne_v2 \
   --search-algo DE \
@@ -58,6 +59,7 @@ python3 run_experiment.py \
 
 CUDA_VISIBLE_DEVICES=0 \
 python3 run_experiment.py \
+  --model-type VAD \
   --vad-name VAD_base \
   --rep-method Arachne_v2 \
   --search-algo DE \
@@ -89,6 +91,7 @@ python3 run_experiment.py \
 
 CUDA_VISIBLE_DEVICES=0 \
 python3 run_experiment.py \
+  --model-type VAD \
   --vad-name VAD_base \
   --rep-method Arachne_v2 \
   --search-algo DE \
@@ -120,6 +123,7 @@ python3 run_experiment.py \
 
 CUDA_VISIBLE_DEVICES=0 \
 python3 run_experiment.py \
+  --model-type VAD \
   --vad-name VAD_base \
   --rep-method semSegRep \
   --search-algo DE \
@@ -151,6 +155,7 @@ python3 run_experiment.py \
 
 CUDA_VISIBLE_DEVICES=0 \
 python3 run_experiment.py \
+  --model-type VAD \
   --vad-name VAD_base \
   --rep-method semSegRep \
   --search-algo DE \
@@ -182,6 +187,7 @@ python3 run_experiment.py \
 
 CUDA_VISIBLE_DEVICES=0 \
 python3 run_experiment.py \
+  --model-type VAD \
   --vad-name VAD_base \
   --rep-method semSegRep \
   --search-algo DE \
