@@ -1195,10 +1195,13 @@ class ArachnePyTorch:
                 # Get GPU memory info
                 gpu_memory_gb = torch.cuda.get_device_properties(device).total_memory / (1024**3)
                 # Conservative estimate: ~50MB per batch (for features + predictions + intermediates)
+                # For 80GB GPU (H100): ~1600 theoretical max, use 1024 for better utilization
                 # For 32GB GPU: ~640, but use 256 as safe default
                 # For 16GB GPU: ~320, but use 128 as safe default
                 # For 8GB GPU: ~160, but use 64 as safe default
-                if gpu_memory_gb >= 24:
+                if gpu_memory_gb >= 60:
+                    batch_size = 1024  # Very large GPU (H100 80GB, etc.)
+                elif gpu_memory_gb >= 24:
                     batch_size = 256  # Large GPU (V100, A100, etc.)
                 elif gpu_memory_gb >= 12:
                     batch_size = 128  # Medium GPU (RTX 3090, etc.)
@@ -1723,14 +1726,16 @@ class ArachnePyTorch:
         else:
             if device.type == 'cuda':
                 gpu_memory_gb = torch.cuda.get_device_properties(device).total_memory / (1024**3)
-                if gpu_memory_gb >= 24:
-                    batch_size = 256
+                if gpu_memory_gb >= 60:
+                    batch_size = 1024  # Very large GPU (H100 80GB, etc.)
+                elif gpu_memory_gb >= 24:
+                    batch_size = 256  # Large GPU (V100, A100, etc.)
                 elif gpu_memory_gb >= 12:
-                    batch_size = 128
+                    batch_size = 128  # Medium GPU (RTX 3090, etc.)
                 else:
-                    batch_size = 64
+                    batch_size = 64   # Small GPU or default (RTX 3080, T4, etc.)
             else:
-                batch_size = 32
+                batch_size = 32  # CPU: smaller batch size
         
         frame_items = list(frame_data_dict.items())
         total_frames = len(frame_items)
