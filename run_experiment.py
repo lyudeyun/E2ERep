@@ -40,11 +40,13 @@ def get_model_paths(model_name, model_type, repo_root):
                 "config": b2d_root / "adzoo/vad/configs/VAD/VAD_base_e2e_b2d.py",
                 "checkpoint": b2d_root / "ckpts/vad_b2d_base.pth",
             }
-        # VAD_tiny in this repo refers to the tiny B2D checkpoint; it still uses the B2D config
-        return {
-            "config": b2d_root / "adzoo/vad/configs/VAD/VAD_base_e2e_b2d.py",
-            "checkpoint": b2d_root / "ckpts/vad_b2d_tiny.pth",
-        }
+        elif model_name == "VAD_tiny":
+            return {
+                "config": b2d_root / "adzoo/vad/configs/VAD/VAD_tiny_e2e_b2d.py",
+                "checkpoint": b2d_root / "ckpts/vad_b2d_tiny.pth",
+            }
+        else:
+            raise ValueError(f"Unknown VAD name: {model_name}")
     elif model_type == "UniAD":
         if model_name == "UniAD_base":
             return {
@@ -438,7 +440,7 @@ def run_closed_loop_evaluation(model_name, model_type, repaired_model, exp_dir, 
     
     if args.closed_loop_super_fast:
         # Super-fast version: use super-fast config and super-fast agent
-        super_fast_config = vad_paths['config'].parent / vad_paths['config'].name.replace('.py', '_super_fast.py')
+        super_fast_config = model_paths['config'].parent / model_paths['config'].name.replace('.py', '_super_fast.py')
         if not super_fast_config.exists():
             print(f"ERROR: Super-fast config not found: {super_fast_config}")
             return False
@@ -450,7 +452,7 @@ def run_closed_loop_evaluation(model_name, model_type, repaired_model, exp_dir, 
         print(f"Using super-fast version: agent={team_agent.name}, config={super_fast_config.name}")
     elif args.closed_loop_fast:
         # Fast version: use fast config and fast agent
-        fast_config = vad_paths['config'].parent / vad_paths['config'].name.replace('.py', '_fast.py')
+        fast_config = model_paths['config'].parent / model_paths['config'].name.replace('.py', '_fast.py')
         if not fast_config.exists():
             print(f"ERROR: Fast config not found: {fast_config}")
             return False
@@ -487,6 +489,12 @@ def run_closed_loop_evaluation(model_name, model_type, repaired_model, exp_dir, 
     if not env.get("CARLA_ROOT"):
         print("ERROR: CARLA_ROOT is not set. Please export CARLA_ROOT or pass --carla-root.")
         return False
+
+    # Resolve routes path
+    routes_path = Path(args.closed_loop_routes)
+    if not routes_path.is_absolute():
+        routes_path = repo_root / routes_path
+    routes_path = routes_path.resolve()
 
     cmd = [
         "bash",
