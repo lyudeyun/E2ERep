@@ -30,23 +30,44 @@ def str2bool(v):
     raise argparse.ArgumentTypeError(f"Invalid boolean value: {v!r}")
 
 
-def get_vad_paths(vad_name, repo_root):
-    """Get Bench2DriveZoo VAD config/checkpoint paths."""
+def get_model_paths(model_name, model_type, repo_root):
+    """Get Bench2DriveZoo model config/checkpoint paths."""
     b2d_root = repo_root / "Bench2DriveZoo"
-    if vad_name == "VAD_base":
+    
+    if model_type == "VAD":
+        if model_name == "VAD_base":
+            return {
+                "config": b2d_root / "adzoo/vad/configs/VAD/VAD_base_e2e_b2d.py",
+                "checkpoint": b2d_root / "ckpts/vad_b2d_base.pth",
+            }
+        # VAD_tiny in this repo refers to the tiny B2D checkpoint; it still uses the B2D config
         return {
             "config": b2d_root / "adzoo/vad/configs/VAD/VAD_base_e2e_b2d.py",
-            "checkpoint": b2d_root / "ckpts/vad_b2d_base.pth",
+            "checkpoint": b2d_root / "ckpts/vad_b2d_tiny.pth",
         }
-    # VAD_tiny in this repo refers to the tiny B2D checkpoint; it still uses the B2D config
-    # (the NuScenes tiny config will not work with b2d_infos_*.pkl ann files).
-    return {
-        "config": b2d_root / "adzoo/vad/configs/VAD/VAD_base_e2e_b2d.py",
-        "checkpoint": b2d_root / "ckpts/vad_b2d_tiny.pth",
-    }
+    elif model_type == "UniAD":
+        if model_name == "UniAD_base":
+            return {
+                "config": b2d_root / "adzoo/uniad/configs/stage2_e2e/base_e2e_b2d.py",
+                "checkpoint": b2d_root / "ckpts/uniad_base_b2d.pth",  # Fixed: uniad_base_b2d.pth (not uniad_b2d_base.pth)
+            }
+        elif model_name == "UniAD_tiny":
+            return {
+                "config": b2d_root / "adzoo/uniad/configs/stage2_e2e/tiny_e2e_b2d.py",
+                "checkpoint": b2d_root / "ckpts/uniad_tiny_b2d.pth",
+            }
+        else:
+            raise ValueError(f"Unknown UniAD name: {model_name}")
+    else:
+        raise ValueError(f"Unknown model type: {model_type}")
 
 
-def generate_experiment_name(vad_name, rep_method, search_algo, search_algo_params, 
+def get_vad_paths(vad_name, repo_root):
+    """Legacy function for backward compatibility."""
+    return get_model_paths(vad_name, "VAD", repo_root)
+
+
+def generate_experiment_name(model_name, rep_method, search_algo, search_algo_params, 
                              fitness, run_idx, base_dir, time_horizon=3):
     """Generate experiment directory name."""
     w = search_algo_params['num_weights_to_repair']
@@ -68,12 +89,11 @@ def generate_experiment_name(vad_name, rep_method, search_algo, search_algo_para
         fitness_str = 'DISC'
     
     # Add time_horizon to experiment name (e.g., t1s, t2s, t3s)
-    # Place it before rep_method since it's a prerequisite for localization and search
     time_horizon_str = f"t{time_horizon}s"
     
     # Auto-detect run_idx
     if run_idx is None:
-        pattern = f"{vad_name}_REP_VAL_{time_horizon_str}_{rep_method}_{search_algo}_{search_params}_{fitness_str}_([0-9]+)"
+        pattern = f"{model_name}_REP_VAL_{time_horizon_str}_{rep_method}_{search_algo}_{search_params}_{fitness_str}_([0-9]+)"
         max_idx = 0
         if base_dir.exists():
             for item in base_dir.iterdir():
@@ -83,10 +103,10 @@ def generate_experiment_name(vad_name, rep_method, search_algo, search_algo_para
                         max_idx = max(max_idx, int(match.group(1)))
         run_idx = max_idx + 1
     
-    return f"{vad_name}_REP_VAL_{time_horizon_str}_{rep_method}_{search_algo}_{search_params}_{fitness_str}_{run_idx}"
+    return f"{model_name}_REP_VAL_{time_horizon_str}_{rep_method}_{search_algo}_{search_params}_{fitness_str}_{run_idx}"
 
 
-def generate_baseline_json(vad_name, repair_dataset, base_dir, repo_root,
+def generate_baseline_json(model_name, model_type, repair_dataset, base_dir, repo_root,
                            cuda_device='0', regenerate=False,
                            target_filename=None, cfg_options=None,
                            occ_output_dir=None):
@@ -94,7 +114,8 @@ def generate_baseline_json(vad_name, repair_dataset, base_dir, repo_root,
     Generate baseline JSON by evaluating original model on repair dataset.
     
     Args:
-        vad_name: VAD model name
+        model_name: Model name (VAD_base, VAD_tiny, UniAD_base, UniAD_tiny)
+        model_type: Model type ('VAD' or 'UniAD')
         repair_dataset: Path to repair dataset PKL file
         base_dir: Base experiments directory (baseline JSON will be stored here)
         repo_root: Repository root directory
@@ -103,21 +124,18 @@ def generate_baseline_json(vad_name, repair_dataset, base_dir, repo_root,
     Returns:
         Path to baseline JSON file, or None if failed
     """
-    vad_paths = get_vad_paths(vad_name, repo_root)
-    vad_lower = vad_name.lower()
+    model_paths = get_model_paths(model_name, model_type, repo_root)
+    model_lower = model_name.lower()
     
     # Decide baseline JSON + log file paths
     if target_filename is not None:
-        # Use user-specified filename inside base_dir (e.g., shared baseline folder)
         baseline_json = (base_dir / target_filename).resolve()
         log_stem = Path(target_filename).stem
         log_file = (base_dir / f"{log_stem}.log").resolve()
     else:
-        # Generate unique filename based on repair dataset path
-        # Use dataset filename (without extension) to create unique identifier
         dataset_name = Path(repair_dataset).stem
-        baseline_json = (base_dir / f"{vad_lower}_baseline_{dataset_name}.json").resolve()
-        log_file = (base_dir / f"{vad_lower}_baseline_{dataset_name}.log").resolve()
+        baseline_json = (base_dir / f"{model_lower}_baseline_{dataset_name}.json").resolve()
+        log_file = (base_dir / f"{model_lower}_baseline_{dataset_name}.log").resolve()
     
     # Check if baseline already exists
     # If file exists, always reuse it (ignore regenerate flag to avoid unnecessary recomputation)
@@ -140,21 +158,39 @@ def generate_baseline_json(vad_name, repair_dataset, base_dir, repo_root,
     if cfg_options is None:
         cfg_options = f"data.test.ann_file='{repair_dataset}'"
 
-    cmd = [
-        f"CUDA_VISIBLE_DEVICES={cuda_device}",
-        sys.executable,
-        '-u',  # Unbuffered output (force stdout/stderr to be unbuffered)
-        str(repo_root / "Bench2DriveZoo" / "adzoo" / "vad" / "test.py"),
-        str(vad_paths['config']),
-        str(vad_paths['checkpoint']),
-        '--cfg-options', cfg_options,
-        '--launcher', 'none',
-        '--eval', 'bbox',
-        '--tmpdir', 'tmp',
-        '--eval-options', 'jsonfile_prefix=None',  # Disable test/ directory creation
-        '--collect-data',
-        '--data-output', str(baseline_json),
-    ]
+    if model_type == "VAD":
+        cmd = [
+            f"CUDA_VISIBLE_DEVICES={cuda_device}",
+            sys.executable,
+            '-u',
+            str(repo_root / "Bench2DriveZoo" / "adzoo" / "vad" / "test.py"),
+            str(model_paths['config']),
+            str(model_paths['checkpoint']),
+            '--cfg-options', cfg_options,
+            '--launcher', 'none',
+            '--eval', 'bbox',
+            '--tmpdir', 'tmp',
+            '--eval-options', 'jsonfile_prefix=None',
+            '--collect-data',
+            '--data-output', str(baseline_json),
+        ]
+    elif model_type == "UniAD":
+        cmd = [
+            f"CUDA_VISIBLE_DEVICES={cuda_device}",
+            "torchrun",
+            "--nproc_per_node=1",
+            str(repo_root / "Bench2DriveZoo" / "adzoo" / "uniad" / "test.py"),
+            str(model_paths['config']),
+            str(model_paths['checkpoint']),
+            "--launcher", "pytorch",
+            "--cfg-options", cfg_options,
+            "--eval", "bbox",
+            "--collect-data",
+            "--data-output", str(baseline_json),
+        ]
+    else:
+        raise ValueError(f"Unknown model type: {model_type}")
+    
     if occ_output_dir:
         cmd.extend(['--occ-output-dir', str(occ_output_dir)])
     
@@ -177,8 +213,8 @@ def generate_baseline_json(vad_name, repair_dataset, base_dir, repo_root,
     return baseline_json
 
 
-def run_repair(vad_name, baseline_json, exp_dir, repo_root, 
-              alpha=0.5, layers='pts_bbox_head.ego_fut_decoder.0 pts_bbox_head.ego_fut_decoder.2',
+def run_repair(model_name, model_type, baseline_json, exp_dir, repo_root, 
+              alpha=0.5, layers=None,
               fitness_type='continuous', num_particles=200, num_iterations=100, 
               num_weights_to_repair=100, rep_method='Arachne_v1', early_stop_patience=None,
               search_algo='PSO', cuda_device='0', time_horizon=3, collision_num_workers=None):
@@ -187,19 +223,37 @@ def run_repair(vad_name, baseline_json, exp_dir, repo_root,
     print("Running Repair")
     print("="*80)
     
-    vad_paths = get_vad_paths(vad_name, repo_root)
+    model_paths = get_model_paths(model_name, model_type, repo_root)
     repair_dir = exp_dir / "repair"
     repair_dir.mkdir(exist_ok=True)
     output_dir = (repair_dir / "repair_output").resolve()
     
+    # Set default layers based on model type
+    if layers is None:
+        if model_type == "VAD":
+            layers = 'pts_bbox_head.ego_fut_decoder.0 pts_bbox_head.ego_fut_decoder.2'
+        elif model_type == "UniAD":
+            layers = 'planning_head.reg_branch.0'  # Only the 256x256 hidden layer
+        else:
+            raise ValueError(f"Unknown model type: {model_type}")
+    
+    # Choose repair script based on model type
+    if model_type == "VAD":
+        repair_script = repo_root / "repair" / "repair_ego_fut_decoder_arachne.py"
+        repaired_model_name = "VAD_repaired_both_layers.pth"
+    elif model_type == "UniAD":
+        repair_script = repo_root / "repair_uniad" / "repair_planning_head_arachne.py"
+        repaired_model_name = "repaired_model.pth"
+    else:
+        raise ValueError(f"Unknown model type: {model_type}")
+    
     cmd = [
         f"CUDA_VISIBLE_DEVICES={cuda_device}",
         sys.executable,
-        str(repo_root / "repair" / "repair_ego_fut_decoder_arachne.py"),
-        '--config', str(vad_paths['config']),
-        '--checkpoint', str(vad_paths['checkpoint']),
+        str(repair_script),
+        '--config', str(model_paths['config']),
+        '--checkpoint', str(model_paths['checkpoint']),
         '--json', str(baseline_json),
-        '--use-vad-eval',
         '--alpha', str(alpha),
         '--rep-method', rep_method,
         '--search-algo', search_algo,
@@ -211,7 +265,7 @@ def run_repair(vad_name, baseline_json, exp_dir, repo_root,
         '--output-dir', str(output_dir),
     ]
     
-    # Add early stop patience if enabled (>0). Use 0/None to disable.
+    # Add early stop patience if enabled
     if early_stop_patience is not None and int(early_stop_patience) > 0:
         cmd.extend(['--early-stop-patience', str(early_stop_patience)])
     
@@ -222,24 +276,27 @@ def run_repair(vad_name, baseline_json, exp_dir, repo_root,
     if collision_num_workers is not None:
         cmd.extend(['--collision-num-workers', str(collision_num_workers)])
     
+    # Always use cached evaluation for VAD repair
+    if model_type == "VAD":
+        cmd.append('--use-cached-eval')
+    
     print(f"Command: {' '.join(cmd)}")
     print(f"Using CUDA device: {cuda_device}")
     log_file = (repair_dir / "repair.log").resolve()
 
-    # If a repaired model already exists, reuse it (avoids rerunning expensive repair steps)
-    repaired_model = (output_dir / "VAD_repaired_both_layers.pth").resolve()
+    # Check if repaired model already exists
+    repaired_model = (output_dir / repaired_model_name).resolve()
     if repaired_model.exists():
         print(f"Repaired model already exists, reusing: {repaired_model}")
         return repaired_model
     
-    # Use tee command to write to both file and terminal (simpler approach)
-    # Format: command | tee log_file
+    # Use tee command to write to both file and terminal
     cmd_with_tee = f"({' '.join(cmd)}) | tee {shlex.quote(str(log_file))}"
     
     result = subprocess.run(cmd_with_tee, shell=True, cwd=repo_root, 
                           stderr=subprocess.STDOUT, text=True)
     
-    repaired_model = (output_dir / "VAD_repaired_both_layers.pth").resolve()
+    repaired_model = (output_dir / repaired_model_name).resolve()
     
     # Check if repaired model exists (more reliable than return code)
     # Some scripts may exit with non-zero code due to display/X server errors
@@ -261,63 +318,86 @@ def run_repair(vad_name, baseline_json, exp_dir, repo_root,
     return repaired_model
 
 
-def run_evaluation(vad_name, repaired_model, eval_dataset, exp_dir, repo_root,
+def run_evaluation(model_name, model_type, repaired_model, eval_dataset, exp_dir, repo_root,
                    cuda_device='0', use_tmpfs_data=False, occ_output_dir=None):
     """Run evaluation process."""
     print("\n" + "="*80)
     print("Running Open-loop Evaluation")
     print("="*80)
     
-    vad_paths = get_vad_paths(vad_name, repo_root)
-    # Store open-loop results under exp_dir/open_loop_eval (and auto-migrate legacy exp_dir/evaluation)
+    model_paths = get_model_paths(model_name, model_type, repo_root)
+    # Store open-loop results under exp_dir/open_loop_eval
     legacy_eval_dir = exp_dir / "evaluation"
     eval_dir = exp_dir / "open_loop_eval"
     if legacy_eval_dir.exists() and not eval_dir.exists():
         legacy_eval_dir.rename(eval_dir)
     eval_dir.mkdir(exist_ok=True)
-    vad_lower = vad_name.lower()
-    output_json = (eval_dir / f"{vad_lower}_rep_val.json").resolve()
+    model_lower = model_name.lower()
+    output_json = (eval_dir / f"{model_lower}_rep_val.json").resolve()
     
-    # Build cfg-options string (optionally override data roots to tmpfs)
+    # Build cfg-options string
     ann_file = str(eval_dataset)
     if use_tmpfs_data:
         tmpfs_base = "/mnt/bench2drive_ram"
-        cfg_options = " ".join([
-            f"data_root='{tmpfs_base}/bench2drive'",
-            f"info_root='{tmpfs_base}/infos'",
-            f"map_root='{tmpfs_base}/bench2drive/maps'",
-            f"map_file='{tmpfs_base}/b2d_map_infos.pkl'",
-            f"data.test.ann_file='{ann_file}'",
-        ])
+        if model_type == "VAD":
+            cfg_options = " ".join([
+                f"data_root='{tmpfs_base}/bench2drive'",
+                f"info_root='{tmpfs_base}/infos'",
+                f"map_root='{tmpfs_base}/bench2drive/maps'",
+                f"map_file='{tmpfs_base}/b2d_map_infos.pkl'",
+                f"data.test.ann_file='{ann_file}'",
+            ])
+        else:  # UniAD
+            cfg_options = " ".join([
+                f"data.test.data_root='{tmpfs_base}/bench2drive'",
+                f"data.test.map_file='{tmpfs_base}/infos/b2d_map_infos.pkl'",
+                f"data.test.ann_file='{ann_file}'",
+            ])
         print("\nUsing tmpfs dataset for evaluation:")
-        print(f"  data_root={tmpfs_base}/bench2drive")
-        print(f"  info_root={tmpfs_base}/infos")
-        print(f"  map_root={tmpfs_base}/bench2drive/maps")
-        print(f"  map_file={tmpfs_base}/b2d_map_infos.pkl")
+        print(f"  tmpfs_base={tmpfs_base}")
     else:
         cfg_options = f"data.test.ann_file='{ann_file}'"
 
-    cmd = [
-        f"CUDA_VISIBLE_DEVICES={cuda_device}",
-        sys.executable,
-        '-u',  # Unbuffered output (force stdout/stderr to be unbuffered)
-        str(repo_root / "Bench2DriveZoo" / "adzoo" / "vad" / "test.py"),
-        str(vad_paths['config']),
-        str(repaired_model),
-        '--cfg-options', cfg_options,
-        '--launcher', 'none',
-        '--eval', 'bbox',
-        '--tmpdir', 'tmp',
-        '--eval-options', 'jsonfile_prefix=None',  # Disable test/ directory creation
-        '--collect-data',
-        '--data-output', str(output_json),
-    ]
+    if model_type == "VAD":
+        cmd = [
+            f"CUDA_VISIBLE_DEVICES={cuda_device}",
+            sys.executable,
+            '-u',
+            str(repo_root / "Bench2DriveZoo" / "adzoo" / "vad" / "test.py"),
+            str(model_paths['config']),
+            str(repaired_model),
+            '--cfg-options', cfg_options,
+            '--launcher', 'none',
+            '--eval', 'bbox',
+            '--tmpdir', 'tmp',
+            '--eval-options', 'jsonfile_prefix=None',
+            '--collect-data',
+            '--data-output', str(output_json),
+        ]
+    elif model_type == "UniAD":
+        cmd = [
+            f"PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True",
+            f"CUDA_VISIBLE_DEVICES={cuda_device}",
+            "torchrun",
+            "--nproc_per_node=1",
+            str(repo_root / "Bench2DriveZoo" / "adzoo" / "uniad" / "test.py"),
+            str(model_paths['config']),
+            str(repaired_model),
+            "--launcher", "pytorch",
+            "--cfg-options", cfg_options,
+            "--eval", "bbox",
+            "--collect-data",
+            "--data-output", str(output_json),
+        ]
+    else:
+        raise ValueError(f"Unknown model type: {model_type}")
+    
     if occ_output_dir:
         cmd.extend(['--occ-output-dir', str(occ_output_dir)])
     
     cmd_str = ' '.join(cmd)
     print(f"Command: {cmd_str}")
-    log_file = (eval_dir / f"{vad_lower}_rep_val.log").resolve()
+    log_file = (eval_dir / f"{model_lower}_rep_val.log").resolve()
     
     b2d_root = repo_root / "Bench2DriveZoo"
     with open(log_file, 'w', buffering=1) as f:  # Line buffering for real-time output
@@ -335,7 +415,7 @@ def run_evaluation(vad_name, repaired_model, eval_dataset, exp_dir, repo_root,
     return True
 
 
-def run_closed_loop_evaluation(vad_name, repaired_model, exp_dir, repo_root, args):
+def run_closed_loop_evaluation(model_name, model_type, repaired_model, exp_dir, repo_root, args):
     """
     Scheme B: call a dedicated parameterized closed-loop shell script.
 
@@ -347,7 +427,7 @@ def run_closed_loop_evaluation(vad_name, repaired_model, exp_dir, repo_root, arg
     print("Running Closed-loop Evaluation")
     print("="*80)
 
-    vad_paths = get_vad_paths(vad_name, repo_root)
+    model_paths = get_model_paths(model_name, model_type, repo_root)
     cl_dir = exp_dir / "closed_loop_eval"
     cl_dir.mkdir(exist_ok=True)
 
@@ -382,7 +462,7 @@ def run_closed_loop_evaluation(vad_name, repaired_model, exp_dir, repo_root, arg
         print(f"Using fast version: agent={team_agent.name}, config={fast_config.name}")
     else:
         # Normal version
-        team_config = f"{vad_paths['config'].resolve()}+{repaired_model}"
+        team_config = f"{model_paths['config'].resolve()}+{repaired_model}"
         team_agent = Path(args.closed_loop_team_agent)
         if not team_agent.is_absolute():
             team_agent = repo_root / team_agent
@@ -442,7 +522,7 @@ def run_closed_loop_evaluation(vad_name, repaired_model, exp_dir, repo_root, arg
     return False
 
 
-def run_single_experiment(run_idx, vad_name, repair_dataset, eval_dataset, 
+def run_single_experiment(run_idx, model_name, model_type, repair_dataset, eval_dataset, 
                           base_dir, repo_root, args):
     """Run a single experiment."""
     # Helper to build cfg-options string for Bench2Drive data.
@@ -450,17 +530,26 @@ def run_single_experiment(run_idx, vad_name, repair_dataset, eval_dataset,
         if getattr(args, "use_tmpfs_data", False):
             tmpfs_base = "/mnt/bench2drive_ram"
             print("\nUsing tmpfs dataset for baseline/evaluation:")
-            print(f"  data_root={tmpfs_base}/bench2drive")
-            print(f"  info_root={tmpfs_base}/infos")
-            print(f"  map_root={tmpfs_base}/bench2drive/maps")
-            print(f"  map_file={tmpfs_base}/b2d_map_infos.pkl")
-            return " ".join([
-                f"data_root='{tmpfs_base}/bench2drive'",
-                f"info_root='{tmpfs_base}/infos'",
-                f"map_root='{tmpfs_base}/bench2drive/maps'",
-                f"map_file='{tmpfs_base}/b2d_map_infos.pkl'",
-                f"data.test.ann_file='{ann_file}'",
-            ])
+            if model_type == "VAD":
+                print(f"  data_root={tmpfs_base}/bench2drive")
+                print(f"  info_root={tmpfs_base}/infos")
+                print(f"  map_root={tmpfs_base}/bench2drive/maps")
+                print(f"  map_file={tmpfs_base}/b2d_map_infos.pkl")
+                return " ".join([
+                    f"data_root='{tmpfs_base}/bench2drive'",
+                    f"info_root='{tmpfs_base}/infos'",
+                    f"map_root='{tmpfs_base}/bench2drive/maps'",
+                    f"map_file='{tmpfs_base}/b2d_map_infos.pkl'",
+                    f"data.test.ann_file='{ann_file}'",
+                ])
+            else:  # UniAD
+                print(f"  data.test.data_root={tmpfs_base}/bench2drive")
+                print(f"  data.test.map_file={tmpfs_base}/infos/b2d_map_infos.pkl")
+                return " ".join([
+                    f"data.test.data_root='{tmpfs_base}/bench2drive'",
+                    f"data.test.map_file='{tmpfs_base}/infos/b2d_map_infos.pkl'",
+                    f"data.test.ann_file='{ann_file}'",
+                ])
         return f"data.test.ann_file='{ann_file}'"
 
     # Generate experiment name
@@ -471,7 +560,7 @@ def run_single_experiment(run_idx, vad_name, repair_dataset, eval_dataset,
         'early_stop_patience': args.repair_early_stop_patience,
     }
     exp_name = generate_experiment_name(
-        vad_name, args.rep_method, args.search_algo, search_algo_params,
+        model_name, args.rep_method, args.search_algo, search_algo_params,
         args.fitness, run_idx, base_dir,
         time_horizon=getattr(args, 'time_horizon', 3)
     )
@@ -504,7 +593,8 @@ def run_single_experiment(run_idx, vad_name, repair_dataset, eval_dataset,
             print(f"\nRequested baseline JSON does not exist yet: {user_baseline}")
             print("Generating it now into the same folder.")
             baseline_json = generate_baseline_json(
-                vad_name,
+                model_name,
+                model_type,
                 repair_dataset,
                 baseline_dir,
                 repo_root,
@@ -515,29 +605,25 @@ def run_single_experiment(run_idx, vad_name, repair_dataset, eval_dataset,
                 occ_output_dir=args.occ_output_dir,
             )
     else:
-        # No explicit baseline-json provided:
-        # use a shared "baseline" folder under repo_root so that
-        # different experiments can automatically reuse the same baseline.
-        vad_lower = vad_name.lower()
+        # Use a shared "baseline" folder under repo_root
+        model_lower = model_name.lower()
         dataset_name = Path(repair_dataset).stem
         baseline_dir = repo_root / "baseline"
-        baseline_filename = f"{vad_lower}_baseline_{dataset_name}.json"
+        baseline_filename = f"{model_lower}_baseline_{dataset_name}.json"
         baseline_json = (baseline_dir / baseline_filename).resolve()
 
         if baseline_json.exists():
-            # If the baseline already exists in the shared folder, always reuse it.
-            # The regenerate flag is ignored if file exists (to avoid unnecessary recomputation).
             print(f"\nBaseline JSON already exists in shared baseline folder: {baseline_json}")
             print("Reusing existing baseline (regenerate flag is ignored if file exists).")
         else:
-            # File does not exist yet → generate it once into the shared baseline folder.
             baseline_json = generate_baseline_json(
-                vad_name,
+                model_name,
+                model_type,
                 repair_dataset,
                 baseline_dir,
                 repo_root,
                 args.eval_cuda_device,
-                regenerate=False,  # Not used since we check existence above
+                regenerate=False,
                 target_filename=baseline_filename,
                 cfg_options=_build_cfg_options(str(repair_dataset)),
                 occ_output_dir=args.occ_output_dir,
@@ -546,11 +632,34 @@ def run_single_experiment(run_idx, vad_name, repair_dataset, eval_dataset,
     if not baseline_json:
         return False
     
+    # For UniAD: repair code requires VAD rule format JSON (uses interval-averaged L2, not timestep-specific)
+    if model_type == "UniAD":
+        vad_rule_json = baseline_json.parent / f"{baseline_json.stem}_vadRule.json"
+        if not vad_rule_json.exists():
+            print(f"\n{'='*80}")
+            print("ERROR: VAD rule format JSON not found for UniAD repair")
+            print(f"{'='*80}")
+            print(f"Expected file: {vad_rule_json}")
+            print(f"Original baseline JSON: {baseline_json}")
+            print(f"\nPlease convert the UniAD baseline JSON to VAD rule format first:")
+            print(f"  python3 baseline/convert_uniad_to_vad_metrics.py \\")
+            print(f"    {baseline_json} \\")
+            print(f"    {vad_rule_json}")
+            print(f"\nReason: UniAD repair code uses interval-averaged L2 error (VAD rule),")
+            print(f"        not timestep-specific L2 error (original UniAD format).")
+            print(f"{'='*80}")
+            return False
+        else:
+            print(f"\nUsing VAD rule format JSON for repair: {vad_rule_json}")
+        
+        # Use VAD rule format JSON for repair
+        baseline_json = vad_rule_json
+    
     # Step 2: Run repair
     repaired_model = run_repair(
-        vad_name, baseline_json, exp_dir, repo_root,
+        model_name, model_type, baseline_json, exp_dir, repo_root,
         alpha=args.repair_alpha,
-        layers=args.repair_layers,
+        layers=getattr(args, 'repair_layers', None),
         fitness_type=args.fitness,
         num_particles=args.repair_num_particles,
         num_iterations=args.repair_num_iterations,
@@ -567,7 +676,8 @@ def run_single_experiment(run_idx, vad_name, repair_dataset, eval_dataset,
     
     # Step 3: Run evaluation
     success = run_evaluation(
-        vad_name,
+        model_name,
+        model_type,
         repaired_model,
         eval_dataset,
         exp_dir,
@@ -581,9 +691,9 @@ def run_single_experiment(run_idx, vad_name, repair_dataset, eval_dataset,
         return False
 
     # Step 4 (optional): Run closed-loop evaluation
-    if args.closed_loop_eval:
+    if getattr(args, 'closed_loop_eval', False):
         success = run_closed_loop_evaluation(
-            vad_name, repaired_model, exp_dir, repo_root, args
+            model_name, model_type, repaired_model, exp_dir, repo_root, args
         )
 
     return success
@@ -592,9 +702,14 @@ def run_single_experiment(run_idx, vad_name, repair_dataset, eval_dataset,
 def main():
     parser = argparse.ArgumentParser(description="Automated experiment runner")
     
+    # Model selection
+    parser.add_argument('--model-type', choices=['VAD', 'UniAD'], 
+                       default='VAD', help='Model type: VAD or UniAD')
+    
     # Naming parameters
-    parser.add_argument('--vad-name', choices=['VAD_base', 'VAD_tiny'], 
-                       default='VAD_tiny', help='VAD model name')
+    parser.add_argument('--model-name', type=str, default=None,
+                       help='Model name: VAD_base, VAD_tiny, UniAD_base, UniAD_tiny. '
+                            'If not specified, defaults based on --model-type (VAD_tiny for VAD, UniAD_tiny for UniAD)')
     parser.add_argument('--rep-method', choices=['Arachne_v1', 'Arachne_v2', 'semSegRep'],
                        default='Arachne_v1',
                        help='Repair method: Arachne_v1 (statistical thresholds, GL+FI on negative only), '
@@ -623,8 +738,10 @@ def main():
     
     # Repair parameters
     parser.add_argument('--repair-alpha', type=float, default=0.5)
-    parser.add_argument('--repair-layers', type=str,
-                       default='pts_bbox_head.ego_fut_decoder.0 pts_bbox_head.ego_fut_decoder.2')
+    parser.add_argument('--repair-layers', type=str, default=None,
+                       help='Layers to repair (space-separated). '
+                            'Default: VAD uses "pts_bbox_head.ego_fut_decoder.0 pts_bbox_head.ego_fut_decoder.2", '
+                            'UniAD uses "planning_head.reg_branch.0 planning_head.reg_branch.2"')
     parser.add_argument('--repair-particles-multiplier', type=int, default=2,
                        help='Multiplier for number of PSO particles (particles = multiplier * --repair-num-weights, default: 2)')
     parser.add_argument('--repair-num-iterations', type=int, default=100)
@@ -713,6 +830,21 @@ def main():
     
     args = parser.parse_args()
     
+    # Determine model_name from model_type (default if not specified)
+    if args.model_name is None:
+        if args.model_type == "VAD":
+            args.model_name = "VAD_tiny"  # Default VAD model
+        elif args.model_type == "UniAD":
+            args.model_name = "UniAD_tiny"  # Default UniAD model
+        else:
+            raise ValueError(f"Unknown model type: {args.model_type}")
+    
+    # Validate model_name matches model_type
+    if args.model_type == "VAD" and not args.model_name.startswith("VAD_"):
+        raise ValueError(f"Model name {args.model_name} does not match model type {args.model_type}")
+    elif args.model_type == "UniAD" and not args.model_name.startswith("UniAD_"):
+        raise ValueError(f"Model name {args.model_name} does not match model type {args.model_type}")
+    
     # Calculate repair_num_particles from multiplier and num_weights
     args.repair_num_particles = args.repair_particles_multiplier * args.repair_num_weights
 
@@ -722,10 +854,10 @@ def main():
     
     # Auto-generate exp_dir if not specified
     if args.exp_dir is None:
-        vad_lower = args.vad_name.lower()
-        rep_method_clean = args.rep_method  # Keep underscores as requested
+        model_lower = args.model_name.lower()
+        rep_method_clean = args.rep_method
         search_algo_clean = args.search_algo
-        args.exp_dir = f"./{vad_lower}_{rep_method_clean}_{search_algo_clean}_results"
+        args.exp_dir = f"./{model_lower}_{rep_method_clean}_{search_algo_clean}_results"
         print(f"Auto-generated exp-dir: {args.exp_dir}")
     
     repo_root = Path(__file__).parent.absolute()
@@ -814,7 +946,7 @@ def main():
                 
                 current_run_idx = args.run_idx if (args.run_idx is not None and run_num == 1) else None
                 success = run_single_experiment(
-                    current_run_idx, args.vad_name, repair_dataset, eval_dataset,
+                    current_run_idx, args.model_name, args.model_type, repair_dataset, eval_dataset,
                     base_dir, repo_root, fitness_args
                 )
                 
@@ -848,7 +980,7 @@ def main():
             
             current_run_idx = args.run_idx if (args.run_idx is not None and run_num == 1) else None
             success = run_single_experiment(
-                current_run_idx, args.vad_name, repair_dataset, eval_dataset,
+                current_run_idx, args.model_name, args.model_type, repair_dataset, eval_dataset,
                 base_dir, repo_root, args
             )
             
