@@ -616,7 +616,14 @@ def run_single_experiment(run_idx, model_name, model_type, repair_dataset, eval_
         # Use a shared "baseline" folder under repo_root
         model_lower = model_name.lower()
         dataset_name = Path(repair_dataset).stem
-        baseline_dir = repo_root / "baseline"
+        # Automatically select subdirectory based on model_type
+        if model_type == "VAD":
+            baseline_dir = repo_root / "baseline" / "VAD"
+        elif model_type == "UniAD":
+            baseline_dir = repo_root / "baseline" / "UniAD"
+        else:
+            baseline_dir = repo_root / "baseline"
+        baseline_dir.mkdir(parents=True, exist_ok=True)
         baseline_filename = f"{model_lower}_baseline_{dataset_name}.json"
         baseline_json = (baseline_dir / baseline_filename).resolve()
 
