@@ -263,8 +263,8 @@ if [ -f "${input_path}" ] && [[ "${input_path}" == *.pth ]]; then
   fi
 # 情况2: 如果输入路径是一个目录，检查是否是单个实验目录
 elif [ -d "${input_path}" ]; then
-  # 检查是否是单个实验目录（包含 repair/repair_output/VAD_repaired_both_layers.pth）
-  pth_file="${input_path}/repair/repair_output/VAD_repaired_both_layers.pth"
+  # 检查是否是单个实验目录（包含 repair_vad/repair_output/VAD_repaired_both_layers.pth）
+  pth_file="${input_path}/repair_vad/repair_output/VAD_repaired_both_layers.pth"
   if [ -f "${pth_file}" ]; then
     # 单个实验目录
     MATCHED_EXPERIMENTS+=("${input_path}")
@@ -273,7 +273,7 @@ elif [ -d "${input_path}" ]; then
     # 父目录，查找所有包含.pth文件的子目录
     echo "在父目录中查找所有包含.pth文件的实验..."
     while IFS= read -r -d '' exp_dir; do
-      pth_file="${exp_dir}/repair/repair_output/VAD_repaired_both_layers.pth"
+      pth_file="${exp_dir}/repair_vad/repair_output/VAD_repaired_both_layers.pth"
       if [ -f "${pth_file}" ]; then
         MATCHED_EXPERIMENTS+=("${exp_dir}")
       fi
@@ -311,7 +311,7 @@ elif [[ "${EXPERIMENT_PATH}" == *"*"* ]]; then
   fi
   
   while IFS= read -r -d '' exp_dir; do
-    pth_file="${exp_dir}/repair/repair_output/VAD_repaired_both_layers.pth"
+    pth_file="${exp_dir}/repair_vad/repair_output/VAD_repaired_both_layers.pth"
     if [ -f "${pth_file}" ]; then
       MATCHED_EXPERIMENTS+=("${exp_dir}")
     fi
@@ -412,7 +412,7 @@ FAILED_EXPERIMENTS=()
 for i in "${!MATCHED_EXPERIMENTS[@]}"; do
   exp_dir="${MATCHED_EXPERIMENTS[$i]}"
   exp_name=$(basename "${exp_dir}")
-  pth_file="${exp_dir}/repair/repair_output/VAD_repaired_both_layers.pth"
+  pth_file="${exp_dir}/repair_vad/repair_output/VAD_repaired_both_layers.pth"
   
   task_num=$((i + 1))
   echo "[${task_num}/${TOTAL_TASKS}] 评估: ${exp_name}"
