@@ -74,6 +74,11 @@ def parse_args():
         type=str,
         default=None,
         help='Output JSON path used with --collect-data (e.g., baseline/uniad_baseline.json).')
+    parser.add_argument(
+        '--occ-output-dir',
+        type=str,
+        default=None,
+        help='Optional directory to save per-frame occupancy/segmentation for collision recomputation.')
     parser.add_argument('--local-rank', type=int, default=0)
     args = parser.parse_args()
     if 'LOCAL_RANK' not in os.environ:
@@ -144,7 +149,14 @@ def main():
                                         device_ids=[torch.cuda.current_device()],
                                         broadcast_buffers=False,
                                         )
-        outputs = custom_multi_gpu_test(model, data_loader, args.tmpdir, args.gpu_collect, collect_data=args.collect_data)
+        outputs = custom_multi_gpu_test(
+            model,
+            data_loader,
+            args.tmpdir,
+            args.gpu_collect,
+            collect_data=args.collect_data,
+            occ_output_dir=args.occ_output_dir,
+        )
 
 
 

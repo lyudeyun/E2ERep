@@ -35,7 +35,7 @@ def custom_encode_mask_results(mask_results):
                         dtype='uint8'))[0])  # encoded with RLE
     return [encoded_mask_results]
 
-def custom_multi_gpu_test(model, data_loader, tmpdir=None, gpu_collect=False, collect_data=False):
+def custom_multi_gpu_test(model, data_loader, tmpdir=None, gpu_collect=False, collect_data=False, occ_output_dir=None):
     """Test model with multiple gpus.
     This method tests model with multiple gpus and collects the results
     under two different modes: gpu and cpu modes. By setting 'gpu_collect=True'
@@ -106,7 +106,21 @@ def custom_multi_gpu_test(model, data_loader, tmpdir=None, gpu_collect=False, co
                 # Collect per-frame planning data if requested
                 if collect_data and rank == 0:
                     # Compute per-frame metrics
-                    pred_traj = pred_sdc_traj[0, :6, :2].cpu().numpy()  # (6, 2)
+                    # Robustly extract pred_traj to ensure shape (6, 2)
+                    if torch.is_tensor(pred_sdc_traj):
+                        pred_traj_arr = pred_sdc_traj.detach().cpu().numpy()
+                    else:
+                        pred_traj_arr = np.asarray(pred_sdc_traj)
+                    if pred_traj_arr.ndim == 3:
+                        pred_traj = pred_traj_arr[0, :6, :2]
+                    elif pred_traj_arr.ndim == 2:
+                        pred_traj = pred_traj_arr[:6, :2]
+                    elif pred_traj_arr.ndim == 1 and pred_traj_arr.size >= 12:
+                        pred_traj = pred_traj_arr[:12].reshape(6, 2)
+                    else:
+                        pred_traj = np.zeros((6, 2), dtype=np.float32)
+                        if rank == 0:
+                            print(f"Warning: Could not extract pred_traj, shape={pred_traj_arr.shape}, using zeros")
                     # Extract gt_traj using the same pattern as planning_metrics (line 104)
                     # planning_metrics uses: sdc_planning[0][0,:, :6, :2]
                     # This means: sdc_planning[0] -> (1, num_commands, planning_steps, 3)
@@ -114,44 +128,140 @@ def custom_multi_gpu_test(model, data_loader, tmpdir=None, gpu_collect=False, co
                     #            sdc_planning[0][0,:] -> (num_commands, planning_steps, 3)
                     #            sdc_planning[0][0,:, :6, :2] -> (num_commands, 6, 2)
                     try:
-                        gt_traj_all = sdc_planning[0][0, :, :6, :2].cpu().numpy()  # (num_commands, 6, 2)
-                        gt_mask_all = sdc_planning_mask[0][0, :, :6].cpu().numpy()  # (num_commands, 6)
-                        # UniAD is single-mode, take first command
-                        gt_traj = gt_traj_all[0]  # (6, 2)
-                        gt_mask = gt_mask_all[0]  # (6,)
-                    except (IndexError, RuntimeError) as e:
-                        # Fallback: try alternative indexing if shape is different
-                        # Maybe sdc_planning[0] is (1, planning_steps, 3) instead
-                        try:
-                            gt_traj = sdc_planning[0][0, :6, :2].cpu().numpy()  # (6, 2)
-                            gt_mask = sdc_planning_mask[0][0, :6].cpu().numpy()  # (6,)
-                        except (IndexError, RuntimeError):
-                            # Last resort: try to extract directly
-                            sp = sdc_planning[0].cpu().numpy()
-                            spm = sdc_planning_mask[0].cpu().numpy()
-                            # Flatten and reshape if needed
-                            if sp.ndim == 3 and sp.shape[1] >= 6:
-                                gt_traj = sp[0, :6, :2]  # (6, 2)
-                                gt_mask = spm[0, :6] if spm.ndim >= 2 else spm[:6]  # (6,)
+                        # Squeeze leading batch/queue dims (size==1) to normalize shapes
+                        sp = sdc_planning
+                        spm = sdc_planning_mask
+                        while hasattr(sp, "dim") and sp.dim() > 0 and sp.shape[0] == 1:
+                            sp = sp[0]
+                        while hasattr(spm, "dim") and spm.dim() > 0 and spm.shape[0] == 1:
+                            spm = spm[0]
+                        def _to_numpy(x):
+                            if torch.is_tensor(x):
+                                return x.detach().cpu().numpy()
+                            if isinstance(x, (list, tuple)) and len(x) > 0 and torch.is_tensor(x[0]):
+                                return torch.stack([t.detach().cpu() for t in x], dim=0).numpy()
+                            return np.asarray(x)
+
+                        sp = _to_numpy(sp)
+                        spm = _to_numpy(spm)
+
+                        # Squeeze extra leading singleton dims for numpy arrays
+                        while sp.ndim > 3 and sp.shape[0] == 1:
+                            sp = sp[0]
+                        while spm.ndim > 3 and spm.shape[0] == 1:
+                            spm = spm[0]
+
+                        # sp shape cases:
+                        # - (num_cmd, steps, 3)  [nuScenes-style]
+                        # - (steps, 3)           [B2D-style]
+                        if sp.ndim == 3:
+                            cmd_idx = 0
+                            try:
+                                cmd_idx = int(result[0]['planning']['planning_gt']['command'][0].item())
+                            except Exception:
+                                cmd_idx = 0
+                            if cmd_idx < 0 or cmd_idx >= sp.shape[0]:
+                                cmd_idx = 0
+                            gt_traj = sp[cmd_idx, :6, :2]
+                            if spm.ndim == 3:
+                                gt_mask = spm[cmd_idx, :6, :2]
+                            elif spm.ndim == 2:
+                                gt_mask = spm[:6, :2] if spm.shape[1] >= 2 else spm[:6][:, None]
                             else:
-                                # Create default values
-                                gt_traj = np.zeros((6, 2), dtype=np.float32)
-                                gt_mask = np.zeros(6, dtype=np.float32)
-                                if rank == 0:
-                                    print(f"Warning: Could not extract gt_traj, shape={sp.shape}, using zeros")
+                                gt_mask = np.ones((6, 2), dtype=np.float32)
+                        elif sp.ndim == 2:
+                            gt_traj = sp[:6, :2]
+                            if spm.ndim == 2:
+                                gt_mask = spm[:6, :2] if spm.shape[1] >= 2 else spm[:6][:, None]
+                            elif spm.ndim == 1:
+                                gt_mask = spm[:6][:, None]
+                            else:
+                                gt_mask = np.ones((6, 2), dtype=np.float32)
+                        else:
+                            gt_traj = np.zeros((6, 2), dtype=np.float32)
+                            gt_mask = np.zeros((6, 2), dtype=np.float32)
+                            if rank == 0:
+                                print(f"Warning: Could not extract gt_traj, shape={sp.shape}, using zeros")
+                    except Exception as e:
+                        gt_traj = np.zeros((6, 2), dtype=np.float32)
+                        gt_mask = np.zeros((6, 2), dtype=np.float32)
+                        if rank == 0:
+                            print(f"Warning: Could not extract gt_traj, err={e}, using zeros")
                     
-                    # Compute L2 error for each timestep
-                    l2_errors = np.sqrt(np.sum((pred_traj - gt_traj) ** 2, axis=-1)) * gt_mask
+                    # Normalize gt_traj/gt_mask shapes
+                    gt_traj = np.asarray(gt_traj)
+                    if gt_traj.ndim == 3:
+                        gt_traj = gt_traj[0, :6, :2]
+                    elif gt_traj.ndim == 2:
+                        gt_traj = gt_traj[:6, :2]
+                    elif gt_traj.ndim == 1 and gt_traj.size >= 12:
+                        gt_traj = gt_traj[:12].reshape(6, 2)
+                    else:
+                        gt_traj = np.zeros((6, 2), dtype=np.float32)
+                        if rank == 0:
+                            print(f"Warning: Could not normalize gt_traj, shape={gt_traj.shape}, using zeros")
+
+                    gt_mask = np.asarray(gt_mask) if gt_mask is not None else np.zeros((6, 2), dtype=np.float32)
+                    if gt_mask.ndim == 1:
+                        gt_mask = gt_mask[:6][:, None]  # (6, 1)
+                    elif gt_mask.ndim == 2:
+                        gt_mask = gt_mask[:6, :2] if gt_mask.shape[1] >= 2 else gt_mask[:6][:, None]
+                    else:
+                        gt_mask = np.zeros((6, 2), dtype=np.float32)
+
+                    # Align with UniADPlanningMetric.update: flip x before L2
+                    pred_traj = np.asarray(pred_traj, dtype=np.float32)
+                    gt_traj = np.asarray(gt_traj, dtype=np.float32)
+                    pred_traj[:, 0] = -pred_traj[:, 0]
+                    gt_traj[:, 0] = -gt_traj[:, 0]
+
+                    # Compute L2 error for each timestep (match UniADPlanningMetric.compute_L2)
+                    l2_errors = np.sqrt(np.sum(((pred_traj - gt_traj) ** 2) * gt_mask, axis=-1))
                     plan_L2_1s = float(l2_errors[1]) if len(l2_errors) > 1 else 0.0  # 1.0s = index 1 (0.5s intervals)
                     plan_L2_2s = float(l2_errors[3]) if len(l2_errors) > 3 else 0.0  # 2.0s = index 3
                     plan_L2_3s = float(l2_errors[5]) if len(l2_errors) > 5 else 0.0  # 3.0s = index 5
+
+                    # Debug: print a few samples to verify scale/axis/command
+                    if rank == 0 and i < 3:
+                        cmd_val = None
+                        try:
+                            cmd_val = result[0]['planning']['planning_gt']['command'][0].item()
+                        except Exception:
+                            pass
+                        print(
+                            f"[debug][planning] i={i} cmd={cmd_val} "
+                            f"pred_traj[0]={pred_traj[0]} gt_traj[0]={gt_traj[0]} "
+                            f"gt_mask[0]={gt_mask[0]} L2_1s={plan_L2_1s:.4f}"
+                        )
                     
-                    # Compute collision metrics (simplified - use planning_metrics logic)
-                    # For now, set to -1.0 if invalid, will be computed properly if needed
+                    # Compute collision metrics using UniADPlanningMetric.evaluate_coll
                     fut_valid_flag = bool(gt_mask.sum() > 0)
-                    plan_obj_box_col_1s = -1.0 if not fut_valid_flag else 0.0  # Placeholder
-                    plan_obj_box_col_2s = -1.0 if not fut_valid_flag else 0.0
-                    plan_obj_box_col_3s = -1.0 if not fut_valid_flag else 0.0
+                    plan_obj_col_1s = -1.0
+                    plan_obj_col_2s = -1.0
+                    plan_obj_col_3s = -1.0
+                    plan_obj_box_col_1s = -1.0
+                    plan_obj_box_col_2s = -1.0
+                    plan_obj_box_col_3s = -1.0
+                    seg_for_save = None
+                    if fut_valid_flag:
+                        try:
+                            # Match the segmentation used in planning_metrics(...)
+                            seg_for_coll = segmentation[0][:, [1, 2, 3, 4, 5, 6]]
+                            seg_for_save = seg_for_coll
+                            pred_traj_t = torch.as_tensor(pred_traj, device=seg_for_coll.device, dtype=torch.float32).unsqueeze(0)
+                            gt_traj_t = torch.as_tensor(gt_traj, device=seg_for_coll.device, dtype=torch.float32).unsqueeze(0)
+                            obj_col, obj_box_col = planning_metrics.evaluate_coll(
+                                pred_traj_t, gt_traj_t, seg_for_coll
+                            )
+                            # VAD-style interval averages: 1s/2s/3s = 2/4/6 steps
+                            plan_obj_col_1s = float(obj_col[:2].mean().item())
+                            plan_obj_col_2s = float(obj_col[:4].mean().item())
+                            plan_obj_col_3s = float(obj_col[:6].mean().item())
+                            plan_obj_box_col_1s = float(obj_box_col[:2].mean().item())
+                            plan_obj_box_col_2s = float(obj_box_col[:4].mean().item())
+                            plan_obj_box_col_3s = float(obj_box_col[:6].mean().item())
+                        except Exception:
+                            pass
                     
                     # Get dataset info if available
                     info = None
@@ -167,6 +277,24 @@ def custom_multi_gpu_test(model, data_loader, tmpdir=None, gpu_collect=False, co
                         town_name = info.get('town_name', '') or ''
                         frame_idx = int(info.get('frame_idx', frame_idx))
                         timestamp = float(info.get('timestamp', timestamp)) if 'timestamp' in info else timestamp
+                    
+                    # Optional: save segmentation for collision recomputation
+                    occ_path = None
+                    if occ_output_dir and rank == 0 and seg_for_save is not None:
+                        try:
+                            os.makedirs(occ_output_dir, exist_ok=True)
+                            safe_folder = folder if folder else 'unknown_scene'
+                            occ_scene_dir = osp.join(occ_output_dir, safe_folder)
+                            os.makedirs(occ_scene_dir, exist_ok=True)
+                            occ_path = osp.join(occ_scene_dir, f"{int(frame_idx):06d}.npz")
+                            if not osp.exists(occ_path):
+                                seg_np = seg_for_save.detach().cpu().numpy()
+                                # Store as uint8 to save space
+                                seg_np = seg_np.astype(np.uint8)
+                                np.savez_compressed(occ_path, seg=seg_np)
+                        except Exception as e:
+                            if rank == 0:
+                                print(f"Warning: Failed to save occ/seg for frame {frame_idx}: {e}")
                     
                     # --- Extract ego GT / prediction trajectories ---
                     # GT ego future trajs from dataset (if available)
@@ -283,6 +411,9 @@ def custom_multi_gpu_test(model, data_loader, tmpdir=None, gpu_collect=False, co
                         'plan_L2_1s': plan_L2_1s,
                         'plan_L2_2s': plan_L2_2s,
                         'plan_L2_3s': plan_L2_3s,
+                        'plan_obj_col_1s': plan_obj_col_1s,
+                        'plan_obj_col_2s': plan_obj_col_2s,
+                        'plan_obj_col_3s': plan_obj_col_3s,
                         'plan_obj_box_col_1s': plan_obj_box_col_1s,
                         'plan_obj_box_col_2s': plan_obj_box_col_2s,
                         'plan_obj_box_col_3s': plan_obj_box_col_3s,
@@ -292,6 +423,8 @@ def custom_multi_gpu_test(model, data_loader, tmpdir=None, gpu_collect=False, co
                         'ego_fut_masks': ego_fut_masks,
                         'town_name': str(town_name),
                     }
+                    if occ_path is not None:
+                        item['occ_path'] = str(occ_path)
                     
                     # Only add optional fields if they are available
                     if ego_features is not None:
