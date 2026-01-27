@@ -1,0 +1,2494 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""PyTorch implementation of Arachne algorithm for UniAD repair"""
+import torch
+import torch.nn as nn
+import numpy as np
+import os
+from pathlib import Path
+import json
+from tqdm import tqdm
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend (no X server needed)
+import matplotlib.pyplot as plt
+import copy
+import multiprocessing as mp
+from mmcv.models.utils.functional import bivariate_gaussian_activation
+
+# Global collision metric instance (lazy initialization)
+_COLLISION_METRIC = None
+
+def _init_collision_worker():
+    """Initialize collision metric in worker process."""
+    global _COLLISION_METRIC
+    if _COLLISION_METRIC is None:
+        from mmcv.models.dense_heads.planning_head_plugin import UniADPlanningMetric
+        _COLLISION_METRIC = UniADPlanningMetric()
+
+
+def _compute_collision_from_occ(args):
+    """
+    Compute collision for UniAD using saved seg file.
+    
+    Args:
+        args: (occ_path, pred_abs_np, gt_abs_np, time_horizon)
+    Returns:
+        (ok: bool, result_or_error: bool|str)
+    """
+    try:
+        occ_path, pred_abs_np, gt_abs_np, time_horizon = args
+        occ_path = _resolve_occ_path(occ_path)
+        if not occ_path or not os.path.exists(occ_path):
+            return False, f"Missing occ_path for collision recomputation: {occ_path}"
+        
+        from mmcv.models.dense_heads.planning_head_plugin import UniADPlanningMetric
+        metric = UniADPlanningMetric()
+        seg_np = np.load(occ_path)['seg']  # UniAD uses 'seg' key, not 'occ'
+        seg_t = torch.from_numpy(seg_np)
+        if seg_t.dim() == 3:
+            seg_t = seg_t.unsqueeze(0)
+        pred_t = torch.from_numpy(pred_abs_np).unsqueeze(0)
+        gt_t = torch.from_numpy(gt_abs_np).unsqueeze(0)
+        _, obj_box_coll = metric.evaluate_coll(pred_t, gt_t, seg_t)
+        if time_horizon == 1:
+            col_value = float(obj_box_coll[:2].mean().item())
+        elif time_horizon == 2:
+            col_value = float(obj_box_coll[:4].mean().item())
+        else:
+            col_value = float(obj_box_coll[:6].mean().item())
+        return True, (col_value > 0)
+    except Exception as e:
+        return False, f"Failed to compute collision from occ_path={occ_path}: {e}"
+
+
+def _resolve_occ_path(occ_path):
+    """Resolve relative occ_path to absolute path."""
+    if not occ_path:
+        return occ_path
+    if os.path.isabs(occ_path):
+        return occ_path
+    # Try to resolve relative to current working directory or repo root
+    if os.path.exists(occ_path):
+        return os.path.abspath(occ_path)
+    # If not found, return as-is (caller will handle error)
+    return occ_path
+
+# Import optimizers
+# Handle both relative import (when used as package) and absolute import (when used as standalone module)
+try:
+    from .optimizers import get_optimizer
+except ImportError:
+    # When methods/arachne is added to sys.path and arachne_pytorch is imported directly,
+    # use absolute import
+    from optimizers import get_optimizer
+
+
+class ArachnePyTorch:
+    """PyTorch version of Arachne for neural network repair."""
+    
+    def __init__(self):
+        """Initialize Arachne."""
+        self.num_grad = None
+        self.num_particles = 100
+        self.num_iterations = 100
+        self.num_input_pos_sampled = 200
+        self.velocity_phi = 0.7  # Inertia weight (standard PSO: 0.4-0.9, commonly 0.7)
+        self.min_iteration_range = 10
+        self.target_layer = None
+        self.num_weights_to_repair = None  # 新增：指定修复的权重数量
+        self.early_stop_patience = None  # Early stopping patience (None = disabled, int = number of iterations without improvement)
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.eval_batch_size = None  # Batch size for fitness evaluation (None = auto-detect based on GPU memory)
+        
+        # Optimization algorithm selection
+        self.optimization_algorithm = 'PSO'  # Options: 'PSO' or 'DE' (Differential Evolution)
+        
+        # Differential Evolution (DE) parameters
+        self.de_crossover_rate = 0.9  # CR in [0, 1], typically 0.9
+        self.de_mutation_factor = 0.8  # F in [0, 2], typically 0.5-1.0
+        self.de_strategy = 'rand/1/bin'  # DE strategy: 'rand/1/bin', 'best/1/bin', 'rand/2/bin', etc.
+        # UniAD planning reg_branch outputs DELTA by default; can be overridden
+        self.pred_traj_is_delta = True
+        # Apply UniAD planning activation after cumsum (same as planning_head.forward)
+        self.apply_bivariate_activation = True
+        # Collision evaluation workers (None = serial, int > 1 = parallel)
+        self.collision_num_workers = None
+        self._collision_pool = None
+    
+    def set_options(self, **kwargs):
+        """Set options for Arachne."""
+        if 'num_grad' in kwargs:
+            self.num_grad = kwargs['num_grad']
+        if 'num_particles' in kwargs:
+            self.num_particles = kwargs['num_particles']
+        if 'num_iterations' in kwargs:
+            self.num_iterations = kwargs['num_iterations']
+        if 'num_input_pos_sampled' in kwargs:
+            self.num_input_pos_sampled = kwargs['num_input_pos_sampled']
+        if 'velocity_phi' in kwargs:
+            self.velocity_phi = kwargs['velocity_phi']
+        if 'min_iteration_range' in kwargs:
+            self.min_iteration_range = kwargs['min_iteration_range']
+        if 'early_stop_patience' in kwargs:
+            self.early_stop_patience = kwargs['early_stop_patience']
+        if 'target_layer' in kwargs:
+            # Support single layer or list of layers
+            target = kwargs['target_layer']
+            if isinstance(target, (list, tuple)):
+                self.target_layer = list(target)
+            else:
+                self.target_layer = [target] if target else None
+        if 'target_layers' in kwargs:
+            # Alternative parameter name
+            self.target_layer = list(kwargs['target_layers'])
+        if 'num_weights_to_repair' in kwargs:
+            # 新增：指定要修复的权重数量
+            self.num_weights_to_repair = kwargs['num_weights_to_repair']
+        if 'eval_batch_size' in kwargs:
+            # Batch size for fitness evaluation (None = auto-detect, int = fixed batch size)
+            self.eval_batch_size = kwargs['eval_batch_size']
+        if 'optimization_algorithm' in kwargs:
+            # Optimization algorithm: 'PSO' or 'DE'
+            algo = kwargs['optimization_algorithm'].upper()
+            if algo not in ['PSO', 'DE']:
+                raise ValueError(f"optimization_algorithm must be 'PSO' or 'DE', got '{algo}'")
+            self.optimization_algorithm = algo
+        if 'de_crossover_rate' in kwargs:
+            # DE crossover rate (CR) in [0, 1]
+            self.de_crossover_rate = kwargs['de_crossover_rate']
+        if 'de_mutation_factor' in kwargs:
+            # DE mutation factor (F) in [0, 2]
+            self.de_mutation_factor = kwargs['de_mutation_factor']
+        if 'de_strategy' in kwargs:
+            # DE strategy: 'rand/1/bin', 'best/1/bin', 'rand/2/bin', etc.
+            self.de_strategy = kwargs['de_strategy']
+        if 'pred_traj_is_delta' in kwargs:
+            self.pred_traj_is_delta = bool(kwargs['pred_traj_is_delta'])
+        if 'apply_bivariate_activation' in kwargs:
+            self.apply_bivariate_activation = bool(kwargs['apply_bivariate_activation'])
+        if 'collision_num_workers' in kwargs:
+            self.collision_num_workers = kwargs['collision_num_workers']
+    
+    def localize(self, model, input_neg, input_pos=None, output_dir=None, verbose=1, use_changed_unchanged=False):
+        """
+        Localize faulty neural weights using Gradient Loss (GL) and Forward Impact (FI).
+        
+        Note: GL and FI together form "Bidirectional Localization" (BL) - GL is backward,
+        FI is forward. This method always uses BL (GL+FI).
+        
+        Parameters
+        ----------
+        model : nn.Module
+            PyTorch model to be repaired
+        input_neg : tuple (features, labels)
+            Negative samples (features: [N, D], labels: [N])
+        input_pos : tuple (features, labels), optional
+            Positive samples (for Arachne v2 changed/unchanged method)
+        output_dir : Path
+            Directory to save localization results
+        verbose : int
+            Verbosity level
+        use_changed_unchanged : bool
+            If True, use Arachne v2 method: compute GL and FI separately for
+            changed (negative) and unchanged (positive) samples, then combine
+            using cost_chgd / (1 + cost_unchgd). This helps identify weights
+            that affect negative samples more than positive samples.
+            If False (default), use Arachne v1: compute GL and FI only on
+            negative samples.
+        
+        Returns
+        -------
+        weights_to_repair : list
+            List of [layer_name, i, j, GL, FI] for weights to repair
+        """
+        model.to(self.device)
+        
+        if self.num_grad is None:
+            self.num_grad = len(input_neg[0]) * 20
+        
+        if use_changed_unchanged and input_pos is not None:
+            # Arachne v2: Changed/Unchanged method
+            # Compute GL and FI separately for changed and unchanged samples
+            print("Using Arachne v2 Changed/Unchanged method...")
+            print("  (Note: GL+FI together form Bidirectional Localization)")
+            print("Step 1: Computing GL and FI for changed (negative) samples...")
+            model.train()
+            candidates_chgd = self._compute_gradient_loss(model, input_neg)
+            model.eval()
+            pool_chgd = self._compute_forward_impact(model, input_neg, candidates_chgd, self.num_grad)
+            
+            print("Step 2: Computing GL and FI for unchanged (positive) samples...")
+            model.train()
+            candidates_unchgd = self._compute_gradient_loss(model, input_pos)
+            model.eval()
+            pool_unchgd = self._compute_forward_impact(model, input_pos, candidates_unchgd, self.num_grad)
+            
+            print("Step 3: Combining costs (cost_chgd / (1 + cost_unchgd))...")
+            weights_to_repair = self._extract_pareto_front_changed_unchanged(
+                pool_chgd, pool_unchgd, output_dir
+            )
+        else:
+            # Arachne v1: Standard localization (GL+FI on negative samples only)
+            # Note: GL (backward) + FI (forward) = Bidirectional Localization (BL)
+            print("Using Arachne v1 method (GL+FI on negative samples)...")
+            print("  (Note: GL+FI together form Bidirectional Localization)")
+            print("Step 1: Computing Gradient Loss (GL) - backward direction...")
+            model.train()  # Need train mode for gradients
+            candidates = self._compute_gradient_loss(model, input_neg)
+            
+            print("Step 2: Computing Forward Impact (FI) - forward direction...")
+            model.eval()  # FI computation doesn't need gradients
+            pool = self._compute_forward_impact(model, input_neg, candidates, self.num_grad)
+            
+            print("Step 3: Extracting Pareto Front from GL-FI space...")
+            weights_to_repair = self._extract_pareto_front(pool, output_dir)
+        
+        if verbose:
+            print(f"\nLocalization complete!")
+            print(f"  Pareto-optimal weights: {len(weights_to_repair)}")
+        
+        return weights_to_repair
+    
+    def _get_collision_pool(self):
+        """Lazily create a process pool for collision evaluation."""
+        if self.collision_num_workers is None or self.collision_num_workers <= 1:
+            return None
+        if hasattr(self, '_collision_pool') and self._collision_pool is not None:
+            if hasattr(self, '_collision_pool_workers') and self._collision_pool_workers == self.collision_num_workers:
+                return self._collision_pool
+        # Recreate pool if worker count changed
+        if hasattr(self, '_collision_pool') and self._collision_pool is not None:
+            try:
+                self._collision_pool.close()
+                self._collision_pool.join()
+            except Exception:
+                pass
+        ctx = mp.get_context("spawn")
+        self._collision_pool = ctx.Pool(
+            processes=self.collision_num_workers,
+            initializer=_init_collision_worker
+        )
+        self._collision_pool_workers = self.collision_num_workers
+        return self._collision_pool
+    
+    def _compute_gradient_loss(self, model, input_neg):
+        """
+        Compute Gradient Loss for all weights in target layer(s).
+        
+        GL(w_ij) = |∂L/∂w_ij|
+        
+        IMPORTANT: This function uses the RAW decoder output (delta/displacement values),
+        NOT absolute positions. This is correct for localization because GL/FI should
+        be computed based on the model's raw behavior, not on post-processed values.
+        """
+        candidates = []
+        
+        # Convert to tensors (handle both tensor and numpy inputs)
+        if isinstance(input_neg[0], torch.Tensor):
+            X_neg = input_neg[0].clone().detach().to(dtype=torch.float32, device=self.device)
+        else:
+            X_neg = torch.tensor(input_neg[0], dtype=torch.float32).to(self.device)
+        if isinstance(input_neg[1], torch.Tensor):
+            y_neg = input_neg[1].clone().detach().to(dtype=torch.float32, device=self.device)
+        else:
+            y_neg = torch.tensor(input_neg[1], dtype=torch.float32).to(self.device)
+        
+        # Find target layers (can be multiple)
+        target_layer_infos = self._find_target_layers(model)
+        
+        # Forward pass
+        model.zero_grad()
+        outputs = model(X_neg)
+        
+        # IMPORTANT: outputs here are RAW decoder outputs (delta/displacement values, not absolute positions)
+        # This is correct for GL computation - we want to identify weights that contribute
+        # to large raw predictions, which correlate with poor trajectory predictions.
+        
+        # For UniAD trajectory prediction, we use L1Loss (same as UniAD training)
+        # The outputs should be [batch, 36] trajectory predictions (delta values)
+        
+        # For negative samples, we want to minimize the L1 magnitude of predictions
+        # This helps identify weights that contribute to large predictions (bad cases)
+        # We use L1 norm as proxy for prediction magnitude (consistent with UniAD training)
+        if outputs.dim() == 1:
+            # If outputs is 1D [batch*36] or just [36], reshape appropriately
+            if len(outputs) == 36:
+                # Single sample compressed to [36], expand to [1, 36]
+                outputs = outputs.unsqueeze(0)
+            else:
+                # Multiple samples compressed to [batch*36], reshape to [batch, 36]
+                batch_size = len(outputs) // 36
+                outputs = outputs.reshape(batch_size, 36)
+        # MODIFIED: Use L1 Loss against Ground Truth (y_neg) for Gradient Loss
+        # This aligns with the official Arachne implementation logic (Gradient of Error).
+        
+        # Ensure shapes match between outputs and y_neg
+        # outputs: [batch, 12] or [batch, 6, 2]
+        # y_neg: [batch, 6, 2] (from repair script)
+        
+        if y_neg.numel() > 0: # Ensure we have valid GT
+            target = y_neg
+            if outputs.shape != target.shape:
+                # Try to reshape target to match outputs
+                target = target.view(outputs.shape)
+            
+            # Compute L1 Loss (mean reduction is standard for gradients)
+            loss_func = torch.nn.L1Loss()
+            loss = loss_func(outputs, target)
+        else:
+            # Fallback to magnitude if no GT provided (should not happen with new repair script)
+            print("Warning: No Ground Truth labels provided for Gradient Loss. Falling back to Magnitude Loss.")
+            if outputs.dim() == 1:
+                if len(outputs) == 36:
+                    outputs = outputs.unsqueeze(0)
+                else:
+                    batch_size = len(outputs) // 36
+                    outputs = outputs.reshape(batch_size, 36)
+            prediction_l1_magnitude = torch.sum(torch.abs(outputs), dim=1)
+            loss = torch.mean(prediction_l1_magnitude)
+        
+        # Backward pass to get gradients
+        loss.backward()
+        
+        # Collect gradients from all target layers
+        for layer_name, layer in target_layer_infos:
+            if layer.weight.grad is None:
+                print(f"Warning: No gradient for {layer_name}, skipping")
+                continue
+            
+            grad = layer.weight.grad.cpu().numpy()
+            
+            print(f"Processing layer: {layer_name}, shape: {grad.shape}")
+            total_weights = grad.shape[0] * grad.shape[1]
+            for j in range(grad.shape[0]):
+                for i in range(grad.shape[1]):
+                    gl = np.abs(grad[j, i])
+                    candidates.append([layer_name, i, j, gl])
+            print(f"  Completed processing {total_weights} weights for {layer_name}", flush=True)
+        
+        # Sort by gradient loss (descending)
+        candidates.sort(key=lambda x: x[3], reverse=True)
+        print(f"Total candidate weights from {len(target_layer_infos)} layer(s): {len(candidates)}")
+        
+        return candidates
+    
+    def _compute_forward_impact(self, model, input_neg, candidates, num_grad):
+        """
+        Compute Forward Impact (FI) strictly aligning with Arachne Official Code.
+        Logic:
+          1. Front: Mean( Normalize_L1( |o_i * w_ij| ) over siblings ) (axis=0)
+          2. Behind: Mean( Normalize_L1( |dO/do| ) ) (axis=0)
+          3. FI = Front_Mean * Behind_Mean
+        """
+        pool = {}
+        _num_grad = min(num_grad, len(candidates))
+        
+        # 1. Prepare Input
+        if isinstance(input_neg[0], torch.Tensor):
+            X_neg = input_neg[0].clone().detach().to(dtype=torch.float32, device=self.device)
+        else:
+            X_neg = torch.tensor(input_neg[0], dtype=torch.float32).to(self.device)
+        
+        # 2. Identify Target Layers
+        target_layer_names = set([c[0] for c in candidates])
+        target_layers = {}
+        for name in target_layer_names:
+            try:
+                layer = model.get_submodule(name)
+                target_layers[name] = layer
+            except AttributeError:
+                print(f"Warning: Could not find layer {name} for FI computation")
+        
+        # 3. Register Hooks
+        layer_data = {}
+        hooks = []
+        
+        def get_hook(name):
+            def hook(module, input, output):
+                inp = input[0].detach()
+                if not output.requires_grad:
+                    output.requires_grad_(True)
+                output.retain_grad()
+                layer_data[name] = {
+                    "input": inp,
+                    "output_tensor": output
+                }
+            return hook
+        
+        for name, layer in target_layers.items():
+            h = layer.register_forward_hook(get_hook(name))
+            hooks.append(h)
+        
+        # 4. Forward & Backward
+        model.eval()
+        model.zero_grad()
+        outputs = model(X_neg)
+        if outputs.dim() == 1:
+             output_scalar = outputs.abs().sum()
+        else:
+             output_scalar = outputs.abs().sum()
+        output_scalar.backward()
+        
+        for h in hooks:
+            h.remove()
+        
+        # 5. Compute FI
+        # Helper for L1 normalization along last axis (or flattened)
+        def l1_normalize_and_mean(tensor, axis=1):
+            # tensor: [Batch, ...]
+            # Official code: norm_scaler.fit_transform(reshaped) -> L1 norm per sample
+            # Then mean(axis=0)
+            
+            # 1. Abs
+            tensor = torch.abs(tensor)
+            
+            # 2. Flatten sample-wise if needed, but here we expect [Batch, Out] or similar
+            if tensor.dim() > 2:
+                tensor = tensor.view(tensor.shape[0], -1)
+            
+            # 3. L1 Norm per sample
+            # sum(abs, dim=1)
+            row_sums = tensor.sum(dim=1, keepdim=True)
+            # Avoid div by zero
+            row_sums[row_sums == 0] = 1.0 
+            normalized = tensor / row_sums
+            
+            # 4. Mean over batch
+            return normalized.mean(dim=0)
+        
+        candidates_by_layer = {}
+        for cand in candidates[:_num_grad]:
+            layer_name, i, j, gl = cand
+            if layer_name not in candidates_by_layer:
+                candidates_by_layer[layer_name] = []
+            candidates_by_layer[layer_name].append((i, j, gl))
+            
+        for layer_name, items in candidates_by_layer.items():
+            if layer_name not in layer_data:
+                continue
+            
+            data = layer_data[layer_name]
+            inp = data["input"] # [B, In]
+            out_tensor = data["output_tensor"] # [B, Out]
+            
+            if out_tensor.grad is None:
+                continue
+                
+            # --- Part A: Calculate Behind_Mean (Gradient Sensitivity) ---
+            grad_output = out_tensor.grad.detach() # [B, Out]
+            # Official: L1 Normalize gradients per sample, then Mean
+            behind_means = l1_normalize_and_mean(grad_output) # [Out]
+            
+            # --- Part B: Calculate Front Contributions ---
+            weight = target_layers[layer_name].weight.detach() # [Out, In]
+            
+            # Pre-compute Norm Factors for Front: sum_k |o_k * w_kj| 
+            # This is the denominator for Front Normalization
+            abs_inp = torch.abs(inp)
+            abs_weight_t = torch.abs(weight.t())
+            # [B, In] @ [In, Out] -> [B, Out]
+            front_denominators = torch.matmul(abs_inp, abs_weight_t) 
+            front_denominators[front_denominators == 0] = 1.0
+            
+            for i, j, gl in items:
+                # i: input index, j: output index
+                w_val = weight[j, i]
+                
+                # 1. Front (Normalized per sample)
+                # |o_i * w_ij|
+                numerator = torch.abs(inp[:, i] * w_val)
+                # Divide by sibling sum
+                norm_fwd = numerator / front_denominators[:, j]
+                # Mean over batch
+                front_mean = norm_fwd.mean().item()
+                
+                # 2. Behind (Already computed)
+                behind_val = behind_means[j].item()
+                
+                # 3. Combine: E[Front] * E[Behind]
+                fi_val = front_mean * behind_val
+                
+                pool[(layer_name, i, j)] = [gl, fi_val]
+        
+        return pool
+    def _get_layer_activations(self, model, input_data, target_layer_name):
+        """Get activations from the layer before target layer."""
+        activations = None
+        
+        def hook_fn(module, input, output):
+            nonlocal activations
+            activations = input[0].detach().cpu().numpy()
+        
+        # Register hook on target layer to capture its input
+        target_layer = dict(model.named_modules())[target_layer_name]
+        handle = target_layer.register_forward_hook(hook_fn)
+        
+        # Forward pass
+        with torch.no_grad():
+            _ = model(input_data)
+        
+        handle.remove()
+        return activations
+    
+    def _find_target_layers(self, model):
+        """Find target layers to repair (supports multiple layers)."""
+        if self.target_layer is not None and len(self.target_layer) > 0:
+            # Use specified layers
+            target_layers = []
+            named_modules = dict(model.named_modules())
+            for layer_name in self.target_layer:
+                if layer_name in named_modules:
+                    target_layers.append((layer_name, named_modules[layer_name]))
+                else:
+                    print(f"Warning: Layer '{layer_name}' not found in model")
+            
+            if not target_layers:
+                raise ValueError("None of the specified layers found in model")
+            
+            return target_layers
+        
+        # Find last Linear layer as default
+        linear_layers = []
+        for name, module in model.named_modules():
+            if isinstance(module, nn.Linear):
+                linear_layers.append((name, module))
+        
+        if not linear_layers:
+            raise ValueError("No Linear layer found in model")
+        
+        target_name, target_layer = linear_layers[-1]
+        self.target_layer = [target_name]
+        
+        return [(target_name, target_layer)]
+    
+    def _extract_pareto_front(self, pool, output_dir=None):
+        """
+        Extract Pareto front from GL-FI objectives.
+        
+        If num_weights_to_repair is specified:
+        - If needed > pareto_front: extract multi-layer pareto fronts
+        - If needed < pareto_front: randomly sample from pareto front
+        """
+        # Collect objectives
+        objectives = []
+        indices = []
+        
+        for key in pool:
+            weight = pool[key]
+            gl = weight[3]  # Gradient Loss
+            fi = weight[4]  # Forward Impact
+            objectives.append([gl, fi])
+            indices.append(key)
+        
+        scores = np.array(objectives)
+        
+        # Identify Pareto fronts (possibly multiple layers)
+        if self.num_weights_to_repair is not None:
+            pareto_indices = self._extract_pareto_with_target_count(
+                scores, indices, self.num_weights_to_repair
+            )
+        else:
+            # Original behavior: just extract first Pareto front
+            pareto_mask = self._identify_pareto(scores)
+            pareto_indices = np.where(pareto_mask)[0]
+        
+        # Save visualization
+        if output_dir is not None:
+            output_dir = Path(output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            # Create mask for visualization
+            pareto_mask = np.zeros(len(scores), dtype=bool)
+            pareto_mask[pareto_indices] = True
+            self._save_pareto_front(scores, pareto_mask, output_dir)
+        
+        # Extract Pareto-optimal weights
+        weights_to_repair = []
+        for idx in pareto_indices:
+            key = indices[idx]
+            weights_to_repair.append(pool[key])
+        
+        return weights_to_repair
+    
+    def _extract_pareto_front_changed_unchanged(self, pool_chgd, pool_unchgd, output_dir=None):
+        """
+        Extract Pareto front using Arachne v2 changed/unchanged method.
+        
+        This method combines costs from changed and unchanged samples:
+        combined_cost = cost_chgd / (1 + cost_unchgd)
+        
+        This identifies weights that are:
+        - Highly influential to changed (negative) behavior
+        - Less influential to unchanged (positive) behavior
+        
+        Note: GL (backward) and FI (forward) together form "Bidirectional Localization" (BL).
+        This method uses BL on both changed and unchanged samples separately.
+        
+        Parameters
+        ----------
+        pool_chgd : dict
+            Pool of weights with GL and FI from changed (negative) samples
+        pool_unchgd : dict
+            Pool of weights with GL and FI from unchanged (positive) samples
+        output_dir : Path, optional
+            Directory to save visualization
+        
+        Returns
+        -------
+        weights_to_repair : list
+            List of [layer_name, i, j, GL_chgd, FI_chgd] for weights to repair
+        """
+        # Match weights between changed and unchanged pools
+        # Both pools should have the same structure (same candidates)
+        matched_pool = {}
+        
+        for key in pool_chgd:
+            if key in pool_unchgd:
+                weight_chgd = pool_chgd[key]
+                weight_unchgd = pool_unchgd[key]
+                
+                layer_name, i, j = weight_chgd[0], weight_chgd[1], weight_chgd[2]
+                gl_chgd = weight_chgd[3]
+                fi_chgd = weight_chgd[4]
+                gl_unchgd = weight_unchgd[3]
+                fi_unchgd = weight_unchgd[4]
+                
+                # Compute combined cost: cost_chgd / (1 + cost_unchgd)
+                # Use GL and FI as 2D cost vector
+                cost_chgd = np.array([gl_chgd, fi_chgd])
+                cost_unchgd = np.array([gl_unchgd, fi_unchgd])
+                
+                # Arachne v2 formula: cost_chgd / (1 + cost_unchgd)
+                # This gives higher score to weights with high chgd cost and low unchgd cost
+                combined_cost = cost_chgd / (1.0 + cost_unchgd)
+                
+                matched_pool[key] = [
+                    layer_name, i, j,
+                    gl_chgd, fi_chgd,
+                    gl_unchgd, fi_unchgd,
+                    combined_cost
+                ]
+        
+        # Collect combined costs for Pareto front extraction
+        objectives = []
+        indices = []
+        
+        for key in matched_pool:
+            weight = matched_pool[key]
+            combined_cost = weight[7]  # 2D array [GL_combined, FI_combined]
+            objectives.append(combined_cost)
+            indices.append(key)
+        
+        scores = np.array(objectives)
+        
+        
+        # Extract Pareto front from combined costs
+        if self.num_weights_to_repair is not None:
+            pareto_indices = self._extract_pareto_with_target_count(
+                scores, indices, self.num_weights_to_repair
+            )
+            # Save visualization even when num_weights_to_repair is specified
+            if output_dir is not None:
+                output_dir = Path(output_dir)
+                output_dir.mkdir(parents=True, exist_ok=True)
+                pareto_mask = np.zeros(len(scores), dtype=bool)
+                pareto_mask[pareto_indices] = True
+                self._save_pareto_front_changed_unchanged(scores, pareto_mask, output_dir, matched_pool)
+                
+        else:
+            pareto_mask = self._identify_pareto(scores)
+            pareto_indices = np.where(pareto_mask)[0]
+        
+            # Save visualization
+            if output_dir is not None:
+                output_dir = Path(output_dir)
+                output_dir.mkdir(parents=True, exist_ok=True)
+                pareto_mask = np.zeros(len(scores), dtype=bool)
+                pareto_mask[pareto_indices] = True
+                self._save_pareto_front_changed_unchanged(scores, pareto_mask, output_dir, matched_pool)
+        
+        # Extract Pareto-optimal weights
+        weights_to_repair = []
+        for idx in pareto_indices:
+            key = indices[idx]
+            weight = matched_pool[key]
+            # Return in format: [layer_name, i, j, GL_chgd, FI_chgd]
+            # (compatible with existing code that expects 5 elements)
+            weights_to_repair.append([
+                weight[0], weight[1], weight[2],
+                weight[3], weight[4]  # GL_chgd, FI_chgd
+            ])
+        
+        print(f"Changed/unchanged method: {len(matched_pool)} matched weights, {len(weights_to_repair)} Pareto-optimal")
+        
+        return weights_to_repair
+    
+    def _save_pareto_front_changed_unchanged(self, scores, pareto_mask, output_dir, matched_pool):
+        """Save changed/unchanged Pareto front visualization."""
+        plt.figure(figsize=(12, 10))
+        
+        # Plot all points
+        plt.scatter(scores[:, 0], scores[:, 1], c='blue', alpha=0.5, label='All Candidates')
+        
+        # Highlight Pareto front
+        pareto_scores = scores[pareto_mask]
+        plt.scatter(pareto_scores[:, 0], pareto_scores[:, 1], c='red', s=100,
+                   marker='*', label='Pareto Front', zorder=10)
+        
+        plt.xlabel('Combined GL (GL_chgd / (1 + GL_unchgd))', fontsize=12)
+        plt.ylabel('Combined FI (FI_chgd / (1 + FI_unchgd))', fontsize=12)
+        plt.title('Arachne v2 Changed/Unchanged: Combined GL vs FI', fontsize=14, fontweight='bold')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        
+        save_path = output_dir / 'pareto_front_changed_unchanged.png'
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        print(f"Changed/unchanged Pareto front visualization saved to: {save_path}")
+    
+    def _extract_pareto_with_target_count(self, scores, indices, target_count):
+        """
+        Extract exactly target_count weights using Pareto fronts.
+        
+        Strategy:
+        - If first Pareto front has >= target_count: randomly sample target_count
+        - If first Pareto front has < target_count: add next Pareto layers
+        
+        Parameters
+        ----------
+        scores : np.ndarray
+            GL-FI scores for all candidates
+        indices : list
+            Original indices in pool
+        target_count : int
+            Desired number of weights to repair
+        
+        Returns
+        -------
+        selected_indices : np.ndarray
+            Indices of selected weights
+        """
+        n_points = len(scores)
+        remaining_mask = np.ones(n_points, dtype=bool)  # Points not yet assigned to any front
+        selected_indices = []
+        
+        layer = 1
+        while len(selected_indices) < target_count and np.any(remaining_mask):
+            # Extract next Pareto front from remaining points
+            front_mask_local = self._identify_pareto(scores[remaining_mask])
+            
+            # Map back to global indices
+            remaining_indices = np.where(remaining_mask)[0]
+            front_indices = remaining_indices[front_mask_local]
+            
+            if len(selected_indices) + len(front_indices) <= target_count:
+                # Add entire front
+                selected_indices.extend(front_indices)
+                remaining_mask[front_indices] = False
+                print(f"  Layer {layer} Pareto front: {len(front_indices)} weights")
+                layer += 1
+            else:
+                # Need to sample from this front
+                needed = target_count - len(selected_indices)
+                sampled = np.random.choice(front_indices, size=needed, replace=False)
+                selected_indices.extend(sampled)
+                print(f"  Layer {layer} Pareto front: sampled {needed}/{len(front_indices)} weights")
+                break
+        
+        selected_indices = np.array(selected_indices)
+        
+        print(f"\nSelected {len(selected_indices)} weights (target: {target_count})")
+        if len(selected_indices) < target_count:
+            print(f"  Warning: Only found {len(selected_indices)} Pareto-optimal weights")
+        
+        return selected_indices
+    
+    def _identify_pareto(self, scores):
+        """
+        Identify Pareto front (maximizing both objectives).
+        
+        For maximization: point i dominates point j if:
+        - scores[i] >= scores[j] in all objectives (GL and FI)
+        - scores[i] > scores[j] in at least one objective
+        
+        Pareto front = points that are not dominated by any other point
+        """
+        n_points = scores.shape[0]
+        is_pareto = np.ones(n_points, dtype=bool)
+        
+        for i in range(n_points):
+            if is_pareto[i]:
+                # Find all points that i dominates
+                # i dominates j if: scores[i] >= scores[j] in all dims AND scores[i] > scores[j] in at least one dim
+                i_dominates = (
+                    np.all(scores[i] >= scores, axis=1) &  # i >= others in all objectives
+                    np.any(scores[i] > scores, axis=1)      # i > others in at least one objective
+                )
+                # Remove dominated points (but keep i itself)
+                i_dominates[i] = False  # Don't remove i itself
+                is_pareto[i_dominates] = False
+        
+        return is_pareto
+    
+    def _save_pareto_front(self, scores, pareto_mask, output_dir, filename='pareto_front.png'):
+        """Save Pareto front visualization."""
+        plt.figure(figsize=(10, 8))
+        
+        # Plot all points
+        plt.scatter(scores[:, 0], scores[:, 1], c='blue', alpha=0.5, label='All Candidates')
+        
+        # Highlight Pareto front
+        pareto_scores = scores[pareto_mask]
+        plt.scatter(pareto_scores[:, 0], pareto_scores[:, 1], c='red', s=100, 
+                   marker='*', label='Pareto Front', zorder=10)
+        
+        plt.xlabel('Gradient Loss (GL)', fontsize=12)
+        plt.ylabel('Forward Impact (FI)', fontsize=12)
+        plt.title('Pareto Front: GL vs FI', fontsize=14, fontweight='bold')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        
+        save_path = output_dir / filename
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        print(f"Pareto front visualization saved to: {save_path}")
+    
+    def optimize(self, model, weights_to_repair, input_neg, input_pos, output_dir=None, verbose=1,
+                 use_cached_eval=False, frame_data_dict=None, 
+                 positive_frames=None, negative_frames=None, threshold_good=0.5, threshold_bad=1.0,
+                 fitness_type='discrete', rep_method='Arachne_v1', time_horizon=3):
+        """
+        Optimize weights using optimization algorithm (PSO or DE).
+        
+        Parameters
+        ----------
+        model : nn.Module
+            PyTorch model to repair (wrapper model)
+        weights_to_repair : list
+            List of weights identified by localize()
+        input_neg : tuple
+            Negative samples (should be fixed)
+        input_pos : tuple
+            Positive samples (should remain correct)
+        output_dir : Path
+            Directory to save repaired model
+        verbose : int
+            Verbosity level
+        use_cached_eval : bool
+            If True, use open-loop UniAD evaluation with saved ego_features
+        frame_data_dict : dict
+            Dictionary mapping (token, scene_name) to frame data
+            Required if use_cached_eval=True. Each frame should contain:
+            - 'ego_features': features before the repaired layers
+            - 'gt_future_traj': ground truth trajectory
+            - 'plan_L2_3s': original L2 error
+        positive_frames : list
+            List of (token, scene_name) for positive frames (required if use_cached_eval=True)
+        negative_frames : list
+            List of (token, scene_name) for negative frames (required if use_cached_eval=True)
+        threshold_good : float
+            L2 threshold for positive frames
+        threshold_bad : float
+            L2 threshold for negative frames
+        middle_weight : float
+            Weight for middle frames (default 0.5, meaning 2 middle = 1 positive)
+        
+        Returns
+        -------
+        repaired_model : nn.Module
+            Repaired PyTorch model
+        fitness_history : list
+            List of best fitness values for each iteration
+        """
+        algo_name = self.optimization_algorithm
+        print(f"\nStarting {algo_name} optimization...", flush=True)
+        
+        if use_cached_eval:
+            if frame_data_dict is None:
+                raise ValueError("use_cached_eval=True requires frame_data_dict")
+            # For Arachne_v1 and Arachne_v2: positive_frames and negative_frames are not used in evaluation
+            # (evaluation uses ALL frames in frame_data_dict)
+            # For semSegRep: they may be needed, so check if rep_method is semSegRep
+            if rep_method not in ['Arachne_v1', 'Arachne_v2'] and (positive_frames is None or negative_frames is None):
+                raise ValueError(f"use_cached_eval=True with rep_method={rep_method} requires positive_frames and negative_frames")
+            if rep_method in ['Arachne_v1', 'Arachne_v2']:
+                print("Using open-loop UniAD evaluation with saved ego_features", flush=True)
+                print("  Note: positive_frames and negative_frames are not used (evaluates ALL frames)", flush=True)
+            else:
+                print("Using open-loop UniAD evaluation with saved ego_features", flush=True)
+        
+        # Convert data to tensors (handle both tensor and numpy inputs)
+        if isinstance(input_neg[0], torch.Tensor):
+            X_neg = input_neg[0].clone().detach().to(dtype=torch.float32, device=self.device)
+        else:
+            X_neg = torch.tensor(input_neg[0], dtype=torch.float32).to(self.device)
+        if isinstance(input_neg[1], torch.Tensor):
+            y_neg = input_neg[1].clone().detach().to(dtype=torch.float32, device=self.device)
+        else:
+            y_neg = torch.tensor(input_neg[1], dtype=torch.float32).to(self.device)
+        if isinstance(input_pos[0], torch.Tensor):
+            X_pos = input_pos[0].clone().detach().to(dtype=torch.float32, device=self.device)
+        else:
+            X_pos = torch.tensor(input_pos[0], dtype=torch.float32).to(self.device)
+        if isinstance(input_pos[1], torch.Tensor):
+            y_pos = input_pos[1].clone().detach().to(dtype=torch.float32, device=self.device)
+        else:
+            y_pos = torch.tensor(input_pos[1], dtype=torch.float32).to(self.device)
+        
+        # Sample positive inputs if too many
+        if len(X_pos) > self.num_input_pos_sampled:
+            indices = np.random.choice(len(X_pos), self.num_input_pos_sampled, replace=False)
+            X_pos = X_pos[indices]
+            y_pos = y_pos[indices]
+        
+        # Print weight distribution across layers before initialization
+        layer_counts = {}
+        for weight_info in weights_to_repair:
+            layer_name = weight_info[0]
+            layer_counts[layer_name] = layer_counts.get(layer_name, 0) + 1
+        print(f"  Weight distribution: {dict(layer_counts)}", flush=True)
+        
+        # Get optimizer class and create instance
+        OptimizerClass = get_optimizer(algo_name)
+        
+        # Create optimizer instance with appropriate parameters
+        if algo_name == 'PSO':
+            optimizer = OptimizerClass(
+                num_iterations=self.num_iterations,
+                num_particles=self.num_particles,
+                velocity_phi=self.velocity_phi,
+                early_stop_patience=self.early_stop_patience,
+                device=self.device,
+                eval_batch_size=self.eval_batch_size
+            )
+        elif algo_name == 'DE':
+            optimizer = OptimizerClass(
+                num_iterations=self.num_iterations,
+                num_particles=self.num_particles,
+                de_crossover_rate=self.de_crossover_rate,
+                de_mutation_factor=self.de_mutation_factor,
+                de_strategy=self.de_strategy,
+                early_stop_patience=self.early_stop_patience,
+                device=self.device,
+                eval_batch_size=self.eval_batch_size
+            )
+        else:
+            # Generic optimizer (for future algorithms)
+            optimizer = OptimizerClass(
+                num_iterations=self.num_iterations,
+                num_particles=self.num_particles,
+                early_stop_patience=self.early_stop_patience,
+                device=self.device,
+                eval_batch_size=self.eval_batch_size
+            )
+        
+        # Initialize population
+        population = optimizer.initialize_population(model, weights_to_repair)
+        if algo_name == 'PSO':
+            print(f"Initialized {len(population)} particles", flush=True)
+        elif algo_name == 'DE':
+            print(f"Initialized {len(population)} individuals", flush=True)
+        
+        # Run optimization using strategy pattern
+        # Pass fitness evaluation and weight application functions as callbacks
+        best_model, fitness_history = optimizer.optimize(
+            model, population, weights_to_repair,
+            X_neg, y_neg, X_pos, y_pos,
+            verbose=verbose,
+            use_cached_eval=use_cached_eval,
+            frame_data_dict=frame_data_dict,
+            positive_frames=positive_frames,
+            negative_frames=negative_frames,
+            threshold_good=threshold_good,
+            threshold_bad=threshold_bad,
+            fitness_type=fitness_type,
+            rep_method=rep_method,
+            output_dir=output_dir,
+            evaluate_fitness_fn=self._evaluate_fitness,
+            evaluate_fitness_openloop_fn=self._evaluate_fitness_openloop,
+            apply_weights_fn=self._apply_weight_adjustments,
+            time_horizon=time_horizon
+        )
+        
+        # Save repaired model and fitness history
+        if output_dir is not None:
+            output_dir = Path(output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            
+            save_path = output_dir / 'repaired_model.pth'
+            torch.save(best_model.state_dict(), save_path)
+            print(f"\nRepaired model saved to: {save_path}")
+            
+            # Save fitness history
+            history_path = output_dir / 'fitness_history.json'
+            with open(history_path, 'w') as f:
+                json.dump({
+                    'iterations': list(range(0, len(fitness_history))),  # Start from 0 (original)
+                    'best_fitness': fitness_history,
+                    'original_fitness': fitness_history[0],
+                    'final_fitness': fitness_history[-1],
+                    'improvement': fitness_history[0] - fitness_history[-1]
+                }, f, indent=2)
+            print(f"Fitness history saved to: {history_path}")
+        
+        return best_model, fitness_history
+    
+    def _apply_weight_adjustments(self, model, weights_to_repair, position):
+        """Apply weight adjustments to model with safety bounds."""
+        modified_model = copy.deepcopy(model)
+        
+        # Get named modules for debugging
+        named_modules = dict(modified_model.named_modules())
+        
+        # Pre-compute original weight ranges for each layer (for safety bounds)
+        # IMPORTANT: Use original method (symmetric extension) to match DE optimizer
+        layer_weight_bounds = {}
+        for weight_info in weights_to_repair:
+            layer_name = weight_info[0]
+            if layer_name not in layer_weight_bounds:
+                if layer_name in named_modules:
+                    layer = named_modules[layer_name]
+                    layer_weights = layer.weight.detach().cpu().numpy()
+                    weight_min = float(np.min(layer_weights))  # lb
+                    weight_max = float(np.max(layer_weights))  # ub
+                    weight_range = weight_max - weight_min
+                    # Original method: symmetric extension by 50% on each side
+                    # This matches the old PSO implementation
+                    layer_weight_bounds[layer_name] = {
+                        'min': weight_min - weight_range * 0.5,
+                        'max': weight_max + weight_range * 0.5
+                    }
+                else:
+                    # Fallback: reasonable default bounds
+                    layer_weight_bounds[layer_name] = {'min': -10.0, 'max': 10.0}
+        
+        for weight_info in weights_to_repair:
+            layer_name, i, j = weight_info[0], weight_info[1], weight_info[2]
+            key = (layer_name, i, j)
+            
+            if key in position:
+                # Get the layer - check if layer_name exists in named_modules
+                if layer_name not in named_modules:
+                    # Try to find it by checking all module names
+                    found = False
+                    for full_name, module in named_modules.items():
+                        if full_name.endswith('.' + layer_name) or full_name == layer_name:
+                            layer = module
+                            found = True
+                            break
+                    if not found:
+                        # Debug: print available layer names
+                        available_layers = [name for name in named_modules.keys() if 'layer' in name.lower()]
+                        print(f"Warning: Layer '{layer_name}' not found in named_modules!")
+                        print(f"  Available layers containing 'layer': {available_layers[:10]}")
+                        continue
+                else:
+                    layer = named_modules[layer_name]
+                
+                # Direct weight replacement (not adjustment)
+                with torch.no_grad():
+                    # PyTorch weight shape: [out_features, in_features]
+                    new_weight = position[key]  # Directly use position as weight value
+                    
+                    # Clamp weight to safe bounds to prevent NaN/Inf
+                    bounds = layer_weight_bounds[layer_name]
+                    new_weight_clamped = np.clip(new_weight, bounds['min'], bounds['max'])
+                    
+                    # Only apply if weight is valid
+                    if np.isfinite(new_weight_clamped):
+                        layer.weight[j, i] = new_weight_clamped
+                    else:
+                        # If somehow still invalid, use original weight
+                        original_weight = layer.weight[j, i].item()
+                        layer.weight[j, i] = original_weight
+        
+        return modified_model
+    
+    def _evaluate_fitness(self, model, X_neg, y_neg, X_pos, y_pos, loss_fn):
+        """
+        Evaluate fitness function.
+        
+        Fitness = loss_neg + lambda * loss_pos
+        (Want to minimize negative loss while not increasing positive loss)
+        """
+        model.eval()
+        
+        with torch.no_grad():
+            # Negative samples: should be fixed
+            outputs_neg = model(X_neg)
+            if outputs_neg.dim() == 1:
+                outputs_neg = outputs_neg.unsqueeze(1)
+            loss_neg = loss_fn(outputs_neg, y_neg.unsqueeze(1) if y_neg.dim() == 1 else y_neg)
+            
+            # Positive samples: should remain correct
+            outputs_pos = model(X_pos)
+            if outputs_pos.dim() == 1:
+                outputs_pos = outputs_pos.unsqueeze(1)
+            loss_pos = loss_fn(outputs_pos, y_pos.unsqueeze(1) if y_pos.dim() == 1 else y_pos)
+            
+            # Combined fitness (weighted sum)
+            lambda_pos = 1.0  # Weight for positive loss
+            fitness = loss_neg.item() + lambda_pos * loss_pos.item()
+        
+        return fitness
+    
+    def _evaluate_fitness_openloop(self, repaired_layers, frame_data_dict, 
+                                        positive_frames, negative_frames,
+                                        threshold_good, threshold_bad, fitness_type='discrete',
+                                        rep_method='Arachne_v1', use_original_l2_for_classification=False, time_horizon=3):
+        """
+        Evaluate fitness using open-loop evaluation (faster).
+        
+        For discrete fitness:
+            fitness = -(w1 * N_pos - w2 * N_(neg-no col) - w3 * N_mid - lambda * N_col)
+            where:
+                N_pos: number of positive frames (L2 < threshold_good)
+                N_(neg-no col): number of negative frames without collision (L2 > threshold_bad, no collision)
+                N_mid: number of middle frames (threshold_good <= L2 <= threshold_bad)
+                N_col: number of frames with collision
+            weights: w1=1.0, w2=1.0, w3=0.5, lambda=10.0
+        
+        For continuous fitness:
+            fitness = total L2 error across all frames
+        
+        For continuous2 fitness:
+            fitness = total L2 error + lambda * N_col
+            where:
+                total L2 error: sum of L2 errors across all valid frames
+                N_col: number of frames with collision
+                lambda: penalty coefficient (default 10.0)
+        
+        Goal: Minimize fitness (maximize the score for discrete, minimize L2 for continuous)
+        
+        Note: Evaluates ALL frames in frame_data_dict, not just positive_frames and negative_frames
+        
+        Parameters
+        ----------
+        repaired_layers : nn.Module or dict
+            Repaired layer(s) (wrapper or dict of layers)
+        frame_data_dict : dict
+            Dictionary containing ALL frames to evaluate
+            Each frame should have: 'ego_features', 'gt_trajectory', 'plan_L2_3s'
+        positive_frames : list
+            List of frames used for localization (not used in evaluation)
+        negative_frames : list
+            List of frames used for localization (not used in evaluation)
+        threshold_good : float
+            L2 threshold for positive frames
+        threshold_bad : float
+            L2 threshold for negative frames
+        fitness_type : str
+            Type of fitness function ('discrete', 'continuous', 'continuous2')
+        rep_method : str
+            Repair method name
+        
+        Returns
+        -------
+        fitness : float
+            Fitness score (lower is better, negative values are good)
+        frame_counts : dict, optional
+            Dictionary containing frame counts for each category:
+            - 'positive_no_collision': number of positive frames without collision
+            - 'middle_no_collision': number of middle frames without collision
+            - 'negative_no_collision': number of negative frames without collision
+            - 'collision': number of frames with collision
+            - 'total_evaluated': total number of frames evaluated
+            Only returned when use_original_l2_for_classification=True (for logging)
+        """
+        repaired_layers.eval()
+        
+        device = repaired_layers.parameters().__next__().device if hasattr(repaired_layers, 'parameters') else self.device
+        
+        # For semSegRep: if threshold_good == threshold_bad, use median L2 from JSON as threshold
+        actual_threshold_good = threshold_good
+        actual_threshold_bad = threshold_bad
+        use_median_threshold = False
+        
+        if rep_method == 'semSegRep' and threshold_good == threshold_bad:
+            # Calculate median L2 error from original JSON data (plan_L2_Xs based on time_horizon)
+            l2_field = f'plan_L2_{time_horizon}s'
+            all_original_l2 = []
+            for frame_data in frame_data_dict.values():
+                original_l2 = frame_data.get(l2_field, None)
+                if original_l2 is not None and not np.isnan(original_l2) and not np.isinf(original_l2):
+                    all_original_l2.append(original_l2)
+            if len(all_original_l2) > 0:
+                median_l2 = float(np.median(all_original_l2))
+                actual_threshold_good = median_l2
+                actual_threshold_bad = median_l2
+                use_median_threshold = True
+            else:
+                if not use_original_l2_for_classification:
+                    print(f"  [WARNING] semSegRep: Could not compute median L2, using provided threshold {threshold_good}")
+        
+        # Count frames in each category
+        collision_count = 0
+        positive_no_collision_count = 0
+        middle_no_collision_count = 0
+        negative_no_collision_count = 0
+        
+        # Debug counters
+        error_count = 0
+        inf_count = 0
+        shape_errors = []
+        
+        # SIMPLE FIX: For original model evaluation, directly use positive_frames and negative_frames
+        # BUT: 
+        #   - For Arachne_v1 and Arachne_v2: positive_frames/negative_frames are not used (evaluates ALL frames), so disable fast path
+        #   - For semSegRep with median threshold: cannot use fast path because positive_frames/negative_frames
+        #     were extracted using a different threshold (0.5) than what we use for evaluation (median L2)
+        can_use_fast_path = (use_original_l2_for_classification and 
+                            rep_method not in ['Arachne_v1', 'Arachne_v2'] and  # Arachne_v1/v2 don't use positive_frames/negative_frames
+                            positive_frames is not None and negative_frames is not None and 
+                            len(positive_frames) > 0 and len(negative_frames) > 0 and
+                            not (rep_method == 'semSegRep' and use_median_threshold))
+        
+        if use_original_l2_for_classification:
+            if rep_method in ['Arachne_v1', 'Arachne_v2']:
+                # Arachne_v1/v2 don't use positive_frames/negative_frames, always use normal evaluation
+                pass  # Silent, no warning needed
+            elif rep_method == 'semSegRep' and use_median_threshold:
+                print(f"  [INFO] semSegRep with median threshold: Cannot use fast path (threshold mismatch), will recompute L2")
+            elif positive_frames is None or negative_frames is None:
+                print(f"  [WARNING] use_original_l2_for_classification=True but positive_frames={positive_frames is not None}, negative_frames={negative_frames is not None}, falling back to normal evaluation")
+            elif len(positive_frames) == 0 or len(negative_frames) == 0:
+                print(f"  [WARNING] use_original_l2_for_classification=True but positive_frames={len(positive_frames)}, negative_frames={len(negative_frames)}, falling back to normal evaluation")
+            else:
+                print(f"  [INFO] Using fast path: directly counting from positive_frames ({len(positive_frames)}) and negative_frames ({len(negative_frames)})")
+        
+        if can_use_fast_path:
+            # Convert to sets for fast lookup
+            positive_set = set(positive_frames)
+            negative_set = set(negative_frames)
+            
+            # Count frames directly from frame_data_dict
+            for (token, scene_name), frame_data in frame_data_dict.items():
+                frame_id = (token, scene_name)
+                has_collision = frame_data.get('has_collision', False)
+                
+                if has_collision:
+                    collision_count += 1
+                    continue
+                
+                if frame_id in positive_set:
+                    positive_no_collision_count += 1
+                elif frame_id in negative_set:
+                    negative_no_collision_count += 1
+                else:
+                    # Middle frames (between thresholds)
+                    middle_no_collision_count += 1
+            
+            # Calculate fitness based on counts
+            if fitness_type == 'discrete':
+                # Discrete fitness: use same formula as normal evaluation
+                # But keep the original sign convention that was working
+                w1, w2, w3, lambda_col = 1.0, 1.0, 0.5, 10.0
+                score = (w1 * positive_no_collision_count -
+                         w2 * negative_no_collision_count -
+                         w3 * middle_no_collision_count -
+                         lambda_col * collision_count)
+                # Keep original sign: fitness = -score (so negative score gives positive fitness)
+                fitness = -score
+                
+                # For semSegRep: calculate median if needed for display
+                display_threshold_good = threshold_good
+                display_threshold_bad = threshold_bad
+                if rep_method == 'semSegRep' and threshold_good == threshold_bad:
+                    # Calculate median for display
+                    all_original_l2 = []
+                    for frame_data in frame_data_dict.values():
+                        original_l2 = frame_data.get('plan_L2_3s', None)
+                        if original_l2 is not None and not np.isnan(original_l2) and not np.isinf(original_l2):
+                            all_original_l2.append(original_l2)
+                    if len(all_original_l2) > 0:
+                        median_l2 = float(np.median(all_original_l2))
+                        display_threshold_good = median_l2
+                        display_threshold_bad = median_l2
+                
+                # Return fitness and frame counts for logging
+                if use_original_l2_for_classification:
+                    frame_counts = {
+                        'positive_no_collision': positive_no_collision_count,
+                        'middle_no_collision': middle_no_collision_count,
+                        'negative_no_collision': negative_no_collision_count,
+                        'collision': collision_count,
+                        'total_evaluated': positive_no_collision_count + middle_no_collision_count + negative_no_collision_count + collision_count
+                    }
+                    return fitness, frame_counts
+                return fitness
+            else:
+                # For continuous fitness, still need to compute L2 errors
+                # Fall through to normal evaluation
+                pass
+        
+        # Determine batch size: use configured value or auto-detect based on GPU memory
+        # Move outside with torch.no_grad() to ensure it's in function scope
+        if self.eval_batch_size is not None:
+            batch_size = self.eval_batch_size
+        else:
+            # Auto-detect batch size based on GPU memory
+            if device.type == 'cuda':
+                # Get GPU memory info
+                gpu_memory_gb = torch.cuda.get_device_properties(device).total_memory / (1024**3)
+                # Conservative estimate: ~50MB per batch (for features + predictions + intermediates)
+                # For 80GB GPU (H100): ~1600 theoretical max, use 1024 for better utilization
+                # For 32GB GPU: ~640, but use 256 as safe default
+                # For 16GB GPU: ~320, but use 128 as safe default
+                # For 8GB GPU: ~160, but use 64 as safe default
+                if gpu_memory_gb >= 60:
+                    batch_size = 1024  # Very large GPU (H100 80GB, etc.)
+                elif gpu_memory_gb >= 24:
+                    batch_size = 256  # Large GPU (V100, A100, etc.)
+                elif gpu_memory_gb >= 12:
+                    batch_size = 128  # Medium GPU (RTX 3090, etc.)
+                else:
+                    batch_size = 64   # Small GPU or default (RTX 3080, T4, etc.)
+            else:
+                batch_size = 32  # CPU: smaller batch size
+        
+        frame_items = list(frame_data_dict.items())
+        total_frames = len(frame_items)
+        
+        # Check if frame_data_dict is empty
+        if total_frames == 0:
+            print(f"  [WARNING] frame_data_dict is empty! No frames to evaluate.")
+            if use_original_l2_for_classification:
+                frame_counts = {
+                    'positive_no_collision': 0,
+                    'middle_no_collision': 0,
+                    'negative_no_collision': 0,
+                    'collision': 0,
+                    'total_evaluated': 0
+                }
+                return float('inf'), frame_counts  # Return worst fitness
+            return float('inf')  # Return worst fitness
+        
+        # Pre-allocate lists for batch processing
+        all_ego_features = []
+        all_gt_trajectories = []
+        all_cmd_indices = []
+        all_has_collision = []
+        all_gt_masks = []  # Store GT masks for L2 calculation
+        all_original_predictions = []  # Store original predictions from JSON for comparison
+        all_frame_data = []  # Store frame_data for later lookup
+        
+        # Collect all data (same as old version)
+        for (token, scene_name), frame_data in frame_items:
+            # Convert to numpy arrays (same as old version)
+            ego_features = np.array(frame_data['ego_features'], dtype=np.float32)
+            gt_trajectory = np.array(frame_data.get('gt_future_traj', []), dtype=np.float32)
+            # Use ego_fut_cmd_idx to match old version
+            cmd_idx = frame_data.get('ego_fut_cmd_idx', 0)
+            # Get GT mask if available (for VAD rule L2 calculation)
+            # VAD rule JSON uses 'ego_fut_masks' (plural), but we save as 'ego_fut_mask' (singular) in frame_data_dict
+            gt_mask = frame_data.get('ego_fut_mask', frame_data.get('ego_fut_masks', None))
+            if gt_mask is None:
+                # If mask not available, assume all timesteps are valid (mask=1)
+                # This matches VAD rule: if mask_sum > 0, frame is valid
+                gt_mask = np.ones((6, 2), dtype=np.float32)  # Default: all valid
+            else:
+                gt_mask = np.array(gt_mask, dtype=np.float32)
+                # Handle different mask shapes (matches convert_uniad_to_vad_metrics.py logic exactly)
+                if gt_mask.ndim == 3:
+                    gt_mask = gt_mask[0, :6, :2]  # Take first batch, 6 timesteps, 2 coords
+                elif gt_mask.ndim == 2:
+                    gt_mask = gt_mask[:6, :2] if gt_mask.shape[1] >= 2 else gt_mask[:6, None]
+                elif gt_mask.ndim == 1:
+                    gt_mask = gt_mask[:6, None]  # (6, 1) - will broadcast to (6, 2) in calculation
+                else:
+                    # Invalid shape, use default
+                    gt_mask = np.ones((6, 2), dtype=np.float32)
+                
+                # Ensure final shape is (6, 2) for consistency
+                if gt_mask.shape[0] < 6:
+                    # Pad with 1.0 (valid)
+                    padded = np.ones((6, 2), dtype=np.float32)
+                    if gt_mask.ndim == 1:
+                        padded[:gt_mask.shape[0], :] = gt_mask[:gt_mask.shape[0], None]
+                    else:
+                        min_dim = min(gt_mask.shape[1] if gt_mask.ndim > 1 else 1, 2)
+                        padded[:gt_mask.shape[0], :min_dim] = gt_mask[:gt_mask.shape[0], :min_dim]
+                    gt_mask = padded
+                elif gt_mask.shape[0] >= 6:
+                    # Slice to 6 timesteps
+                    if gt_mask.ndim == 1:
+                        # Broadcast (6,) to (6, 2)
+                        gt_mask = np.column_stack([gt_mask[:6], gt_mask[:6]])
+                    elif gt_mask.ndim == 2:
+                        if gt_mask.shape[1] < 2:
+                            # Broadcast (6, 1) to (6, 2)
+                            gt_mask = np.column_stack([gt_mask[:6, 0], gt_mask[:6, 0]])
+                        else:
+                            gt_mask = gt_mask[:6, :2]
+            all_ego_features.append(ego_features)
+            all_gt_trajectories.append(gt_trajectory)
+            all_cmd_indices.append(cmd_idx)
+            all_has_collision.append(frame_data.get('has_collision', False))
+            all_gt_masks.append(gt_mask)
+            # Store original predictions from JSON for comparison (if available)
+            original_pred = frame_data.get('original_predictions', None)
+            all_original_predictions.append(original_pred)
+            all_frame_data.append(frame_data)  # Store frame_data for later lookup
+        
+        # Batch process
+        total_l2_error = 0.0
+        valid_frame_count = 0
+        
+        planning_metric = None
+        # Initialize frame count variables
+        positive_no_collision_count = 0
+        middle_no_collision_count = 0
+        negative_no_collision_count = 0
+        collision_count = 0
+        error_count = 0
+        inf_count = 0
+        shape_errors = []
+        
+        # Process batches in no_grad context
+        
+        with torch.no_grad():
+            for batch_start in range(0, total_frames, batch_size):
+                batch_end = min(batch_start + batch_size, total_frames)
+                batch_ego_features = all_ego_features[batch_start:batch_end]
+                batch_gt_trajectories = all_gt_trajectories[batch_start:batch_end]
+                batch_cmd_indices = all_cmd_indices[batch_start:batch_end]
+                batch_has_collision = all_has_collision[batch_start:batch_end]
+                
+                # Convert to tensors in batch (same as old version)
+                batch_ego_tensor = torch.tensor(np.array(batch_ego_features), dtype=torch.float32).to(device)
+                # Ensure correct shape: (batch, feature_dim)
+                if batch_ego_tensor.dim() == 1:
+                    batch_ego_tensor = batch_ego_tensor.unsqueeze(0)
+                
+                # Forward pass
+                try:
+                    
+                    # Batch forward pass (same as old version)
+                    batch_pred_traj = repaired_layers(batch_ego_tensor)  # (batch, 36) or (batch, 6, 2)
+                    batch_pred_raw = batch_pred_traj
+                    
+                    # Handle UniAD output shapes from repaired_layers
+                    # UniAD reg_branch outputs: (batch, 12) = (batch, 6时间步 × 2坐标)
+                    if batch_pred_traj.dim() == 1:
+                        batch_pred_traj = batch_pred_traj.unsqueeze(0)
+                    elif batch_pred_traj.dim() == 2:
+                        # UniAD format: (batch, 12) -> (batch, 6, 2)
+                        if batch_pred_traj.shape[1] == 12:
+                            batch_pred_traj = batch_pred_traj.view(-1, 6, 2)
+                        else:
+                            raise RuntimeError(
+                                f"Unsupported pred_traj shape {tuple(batch_pred_traj.shape)}. "
+                                f"Expected (batch, 12) for UniAD."
+                            )
+                    elif batch_pred_traj.dim() == 3:
+                        # Already (batch, 6, 2) or (batch, timesteps, 2)
+                        if batch_pred_traj.shape[1:] != (6, 2):
+                            raise RuntimeError(
+                                f"Unsupported pred_traj shape {tuple(batch_pred_traj.shape)}. "
+                                f"Expected (batch, 6, 2) for UniAD."
+                            )
+                    
+                    # Prepare GT trajectories tensor: (batch, 6, 2)
+                    # Always use full 6 timesteps, _compute_l2_error_gpu will slice based on time_horizon
+                    batch_gt_tensor = torch.zeros(len(batch_gt_trajectories), 6, 2, dtype=torch.float32, device=device)
+                    for i, gt_traj in enumerate(batch_gt_trajectories):
+                        if len(gt_traj.shape) == 1:
+                            gt_traj = gt_traj.reshape(-1, 2)
+                        min_len = min(gt_traj.shape[0], 6)
+                        batch_gt_tensor[i, :min_len, :] = torch.tensor(gt_traj[:min_len], dtype=torch.float32, device=device)
+                    
+                    # Prepare cmd_indices tensor: (batch,)
+                    batch_cmd_tensor = torch.tensor(batch_cmd_indices, dtype=torch.long, device=device)
+
+                    # Convert predictions to absolute trajectories for collision evaluation
+                    batch_pred_abs = self._pred_traj_to_abs_gpu(batch_pred_raw, batch_cmd_tensor)
+                    
+                    # Always compute L2 for comparison/debugging, even if use_original_l2_for_classification=True
+                    # For original model evaluation, we use JSON values for classification but still compute L2 for comparison
+                    # For particle evaluation, compute L2 to reflect model changes
+                    # Prepare GT masks tensor: (batch, 6, 2)
+                    # gt_mask from all_gt_masks should already be (6, 2) after processing above
+                    batch_gt_masks_tensor = torch.zeros(len(batch_gt_trajectories), 6, 2, dtype=torch.float32, device=device)
+                    masks_loaded = 0
+                    masks_default = 0
+                    mask_sources = []  # Track where masks come from
+                    for i, gt_mask in enumerate(all_gt_masks[batch_start:batch_end]):
+                        # gt_mask should already be (6, 2) from processing above
+                        if gt_mask.shape == (6, 2):
+                            batch_gt_masks_tensor[i, :, :] = torch.tensor(gt_mask, dtype=torch.float32, device=device)
+                            # Check if mask is all 1.0 (default) or has actual values
+                            if np.allclose(gt_mask, 1.0):
+                                masks_default += 1
+                                # Check if mask was actually loaded from JSON or is default
+                                frame_idx = batch_start + i
+                                frame_data = all_frame_data[frame_idx] if frame_idx < len(all_frame_data) else None
+                                mask_source = frame_data.get('_mask_field_used', 'unknown') if frame_data else 'unknown'
+                                mask_sources.append(mask_source)
+                            else:
+                                masks_loaded += 1
+                                mask_sources.append('loaded_from_json')
+                        else:
+                            # Fallback: handle unexpected shapes
+                            min_len = min(gt_mask.shape[0], 6)
+                            min_dim = min(gt_mask.shape[1], 2) if gt_mask.ndim > 1 else 2
+                            if gt_mask.ndim == 1:
+                                # Broadcast (6,) to (6, 2)
+                                gt_mask_2d = np.column_stack([gt_mask[:6], gt_mask[:6]])
+                                batch_gt_masks_tensor[i, :min_len, :] = torch.tensor(gt_mask_2d[:min_len, :], dtype=torch.float32, device=device)
+                            else:
+                                batch_gt_masks_tensor[i, :min_len, :min_dim] = torch.tensor(gt_mask[:min_len, :min_dim], dtype=torch.float32, device=device)
+                            # Fill remaining with 1.0 (valid)
+                            if min_len < 6:
+                                batch_gt_masks_tensor[i, min_len:, :] = 1.0
+                            if min_dim < 2:
+                                batch_gt_masks_tensor[i, :, min_dim:] = 1.0
+                            masks_default += 1
+                            mask_sources.append('fallback_shape')
+                        
+                        
+                        # Use _compute_l2_error_gpu which handles all shape cases correctly
+                        # batch_pred_traj is delta format, _compute_l2_error_gpu will convert to absolute
+                        batch_l2_errors = self._compute_l2_error_gpu(batch_pred_traj, batch_gt_tensor, batch_cmd_tensor, time_horizon=time_horizon, gt_mask=batch_gt_masks_tensor)
+                        batch_l2_errors_np = batch_l2_errors.cpu().numpy()
+                        
+                                
+
+                    # Optional: parallel collision computation on CPU
+                    collision_flags = None
+                    if self.collision_num_workers is not None and self.collision_num_workers > 1:
+                        pool = self._get_collision_pool()
+                        tasks = []
+                        for b_idx in range(batch_end - batch_start):
+                            frame_idx = batch_start + b_idx
+                            frame_data = all_frame_data[frame_idx]
+                            occ_path = frame_data.get('occ_path', None)
+                            pred_abs_np = batch_pred_abs[b_idx:b_idx + 1, :6, :2].detach().cpu().numpy()[0]
+                            gt_abs_np = batch_gt_tensor[b_idx:b_idx + 1, :6, :2].detach().cpu().numpy()[0]
+                            tasks.append((occ_path, pred_abs_np, gt_abs_np, time_horizon))
+                        results = pool.map(_compute_collision_from_occ, tasks)
+                        bad = [r for r in results if not r[0]]
+                        if bad:
+                            error_count += 1
+                            shape_errors.append(bad[0][1])
+                            continue
+                        collision_flags = [r[1] for r in results]
+                    
+                    # Process each frame in batch for classification and statistics (same as old version)
+                    for b_idx in range(batch_end - batch_start):
+                        frame_idx = batch_start + b_idx
+                        frame_data = all_frame_data[frame_idx]
+                        
+                        # For original model evaluation, use pre-computed L2 from JSON for consistency
+                        # Use the L2 field that matches the time_horizon (plan_L2_1s, plan_L2_2s, or plan_L2_3s)
+                        if use_original_l2_for_classification:
+                            l2_field = f'plan_L2_{time_horizon}s'
+                            original_l2 = frame_data.get(l2_field, None)
+                            
+                            # Use pre-computed L2 from JSON if available and valid
+                            if original_l2 is not None and not np.isnan(original_l2) and not np.isinf(original_l2):
+                                l2_error = float(original_l2)
+                            else:
+                                # Fallback: if JSON value is missing, skip this frame
+                                print(f"  [WARNING] Missing L2 value for frame {frame_idx}, skipping...")
+                                continue
+                        else:
+                            # For particle evaluation, use computed L2 error so fitness reflects model changes
+                            if batch_l2_errors_np is None:
+                                raise RuntimeError("batch_l2_errors_np is None but use_original_l2_for_classification is False")
+                            l2_error = float(batch_l2_errors_np[b_idx])
+                        
+                        # Note: frame_l2_comparison is populated in the accumulation section below
+                        
+                        # Check collision: use saved collision info from JSON if use_original_l2_for_classification
+                        if use_original_l2_for_classification:
+                            # For original model evaluation, use pre-computed collision from JSON for consistency
+                            col_field = f'plan_obj_box_col_{time_horizon}s'
+                            col_value = frame_data.get(col_field, 0.0)
+                            has_collision = (col_value > 0)
+                        elif collision_flags is not None:
+                            has_collision = collision_flags[b_idx]
+                        else:
+                            # Recompute collision from occ/seg for particle evaluation
+                            occ_path = _resolve_occ_path(frame_data.get('occ_path', None))
+                            if not occ_path or not os.path.exists(occ_path):
+                                raise ValueError(
+                                    f"Missing occ_path for collision recomputation: {occ_path}. "
+                                    "Please regenerate JSON with --occ-output-dir."
+                                )
+                            try:
+                                if planning_metric is None:
+                                    from mmcv.models.dense_heads.planning_head_plugin import UniADPlanningMetric
+                                    planning_metric = UniADPlanningMetric().to(device)
+                                seg_np = np.load(occ_path)['seg']
+                                seg_t = torch.from_numpy(seg_np).to(device)
+                                if seg_t.dim() == 3:
+                                    seg_t = seg_t.unsqueeze(0)
+                                pred_abs = batch_pred_abs[b_idx:b_idx + 1, :6, :2]
+                                gt_abs = batch_gt_tensor[b_idx:b_idx + 1, :6, :2]
+                                _, obj_box_col = planning_metric.evaluate_coll(pred_abs, gt_abs, seg_t)
+                                if time_horizon == 1:
+                                    col_value = float(obj_box_col[:2].mean().item())
+                                elif time_horizon == 2:
+                                    col_value = float(obj_box_col[:4].mean().item())
+                                else:
+                                    col_value = float(obj_box_col[:6].mean().item())
+                                has_collision = (col_value > 0)
+                            except Exception as e:
+                                raise RuntimeError(f"Failed to compute collision from occ_path={occ_path}: {e}")
+                        
+                        # Track inf values
+                        if np.isinf(l2_error) or l2_error == float('inf'):
+                            inf_count += 1
+                        
+                        # Accumulate L2 error for continuous fitness
+                        # Only accumulate valid L2 errors (not NaN or Inf)
+                        # Note: We only process frames with fut_valid_flag=True, so all frames here are valid
+                        if not np.isnan(l2_error) and not np.isinf(l2_error):
+                            valid_frame_count += 1
+                            total_l2_error += l2_error
+                            
+                            
+                            
+                        
+                        # For semSegRep: classify first, then handle collisions
+                        # For Arachne_v1: check collision first, skip classification if collision
+                        if rep_method == 'semSegRep' and actual_threshold_good == actual_threshold_bad:
+                            # Fixed/median threshold: L2 < threshold = positive, L2 >= threshold = negative
+                            # Classify first regardless of collision
+                            if l2_error < actual_threshold_good:
+                                positive_no_collision_count += 1
+                            else:
+                                negative_no_collision_count += 1
+                            
+                            # Then handle collision: subtract from corresponding count and add to collision_count
+                            if has_collision:
+                                if l2_error < actual_threshold_good:
+                                    positive_no_collision_count -= 1
+                                else:
+                                    negative_no_collision_count -= 1
+                                collision_count += 1
+                        else:
+                            # For Arachne_v1: check collision first, skip classification if collision
+                            if has_collision:
+                                collision_count += 1
+                                continue
+                            
+                            # Classify frame based on L2 error (same logic as localization for non-collision frames)
+                            # For original model: uses plan_L2_{time_horizon}s from JSON
+                            # For particles: uses computed L2 error (reflects model changes)
+                            if l2_error < actual_threshold_good:
+                                positive_no_collision_count += 1
+                            elif l2_error <= actual_threshold_bad:
+                                middle_no_collision_count += 1
+                            else:
+                                negative_no_collision_count += 1
+                
+                except Exception as e:
+                    error_count += 1
+                    shape_errors.append(str(e))
+                    print(f"  [ERROR] Batch processing failed: {e}", flush=True)
+                    import traceback
+                    traceback.print_exc()
+                    continue
+        
+        
+        # Compute fitness based on type (after all batches are processed)
+        total_frames_evaluated = positive_no_collision_count + middle_no_collision_count + negative_no_collision_count + collision_count
+        
+        # Debug: print counts if all are zero
+        if total_frames_evaluated == 0 and total_frames > 0:
+            print(f"  [WARNING] No frames were evaluated! Total frames: {total_frames}, Error count: {error_count}", flush=True)
+            if shape_errors:
+                print(f"  [WARNING] Shape errors: {shape_errors[:5]}", flush=True)  # Print first 5 errors
+            # If use_original_l2_for_classification and all frames failed, try to classify directly from JSON
+            if use_original_l2_for_classification and error_count > 0:
+                print(f"  [INFO] Attempting fallback: classifying frames directly from JSON data...", flush=True)
+                # Fallback: classify directly from JSON without forward pass
+                for (token, scene_name), frame_data in frame_items:
+                    l2_field = f'plan_L2_{time_horizon}s'
+                    col_field = f'plan_obj_box_col_{time_horizon}s'
+                    original_l2 = frame_data.get(l2_field, None)
+                    col_value = frame_data.get(col_field, 0.0)
+                    has_collision = (col_value > 0)
+                    
+                    if original_l2 is None or np.isnan(original_l2) or np.isinf(original_l2):
+                        continue
+                    
+                    l2_error = float(original_l2)
+                    
+                    if rep_method == 'semSegRep' and actual_threshold_good == actual_threshold_bad:
+                        if l2_error < actual_threshold_good:
+                            positive_no_collision_count += 1
+                        else:
+                            negative_no_collision_count += 1
+                        if has_collision:
+                            if l2_error < actual_threshold_good:
+                                positive_no_collision_count -= 1
+                            else:
+                                negative_no_collision_count -= 1
+                            collision_count += 1
+                    else:
+                        if has_collision:
+                            collision_count += 1
+                        else:
+                            if l2_error < actual_threshold_good:
+                                positive_no_collision_count += 1
+                            elif l2_error <= actual_threshold_bad:
+                                middle_no_collision_count += 1
+                            else:
+                                negative_no_collision_count += 1
+                
+                # Recalculate total after fallback
+                total_frames_evaluated = positive_no_collision_count + middle_no_collision_count + negative_no_collision_count + collision_count
+                print(f"  [INFO] Fallback classification complete: {total_frames_evaluated} frames evaluated", flush=True)
+        
+        # Compute fitness based on type (always compute, regardless of total_frames_evaluated)
+        if fitness_type == 'discrete':
+            # Discrete fitness definition:
+            # fitness = -(w1 * N_pos - w2 * N_(neg-no col) - w3 * N_mid - lambda * N_col)
+            # We want to maximize this value, but PSO minimizes, so we negate it
+            w1 = 1.0
+            w2 = 1.0
+            w3 = 0.5
+            lambda_col = 10.0
+            
+            score = (w1 * positive_no_collision_count -
+                     w2 * negative_no_collision_count -
+                     w3 * middle_no_collision_count -
+                     lambda_col * collision_count)
+            
+            fitness = -score  # Negate because PSO minimizes (we want to maximize score)
+            
+        elif fitness_type == 'continuous':
+            # Continuous fitness: total L2 error across all frames
+            # Lower L2 error is better, PSO minimizes directly
+            # Note: Only frames with fut_valid_flag=True are included in total_l2_error
+            score = total_l2_error
+            
+            
+            # BUG FIX: If total_l2_error is 0.0 but no valid L2 errors were accumulated,
+            # this means all frames had NaN/Inf errors (model is broken), not perfect fitness!
+            # Return a large penalty value instead of 0.0
+            if score == 0.0 and valid_frame_count == 0:
+                fitness = float('inf')  # Worst possible fitness (will be rejected by PSO)
+            else:
+                fitness = score  # Direct minimization of L2 error
+            
+        elif fitness_type == 'continuous2':
+            # Continuous2 fitness: total L2 error + lambda * collision count
+            lambda_col = 10.0
+            
+            if valid_frame_count > 0:
+                fitness = total_l2_error + lambda_col * collision_count
+            else:
+                # No valid L2 errors: model is broken, use penalty fitness
+                fitness = float('inf')  # Worst possible fitness (will be rejected by PSO)
+        else:
+            raise ValueError(f"Unknown fitness_type: {fitness_type}")
+        
+        # Return fitness and frame counts for logging (only for original model evaluation)
+        if use_original_l2_for_classification:
+            frame_counts = {
+                'positive_no_collision': positive_no_collision_count,
+                'middle_no_collision': middle_no_collision_count,
+                'negative_no_collision': negative_no_collision_count,
+                'collision': collision_count,
+                'total_evaluated': total_frames_evaluated
+            }
+            
+            return float(fitness), frame_counts
+        
+        return float(fitness)
+    
+    def _compute_l2_error(self, pred_traj, gt_traj, cmd_idx=0):
+        """
+        Compute L2 error between predicted and ground truth trajectories.
+        
+        This is used during OPTIMIZATION (PSO/DE) to evaluate fitness.
+        
+        IMPORTANT:
+        - pred_traj: Decoder output (delta/displacement values by default for UniAD)
+        - gt_traj: Ground truth (absolute positions from JSON) - already absolute positions
+        
+        Parameters
+        ----------
+        pred_traj : np.ndarray or torch.Tensor
+            Predicted trajectory from UniAD decoder (DELTA by default, can be absolute if pred_traj_is_delta=False)
+            Shape: (timesteps, 2) or (batch, timesteps, 2)
+        gt_traj : np.ndarray or torch.Tensor
+            Ground truth trajectory (ABSOLUTE positions from JSON)
+            Shape: (timesteps, 2) or (batch, timesteps, 2)
+        cmd_idx : int
+            Command index to select (for multi-mode predictions)
+        
+        Returns
+        -------
+        l2_error : float
+            Average L2 error in meters over all timesteps
+        """
+        # Convert to numpy if needed
+        if isinstance(pred_traj, torch.Tensor):
+            pred_traj = pred_traj.detach().cpu().numpy()
+        if isinstance(gt_traj, torch.Tensor):
+            gt_traj = gt_traj.detach().cpu().numpy()
+        
+        # Handle multi-mode predictions (select based on cmd_idx)
+        if pred_traj.ndim == 3:
+            # Shape: (batch, timesteps, 2) or (modes, timesteps, 2)
+            if pred_traj.shape[0] > 1:
+                # Multiple modes/batches, select by cmd_idx
+                pred_traj = pred_traj[cmd_idx] if cmd_idx < pred_traj.shape[0] else pred_traj[0]
+            else:
+                pred_traj = pred_traj[0]
+        
+        # Convert delta to absolute positions only if needed
+        if pred_traj.ndim == 2 and self.pred_traj_is_delta:
+            pred_traj = np.cumsum(pred_traj, axis=0)
+            if self.apply_bivariate_activation:
+                pred_traj = bivariate_gaussian_activation(torch.from_numpy(pred_traj)).numpy()
+        
+        # Compute L2 error
+        l2_error = np.mean(np.linalg.norm(pred_traj - gt_traj, axis=-1))
+        
+        return float(l2_error)
+
+    def _pred_traj_to_abs_gpu(self, pred_traj, cmd_idx):
+        """
+        Convert raw UniAD decoder output to absolute trajectory for collision evaluation.
+        Returns shape (batch, 6, 2).
+        """
+        # Handle UniAD flat output: (batch, 12) -> (batch, 6, 2)
+        if pred_traj.dim() == 2:
+            if pred_traj.shape[1] == 12:
+                pred_traj = pred_traj.view(-1, 6, 2)
+            else:
+                raise RuntimeError(
+                    f"Unsupported pred_traj shape {tuple(pred_traj.shape)}. "
+                    f"Expected (batch, 12) for UniAD."
+                )
+        elif pred_traj.dim() == 3:
+            # Already (batch, 6, 2) or (batch, timesteps, 2)
+            if pred_traj.shape[1:] != (6, 2):
+                raise RuntimeError(
+                    f"Unsupported pred_traj shape {tuple(pred_traj.shape)}. "
+                    f"Expected (batch, 6, 2) for UniAD."
+                )
+        else:
+            raise RuntimeError(
+                f"Unsupported pred_traj dims {pred_traj.dim()} with shape {tuple(pred_traj.shape)}. "
+                f"Expected 2D (batch, 12) or 3D (batch, 6, 2) for UniAD."
+            )
+
+        if self.pred_traj_is_delta:
+            pred_traj = torch.cumsum(pred_traj, dim=1)
+            if self.apply_bivariate_activation:
+                pred_traj = bivariate_gaussian_activation(pred_traj)
+
+        return pred_traj
+    
+    def _compute_l2_error_gpu(self, pred_traj, gt_traj, cmd_idx, time_horizon=3, gt_mask=None):
+        """
+        Compute L2 error on GPU (faster for batch processing).
+        
+        Parameters
+        ----------
+        pred_traj : torch.Tensor
+            Predicted trajectory (DELTA by default for UniAD).
+            Common shapes:
+              - (batch, 12) where 12 = 6 * 2  (UniAD: 6 timesteps, 2 coordinates)
+              - (batch, 6, 2) (already reshaped)
+        gt_traj : torch.Tensor
+            Ground truth trajectory (ABSOLUTE positions), shape: (batch, 6, 2)
+        cmd_idx : int or torch.Tensor
+            Command index to select (for multi-mode predictions), shape: (batch,) if Tensor
+        time_horizon : int
+            Time horizon in seconds: 1s=2 timesteps, 2s=4 timesteps, 3s=6 timesteps (default: 3)
+        
+        Returns
+        -------
+        l2_errors : torch.Tensor
+            L2 errors for each sample, shape: (batch,)
+        """
+        batch_size = pred_traj.shape[0]
+        # B2D fixed planning horizon: 6 future steps (full trajectory)
+        # But we only use the specified time_horizon for L2 calculation
+        timesteps_for_horizon = {1: 2, 2: 4, 3: 6}  # {1秒: 2步, 2秒: 4步, 3秒: 6步}
+        timesteps = timesteps_for_horizon.get(time_horizon, 6)
+        
+        # Handle UniAD output format: (batch, 12) = (batch, 6时间步 × 2坐标) -> (batch, 6, 2)
+        # We'll slice to timesteps later after converting to absolute positions
+        if pred_traj.dim() == 2:
+            if pred_traj.shape[-1] == 12:
+                # UniAD format: (batch, 12) -> (batch, 6, 2)
+                pred_traj = pred_traj.view(batch_size, 6, 2)
+            else:
+                raise RuntimeError(
+                    f"Unsupported pred_traj shape {tuple(pred_traj.shape)}. "
+                    f"Expected (batch, 12) for UniAD."
+                )
+        elif pred_traj.dim() == 3:
+            # Already (batch, 6, 2) format
+            if pred_traj.shape[1:] != (6, 2):
+                raise RuntimeError(
+                    f"Unsupported pred_traj shape {tuple(pred_traj.shape)}. "
+                    f"Expected (batch, 6, 2) for UniAD."
+                )
+        else:
+            raise RuntimeError(
+                f"Unsupported pred_traj dims {pred_traj.dim()} with shape {tuple(pred_traj.shape)}"
+            )
+        
+        # Ensure pred_traj is (batch, timesteps, 2)
+        if pred_traj.dim() == 2:
+            # Shape: (batch, 2) - single timestep, add timestep dimension
+            pred_traj = pred_traj.unsqueeze(1)
+        
+        # Convert delta to absolute positions only if needed
+        pred_traj_abs = torch.cumsum(pred_traj, dim=1) if self.pred_traj_is_delta else pred_traj
+        if self.pred_traj_is_delta and self.apply_bivariate_activation:
+            pred_traj_abs = bivariate_gaussian_activation(pred_traj_abs)
+        
+        # Ensure gt_traj has correct shape: (batch, 6, 2)
+        # GT always has 6 timesteps, we'll slice to timesteps later
+        if gt_traj.dim() == 2:
+            # Single trajectory: expand to batch
+            if gt_traj.shape == (6, 2):
+                gt_traj = gt_traj.unsqueeze(0).expand(batch_size, -1, -1)
+            else:
+                # Reshape and pad if needed
+                gt_traj = gt_traj.view(-1, 2).unsqueeze(0)
+                if gt_traj.shape[1] != 6:
+                    padded_gt = torch.zeros(1, 6, 2, device=gt_traj.device, dtype=gt_traj.dtype)
+                    min_timesteps = min(gt_traj.shape[1], 6)
+                    padded_gt[:, :min_timesteps, :] = gt_traj[:, :min_timesteps, :]
+                    gt_traj = padded_gt.expand(batch_size, -1, -1)
+        
+        # Slice both pred and gt to timesteps based on time_horizon
+        # Both should be (batch, 6, 2) at this point, slice to (batch, timesteps, 2)
+        min_len = min(timesteps, pred_traj_abs.shape[1], gt_traj.shape[1])
+        if min_len == 0:
+            return torch.full((batch_size,), float('inf'), device=pred_traj_abs.device, dtype=pred_traj_abs.dtype)
+        pred_traj_abs = pred_traj_abs[:, :min_len, :]
+        gt_traj = gt_traj[:, :min_len, :]
+        
+        # Compute L2 distance for each timestep: (batch, timesteps)
+        # NOTE: VAD rule requires flipping x coordinate before L2 calculation
+        # This matches convert_uniad_to_vad_metrics.py: pred_traj[:, 0] = -pred_traj[:, 0]
+        pred_traj_abs_flipped = pred_traj_abs.clone()
+        pred_traj_abs_flipped[:, :, 0] = -pred_traj_abs_flipped[:, :, 0]
+        gt_traj_flipped = gt_traj.clone()        
+        diff = pred_traj_abs_flipped - gt_traj_flipped
+        
+        # Apply mask if provided (matches VAD rule: l2 = sqrt(((pred - gt) ** 2) * mask).sum(axis=-1))
+        if gt_mask is not None:
+            # Ensure mask has correct shape: (batch, timesteps, 2)
+            # gt_mask should be (batch, 6, 2), slice to (batch, min_len, 2)
+            if gt_mask.shape[1] != min_len:
+                # Slice mask to match timesteps
+                gt_mask = gt_mask[:, :min_len, :]
+            # Apply mask: multiply squared diff by mask, then sum over coordinates
+            # This matches: l2 = sqrt(((pred - gt) ** 2) * mask).sum(axis=-1) in convert_uniad_to_vad_metrics.py
+            # Note: In convert_uniad_to_vad_metrics.py, mask is (6, 2) or (6, 1), and broadcasting happens automatically
+            masked_diff_sq = (diff ** 2) * gt_mask  # (batch, timesteps, 2)
+            l2_distances = torch.sqrt(torch.sum(masked_diff_sq, dim=2))  # (batch, timesteps)
+            
+        else:
+            # No mask: use standard L2 (assumes all timesteps valid)
+            # This should not happen if mask is properly loaded, but fallback for safety
+            l2_distances = torch.sqrt(torch.sum(diff**2, dim=2))  # (batch, timesteps)
+            
+        
+        # Return average L2 error over specified time horizon: (batch,)
+        # This matches VAD rule: np.mean(l2[:6]) for plan_L2_3s (interval average, not single timestep)
+        # JSON format from convert_uniad_to_vad_metrics.py: plan_L2_3s = float(np.mean(l2[:6]))
+        # NOTE: JSON uses interval average (mean over timesteps), matching convert_uniad_to_vad_metrics.py:42
+        l2_errors = torch.mean(l2_distances, dim=1)
+        
+        
+        
+        return l2_errors
+    
+    def compute_l2_statistics(self, model, frame_data_dict, threshold_good=0.5, threshold_bad=2.0):
+        """
+        Compute L2 error statistics for all frames.
+        
+        Uses batch processing for GPU acceleration (similar to _evaluate_fitness_openloop).
+        
+        Parameters
+        ----------
+        model : nn.Module
+            Model to evaluate
+        frame_data_dict : dict
+            Dictionary mapping (token, scene_name) to frame data
+        threshold_good : float
+            L2 threshold for good frames
+        threshold_bad : float
+            L2 threshold for bad frames
+        
+        Returns
+        -------
+        stats : dict
+            Statistics dictionary
+        """
+        model.eval()
+        device = next(model.parameters()).device
+        
+        # Determine batch size based on GPU memory
+        if self.eval_batch_size is not None:
+            batch_size = self.eval_batch_size
+        else:
+            if device.type == 'cuda':
+                gpu_memory_gb = torch.cuda.get_device_properties(device).total_memory / (1024**3)
+                if gpu_memory_gb >= 60:
+                    batch_size = 1024  # Very large GPU (H100 80GB, etc.)
+                elif gpu_memory_gb >= 24:
+                    batch_size = 256  # Large GPU (V100, A100, etc.)
+                elif gpu_memory_gb >= 12:
+                    batch_size = 128  # Medium GPU (RTX 3090, etc.)
+                else:
+                    batch_size = 64   # Small GPU or default (RTX 3080, T4, etc.)
+            else:
+                batch_size = 32  # CPU: smaller batch size
+        
+        frame_items = list(frame_data_dict.items())
+        total_frames = len(frame_items)
+        
+        # Pre-allocate lists for batch processing
+        all_ego_features = []
+        all_gt_trajectories = []
+        all_cmd_indices = []
+        all_has_collision = []
+        
+        # Collect all data
+        for (token, scene_name), frame_data in frame_items:
+            all_ego_features.append(frame_data['ego_features'])
+            all_gt_trajectories.append(frame_data['gt_future_traj'])
+            # Use 'ego_fut_cmd_idx' to match old version and build_frame_data_dict
+            all_cmd_indices.append(frame_data.get('ego_fut_cmd_idx', frame_data.get('cmd_idx', 0)))
+            all_has_collision.append(frame_data.get('has_collision', False))
+        
+        # Convert to tensors (torch.stack handles numpy arrays automatically)
+        all_ego_features = torch.stack([torch.tensor(feat, dtype=torch.float32) if not isinstance(feat, torch.Tensor) else feat for feat in all_ego_features]).to(device)
+        all_gt_trajectories = torch.stack([torch.tensor(traj, dtype=torch.float32) for traj in all_gt_trajectories]).to(device)
+        all_cmd_indices = torch.tensor(all_cmd_indices, dtype=torch.long).to(device)
+        all_has_collision = torch.tensor(all_has_collision, dtype=torch.bool).to(device)
+        
+        # Batch process
+        all_l2_errors = []
+        collision_count = 0
+        
+        with torch.no_grad():
+            for batch_start in range(0, total_frames, batch_size):
+                batch_end = min(batch_start + batch_size, total_frames)
+                batch_ego_features = all_ego_features[batch_start:batch_end]
+                batch_gt_trajectories = all_gt_trajectories[batch_start:batch_end]
+                batch_cmd_indices = all_cmd_indices[batch_start:batch_end]
+                batch_has_collision = all_has_collision[batch_start:batch_end]
+                
+                # Forward pass
+                batch_pred_traj = model(batch_ego_features)
+                
+                # Ensure batch_gt_trajectories has correct shape: (batch, 6, 2)
+                # Each gt_trajectory should be (6, 2), so after stacking it should be (batch, 6, 2)
+                if batch_gt_trajectories.dim() == 2:
+                    # If somehow it's (batch*6, 2), reshape it
+                    if batch_gt_trajectories.shape[0] == batch_end - batch_start * 6:
+                        batch_gt_trajectories = batch_gt_trajectories.view(batch_end - batch_start, 6, 2)
+                    else:
+                        # Single trajectory: expand to batch
+                        batch_size_local = batch_end - batch_start
+                        if batch_gt_trajectories.shape == (6, 2):
+                            batch_gt_trajectories = batch_gt_trajectories.unsqueeze(0).expand(batch_size_local, -1, -1)
+                        else:
+                            # Reshape and pad if needed
+                            batch_gt_trajectories = batch_gt_trajectories.view(-1, 2).unsqueeze(0)
+                            if batch_gt_trajectories.shape[1] != 6:
+                                padded_gt = torch.zeros(1, 6, 2, device=batch_gt_trajectories.device, dtype=batch_gt_trajectories.dtype)
+                                min_timesteps = min(batch_gt_trajectories.shape[1], 6)
+                                padded_gt[:, :min_timesteps, :] = batch_gt_trajectories[:, :min_timesteps, :]
+                                batch_gt_trajectories = padded_gt.expand(batch_size_local, -1, -1)
+                
+                # Use _compute_l2_error_gpu which handles all shape cases correctly
+                batch_l2_errors = self._compute_l2_error_gpu(batch_pred_traj, batch_gt_trajectories, batch_cmd_indices)
+                batch_l2_errors_np = batch_l2_errors.cpu().numpy()
+                
+                # Collect results
+                for b_idx in range(batch_end - batch_start):
+                    all_l2_errors.append(float(batch_l2_errors_np[b_idx]))
+                    if batch_has_collision[b_idx].item():
+                        collision_count += 1
+        
+        all_l2_errors = np.array(all_l2_errors)
+        
+        # Calculate frame counts (matching old version format)
+        positive_count = int(np.sum(all_l2_errors < threshold_good))
+        middle_count = int(np.sum((all_l2_errors >= threshold_good) & (all_l2_errors <= threshold_bad)))
+        negative_count = int(np.sum(all_l2_errors > threshold_bad))
+        
+        # Return stats matching old version format (for compatibility with repair_ego_fut_decoder_arachne.py)
+        stats = {
+            'total_l2': float(np.sum(all_l2_errors)),  # Total L2 error (for compatibility)
+            'mean_l2': float(np.mean(all_l2_errors)),
+            'median_l2': float(np.median(all_l2_errors)),
+            'std_l2': float(np.std(all_l2_errors)),
+            'min_l2': float(np.min(all_l2_errors)),
+            'max_l2': float(np.max(all_l2_errors)),
+            'positive_count': positive_count,  # L2 < threshold_good
+            'middle_count': middle_count,  # threshold_good <= L2 <= threshold_bad
+            'negative_count': negative_count,  # L2 > threshold_bad
+            'total_frames': len(all_l2_errors),
+            'collision_frames': collision_count,
+            'all_l2_errors': all_l2_errors.tolist()  # For compatibility with old version
+        }
+        
+        return stats
+
+
+def load_repair_data(json_file, threshold_good=0.3, threshold_bad=1.0, l2_metric='plan_L2_3s'):
+    """
+    Load repair data from UniAD JSON file.
+    
+    Returns
+    -------
+    input_neg, input_pos : tuple of (features, labels)
+    """
+    print(f"Loading data from {json_file}...")
+    with open(json_file, 'r') as f:
+        data = json.load(f)
+    
+    positive_features = []
+    negative_features = []
+    
+    for frame in data:
+        if not frame.get('fut_valid_flag', False):
+            continue
+        
+        if 'ego_features' not in frame:
+            continue
+        
+        l2_error = frame.get(l2_metric, None)
+        if l2_error is None:
+            continue
+        
+        ego_features = np.array(frame['ego_features'])
+        
+        if l2_error < threshold_good:
+            positive_features.append(ego_features)
+        elif l2_error > threshold_bad:
+            negative_features.append(ego_features)
+    
+    print(f"Loaded {len(positive_features)} positive samples (L2 < {threshold_good})")
+    print(f"Loaded {len(negative_features)} negative samples (L2 > {threshold_bad})")
+    
+    # Convert to numpy arrays
+    X_pos = np.array(positive_features, dtype=np.float32)
+    y_pos = np.ones(len(positive_features), dtype=np.float32)
+    
+    X_neg = np.array(negative_features, dtype=np.float32)
+    y_neg = np.zeros(len(negative_features), dtype=np.float32)
+    
+    input_pos = (X_pos, y_pos)
+    input_neg = (X_neg, y_neg)
+    
+    return input_neg, input_pos
+
+
+def extract_frame_identifiers(json_file, threshold_good=0.3, threshold_bad=1.0, 
+                               l2_metric='plan_L2_3s', max_positive=None, max_negative=None):
+    """
+    Extract frame identifiers for positive and negative samples.
+    
+    Parameters
+    ----------
+    json_file : str
+        Path to UniAD evaluation JSON
+    threshold_good : float
+        L2 threshold for positive frames
+    threshold_bad : float
+        L2 threshold for negative frames
+    l2_metric : str
+        L2 metric name in JSON
+    max_positive : int, optional
+        Maximum number of positive frames to return
+    max_negative : int, optional
+        Maximum number of negative frames to return
+    
+    Returns
+    -------
+    positive_frames : list of (batch_idx, frame_idx) or (token, scene_name)
+    negative_frames : list of (batch_idx, frame_idx) or (token, scene_name)
+    """
+    print(f"Extracting frame identifiers from {json_file}...")
+    with open(json_file, 'r') as f:
+        data = json.load(f)
+    
+    positive_frames = []
+    negative_frames = []
+    
+    for idx, frame in enumerate(data):
+        if not frame.get('fut_valid_flag', False):
+            continue
+        
+        l2_error = frame.get(l2_metric, None)
+        if l2_error is None:
+            continue
+        
+        # Try to get identifiers (support both formats)
+        token = frame.get('token')
+        scene_name = frame.get('scene_name')
+        batch_idx = frame.get('batch_idx')
+        frame_idx = frame.get('frame_idx')
+        
+        # Use whichever identifier is available
+        if token and scene_name:
+            frame_id = (token, scene_name)
+        elif batch_idx is not None and frame_idx is not None:
+            frame_id = (batch_idx, frame_idx)
+        else:
+            # Fallback: use index in the JSON array
+            frame_id = (idx, 0)
+        
+        if l2_error < threshold_good:
+            positive_frames.append(frame_id)
+        elif l2_error > threshold_bad:
+            negative_frames.append(frame_id)
+    
+    # Sample if needed
+    if max_positive and len(positive_frames) > max_positive:
+        indices = np.random.choice(len(positive_frames), max_positive, replace=False)
+        positive_frames = [positive_frames[i] for i in indices]
+    
+    if max_negative and len(negative_frames) > max_negative:
+        indices = np.random.choice(len(negative_frames), max_negative, replace=False)
+        negative_frames = [negative_frames[i] for i in indices]
+    
+    print(f"Extracted {len(positive_frames)} positive frames (L2 < {threshold_good})")
+    print(f"Extracted {len(negative_frames)} negative frames (L2 > {threshold_bad})")
+    
+    return positive_frames, negative_frames
+
+
+def build_frame_data_dict(json_file, frame_identifiers=None):
+    """
+    Build a dictionary of frame data for open-loop evaluation.
+    
+    Parameters
+    ----------
+    json_file : str
+        Path to UniAD evaluation JSON containing ego_features and gt trajectories
+    frame_identifiers : list of frame identifiers, optional
+        If provided, only include these frames
+    
+    Returns
+    -------
+    frame_data_dict : dict
+        Dictionary mapping frame_id to frame data
+        Each frame contains:
+        - 'ego_features': np.ndarray, features before repaired layers
+        - 'gt_future_traj': np.ndarray, ground truth trajectory
+        - 'plan_L2_3s': float, original L2 error
+    """
+    print(f"Building frame data dictionary from {json_file}...")
+    print(f"  frame_identifiers: {type(frame_identifiers)}, count={len(frame_identifiers) if frame_identifiers else 'None'}")
+    
+    with open(json_file, 'r') as f:
+        data = json.load(f)
+    
+    frame_data_dict = {}
+    frame_id_set = set(frame_identifiers) if frame_identifiers else None
+    
+    # Debug counters
+    skipped_by_filter = 0
+    skipped_no_ego = 0
+    skipped_no_gt = 0
+    
+    for idx, frame in enumerate(data):
+        # Skip invalid frames (must have fut_valid_flag=True)
+        # We only process frames with fut_valid_flag=True throughout the repair process
+        if not frame.get('fut_valid_flag', False):
+            continue
+        
+        # Determine frame identifier (support multiple formats)
+        token = frame.get('token')
+        scene_name = frame.get('scene_name')
+        batch_idx = frame.get('batch_idx')
+        frame_idx = frame.get('frame_idx')
+        
+        if token and scene_name:
+            frame_key = (token, scene_name)
+        elif batch_idx is not None and frame_idx is not None:
+            frame_key = (batch_idx, frame_idx)
+        else:
+            frame_key = (idx, 0)
+        
+        # Skip if not in the identifier list
+        if frame_id_set and frame_key not in frame_id_set:
+            skipped_by_filter += 1
+            continue
+        
+        # Check required fields
+        if 'ego_features' not in frame:
+            skipped_no_ego += 1
+            continue
+        
+        # Build frame data
+        # Save all L2 fields (1s, 2s, 3s) so evaluation can use the appropriate one based on time_horizon
+        frame_data = {
+            'ego_features': np.array(frame['ego_features'], dtype=np.float32),
+            'plan_L2_1s': frame.get('plan_L2_1s', frame.get('plan_L2_3s', 0.0)),  # Fallback to 3s if 1s not available
+            'plan_L2_2s': frame.get('plan_L2_2s', frame.get('plan_L2_3s', 0.0)),  # Fallback to 3s if 2s not available
+            'plan_L2_3s': frame.get('plan_L2_3s', 0.0),
+            'ego_fut_cmd_idx': frame.get('ego_fut_cmd_idx', 0),  # 保存指令索引
+            'fut_valid_flag': frame.get('fut_valid_flag', False),  # Save fut_valid_flag for verification
+        }
+        
+        # Save original predictions from JSON for comparison (if available)
+        # This is the prediction used to compute JSON L2, so we can use it for consistency check
+        if 'predictions' in frame and isinstance(frame['predictions'], list) and len(frame['predictions']) > 0:
+            # predictions[0] is the first mode prediction (absolute format, already cumsum + bivariate activation)
+            frame_data['original_predictions'] = np.array(frame['predictions'][0], dtype=np.float32)
+        
+        # Add collision information if available (save all time horizons)
+        col_1s = frame.get('plan_obj_box_col_1s', 0.0)
+        col_2s = frame.get('plan_obj_box_col_2s', 0.0)
+        col_3s = frame.get('plan_obj_box_col_3s', 0.0)
+        # Note: has_collision is deprecated, evaluation will use the appropriate collision field based on time_horizon
+        frame_data['has_collision'] = (col_1s > 0) or (col_2s > 0) or (col_3s > 0)  # Keep for backward compatibility
+        frame_data['plan_obj_box_col_1s'] = float(col_1s) if isinstance(col_1s, (int, float)) else 0.0
+        frame_data['plan_obj_box_col_2s'] = float(col_2s) if isinstance(col_2s, (int, float)) else 0.0
+        frame_data['plan_obj_box_col_3s'] = float(col_3s) if isinstance(col_3s, (int, float)) else 0.0
+        # Optional: saved occupancy/segmentation for dynamic collision recomputation
+        occ_path = frame.get('occ_path', None)
+        if occ_path:
+            frame_data['occ_path'] = str(occ_path)
+        
+        # Add ground truth trajectory if available
+        gt_traj = None
+        if 'gt_future_traj' in frame:
+            gt_traj = frame['gt_future_traj']
+        elif 'gt_ego_fut_trajs' in frame:
+            gt_traj = frame['gt_ego_fut_trajs']
+        elif 'ground_truth' in frame:
+            # Extract from ground_truth field
+            gt_data = frame['ground_truth']
+            if isinstance(gt_data, dict) and 'fut_traj' in gt_data:
+                gt_traj = gt_data['fut_traj']
+            elif isinstance(gt_data, list):
+                gt_traj = gt_data
+        
+        if gt_traj is not None:
+            frame_data['gt_future_traj'] = np.array(gt_traj, dtype=np.float32)
+            
+            # Add GT mask if available (for VAD rule L2 calculation)
+            # VAD rule JSON uses 'ego_fut_masks' (plural), check both for compatibility
+            gt_mask = None
+            mask_field_used = None
+            if 'ego_fut_masks' in frame:  # VAD rule format uses plural
+                gt_mask = frame['ego_fut_masks']
+                mask_field_used = 'ego_fut_masks'
+            elif 'ego_fut_mask' in frame:  # Fallback to singular
+                gt_mask = frame['ego_fut_mask']
+                mask_field_used = 'ego_fut_mask'
+            elif 'gt_mask' in frame:
+                gt_mask = frame['gt_mask']
+                mask_field_used = 'gt_mask'
+            
+            if gt_mask is not None:
+                # Save as 'ego_fut_mask' (singular) for consistency in frame_data_dict
+                # Process mask to ensure correct shape (matches convert_uniad_to_vad_metrics.py)
+                gt_mask_array = np.array(gt_mask, dtype=np.float32)
+                if gt_mask_array.ndim == 3:
+                    gt_mask_array = gt_mask_array[0, :6, :2]
+                elif gt_mask_array.ndim == 2:
+                    gt_mask_array = gt_mask_array[:6, :2] if gt_mask_array.shape[1] >= 2 else gt_mask_array[:6, None]
+                elif gt_mask_array.ndim == 1:
+                    gt_mask_array = gt_mask_array[:6, None]
+                # Ensure (6, 2) shape
+                if gt_mask_array.shape[0] < 6:
+                    padded = np.ones((6, 2), dtype=np.float32)
+                    if gt_mask_array.ndim == 1:
+                        padded[:gt_mask_array.shape[0], :] = gt_mask_array[:gt_mask_array.shape[0], None]
+                    else:
+                        min_dim = min(gt_mask_array.shape[1] if gt_mask_array.ndim > 1 else 1, 2)
+                        padded[:gt_mask_array.shape[0], :min_dim] = gt_mask_array[:gt_mask_array.shape[0], :min_dim]
+                    gt_mask_array = padded
+                elif gt_mask_array.shape[0] >= 6:
+                    if gt_mask_array.ndim == 1:
+                        gt_mask_array = np.column_stack([gt_mask_array[:6], gt_mask_array[:6]])
+                    elif gt_mask_array.ndim == 2:
+                        if gt_mask_array.shape[1] < 2:
+                            gt_mask_array = np.column_stack([gt_mask_array[:6, 0], gt_mask_array[:6, 0]])
+                        else:
+                            gt_mask_array = gt_mask_array[:6, :2]
+                frame_data['ego_fut_mask'] = gt_mask_array
+                # Also save original field name for debugging
+                frame_data['ego_fut_masks'] = gt_mask_array
+                frame_data['_mask_field_used'] = mask_field_used  # Debug: which field was used
+            else:
+                # No mask found - this is expected for some JSON formats
+                frame_data['_mask_field_used'] = None  # Debug: no mask found
+            
+            frame_data_dict[frame_key] = frame_data
+        else:
+            skipped_no_gt += 1
+    
+    print(f"Built frame data dictionary with {len(frame_data_dict)} frames")
+    
+    # Debug: Count frames with/without mask
+    frames_with_mask = sum(1 for fd in frame_data_dict.values() if fd.get('ego_fut_mask') is not None)
+    frames_without_mask = len(frame_data_dict) - frames_with_mask
+    print(f"  Frames with mask: {frames_with_mask}/{len(frame_data_dict)}")
+    print(f"  Frames without mask: {frames_without_mask}/{len(frame_data_dict)} (will use default mask=1)")
+    
+    # Debug: Verify all frames have fut_valid_flag=True
+    frames_with_valid_flag = sum(1 for fd in frame_data_dict.values() if fd.get('fut_valid_flag', False))
+    print(f"  Frames with fut_valid_flag=True: {frames_with_valid_flag}/{len(frame_data_dict)}")
+    if frames_with_valid_flag != len(frame_data_dict):
+        print(f"  [WARNING] Some frames in frame_data_dict do not have fut_valid_flag=True!")
+    
+    # Debug info
+    if skipped_by_filter > 0:
+        print(f"  Skipped {skipped_by_filter} frames (not in frame_identifiers filter)")
+    if skipped_no_ego > 0:
+        print(f"  Skipped {skipped_no_ego} frames (no ego_features)")
+    if skipped_no_gt > 0:
+        print(f"  Skipped {skipped_no_gt} frames (no ground_truth)")
+    
+    if len(frame_data_dict) == 0:
+        print("  Warning: No valid frames found! Check JSON format:")
+        print("    Required fields: ego_features, ground_truth (or gt_future_traj)")
+        print("    Identifier fields: (token + scene_name) or (batch_idx + frame_idx)")
+    elif len(frame_data_dict) < 100:
+        print(f"\n  ⚠️  WARNING: Only {len(frame_data_dict)} frames in dict!")
+        print(f"  Expected: ~170 frames")
+        print(f"  This will cause severe overfitting!")
+    
+    return frame_data_dict
+
+
+if __name__ == '__main__':
+    print("PyTorch Arachne implementation for UniAD repair")
+    print("This module provides localize() and optimize() functions")
+    print("Example usage:")
+    print("""
+    from arachne_pytorch import ArachnePyTorch, load_repair_data
+    
+    # Load data
+    input_neg, input_pos = load_repair_data('vad_complete_data.json')
+    
+    # Load your PyTorch model
+    model = YourUniADModel()
+    
+    # Initialize Arachne
+    arachne = ArachnePyTorch()
+    arachne.set_options(num_particles=10, num_iterations=20)
+    
+    # Localize faulty weights
+    weights = arachne.localize(model, input_neg, output_dir='./repair_output')
+    
+    # Optimize and repair
+    repaired_model = arachne.optimize(
+        model, weights, input_neg, input_pos, output_dir='./repair_output'
+    )
+    """)
