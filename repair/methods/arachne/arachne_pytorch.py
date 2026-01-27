@@ -305,11 +305,33 @@ class ArachnePyTorch:
                 # Multiple samples compressed to [batch*36], reshape to [batch, 36]
                 batch_size = len(outputs) // 36
                 outputs = outputs.reshape(batch_size, 36)
-        prediction_l1_magnitude = torch.sum(torch.abs(outputs), dim=1)  # [batch]
+        # MODIFIED: Use L1 Loss against Ground Truth (y_neg) for Gradient Loss
+        # This aligns with the official Arachne implementation logic (Gradient of Error).
         
-        # For negative samples, we want to minimize prediction L1 magnitude
-        # So we compute loss = mean(prediction_l1_magnitude)
-        loss = torch.mean(prediction_l1_magnitude)
+        # Ensure shapes match between outputs and y_neg
+        # outputs: [batch, 12] or [batch, 6, 2]
+        # y_neg: [batch, 6, 2] (from repair script)
+        
+        if y_neg.numel() > 0: # Ensure we have valid GT
+            target = y_neg
+            if outputs.shape != target.shape:
+                # Try to reshape target to match outputs
+                target = target.view(outputs.shape)
+            
+            # Compute L1 Loss (mean reduction is standard for gradients)
+            loss_func = torch.nn.L1Loss()
+            loss = loss_func(outputs, target)
+        else:
+            # Fallback to magnitude if no GT provided (should not happen with new repair script)
+            print("Warning: No Ground Truth labels provided for Gradient Loss. Falling back to Magnitude Loss.")
+            if outputs.dim() == 1:
+                if len(outputs) == 36:
+                    outputs = outputs.unsqueeze(0)
+                else:
+                    batch_size = len(outputs) // 36
+                    outputs = outputs.reshape(batch_size, 36)
+            prediction_l1_magnitude = torch.sum(torch.abs(outputs), dim=1)
+            loss = torch.mean(prediction_l1_magnitude)
         
         # Backward pass to get gradients
         loss.backward()
@@ -338,54 +360,143 @@ class ArachnePyTorch:
     
     def _compute_forward_impact(self, model, input_neg, candidates, num_grad):
         """
-        Compute Forward Impact for top-k candidates (supports multiple layers).
-        
-        FI(w_ij) = |activation_i × w_ij|
-        
-        IMPORTANT: This function uses raw layer activations (input to the target layer),
-        NOT post-processed decoder outputs. This is correct for localization because FI
-        measures the impact of weights on layer activations, independent of output format.
+        Compute Forward Impact (FI) strictly aligning with Arachne Official Code.
+        Logic:
+          1. Front: Mean( Normalize_L1( |o_i * w_ij| ) over siblings ) (axis=0)
+          2. Behind: Mean( Normalize_L1( |dO/do| ) ) (axis=0)
+          3. FI = Front_Mean * Behind_Mean
         """
         pool = {}
         _num_grad = min(num_grad, len(candidates))
         
-        # Convert to tensor (handle both tensor and numpy inputs)
+        # 1. Prepare Input
         if isinstance(input_neg[0], torch.Tensor):
             X_neg = input_neg[0].clone().detach().to(dtype=torch.float32, device=self.device)
         else:
             X_neg = torch.tensor(input_neg[0], dtype=torch.float32).to(self.device)
         
-        # Pre-compute activations and weights for all unique layers in candidates
-        layer_activations = {}
-        layer_weights = {}
+        # 2. Identify Target Layers
+        target_layer_names = set([c[0] for c in candidates])
+        target_layers = {}
+        for name in target_layer_names:
+            try:
+                layer = model.get_submodule(name)
+                target_layers[name] = layer
+            except AttributeError:
+                print(f"Warning: Could not find layer {name} for FI computation")
         
-        unique_layers = set([c[0] for c in candidates[:_num_grad]])
-        named_modules = dict(model.named_modules())
+        # 3. Register Hooks
+        layer_data = {}
+        hooks = []
         
-        for layer_name in unique_layers:
-            target_layer = named_modules[layer_name]
-            layer_activations[layer_name] = self._get_layer_activations(model, X_neg, layer_name)
-            layer_weights[layer_name] = target_layer.weight.detach().cpu().numpy()
+        def get_hook(name):
+            def hook(module, input, output):
+                inp = input[0].detach()
+                if not output.requires_grad:
+                    output.requires_grad_(True)
+                output.retain_grad()
+                layer_data[name] = {
+                    "input": inp,
+                    "output_tensor": output
+                }
+            return hook
         
-        # Compute FI for each candidate
-        print(f"Computing FI for {_num_grad} candidates...", flush=True)
-        for num in range(_num_grad):
-            layer_name, i, j, gl = candidates[num]
+        for name, layer in target_layers.items():
+            h = layer.register_forward_hook(get_hook(name))
+            hooks.append(h)
+        
+        # 4. Forward & Backward
+        model.eval()
+        model.zero_grad()
+        outputs = model(X_neg)
+        if outputs.dim() == 1:
+             output_scalar = outputs.abs().sum()
+        else:
+             output_scalar = outputs.abs().sum()
+        output_scalar.backward()
+        
+        for h in hooks:
+            h.remove()
+        
+        # 5. Compute FI
+        # Helper for L1 normalization along last axis (or flattened)
+        def l1_normalize_and_mean(tensor, axis=1):
+            # tensor: [Batch, ...]
+            # Official code: norm_scaler.fit_transform(reshaped) -> L1 norm per sample
+            # Then mean(axis=0)
             
-            # FI = |activation_i × w_ji|
-            activations = layer_activations[layer_name]
-            weights = layer_weights[layer_name]
+            # 1. Abs
+            tensor = torch.abs(tensor)
             
-            activation_i = activations[0, i]  # Take first sample's activation
-            w_ji = weights[j, i]
-            fi = np.abs(activation_i * w_ji)
+            # 2. Flatten sample-wise if needed, but here we expect [Batch, Out] or similar
+            if tensor.dim() > 2:
+                tensor = tensor.view(tensor.shape[0], -1)
             
-            pool[num] = [layer_name, i, j, gl, fi]
+            # 3. L1 Norm per sample
+            # sum(abs, dim=1)
+            row_sums = tensor.sum(dim=1, keepdim=True)
+            # Avoid div by zero
+            row_sums[row_sums == 0] = 1.0 
+            normalized = tensor / row_sums
+            
+            # 4. Mean over batch
+            return normalized.mean(dim=0)
         
-        print(f"  Completed computing FI for {_num_grad} candidates", flush=True)
+        candidates_by_layer = {}
+        for cand in candidates[:_num_grad]:
+            layer_name, i, j, gl = cand
+            if layer_name not in candidates_by_layer:
+                candidates_by_layer[layer_name] = []
+            candidates_by_layer[layer_name].append((i, j, gl))
+            
+        for layer_name, items in candidates_by_layer.items():
+            if layer_name not in layer_data:
+                continue
+            
+            data = layer_data[layer_name]
+            inp = data["input"] # [B, In]
+            out_tensor = data["output_tensor"] # [B, Out]
+            
+            if out_tensor.grad is None:
+                continue
+                
+            # --- Part A: Calculate Behind_Mean (Gradient Sensitivity) ---
+            grad_output = out_tensor.grad.detach() # [B, Out]
+            # Official: L1 Normalize gradients per sample, then Mean
+            behind_means = l1_normalize_and_mean(grad_output) # [Out]
+            
+            # --- Part B: Calculate Front Contributions ---
+            weight = target_layers[layer_name].weight.detach() # [Out, In]
+            
+            # Pre-compute Norm Factors for Front: sum_k |o_k * w_kj| 
+            # This is the denominator for Front Normalization
+            abs_inp = torch.abs(inp)
+            abs_weight_t = torch.abs(weight.t())
+            # [B, In] @ [In, Out] -> [B, Out]
+            front_denominators = torch.matmul(abs_inp, abs_weight_t) 
+            front_denominators[front_denominators == 0] = 1.0
+            
+            for i, j, gl in items:
+                # i: input index, j: output index
+                w_val = weight[j, i]
+                
+                # 1. Front (Normalized per sample)
+                # |o_i * w_ij|
+                numerator = torch.abs(inp[:, i] * w_val)
+                # Divide by sibling sum
+                norm_fwd = numerator / front_denominators[:, j]
+                # Mean over batch
+                front_mean = norm_fwd.mean().item()
+                
+                # 2. Behind (Already computed)
+                behind_val = behind_means[j].item()
+                
+                # 3. Combine: E[Front] * E[Behind]
+                fi_val = front_mean * behind_val
+                
+                pool[(layer_name, i, j)] = [gl, fi_val]
         
         return pool
-    
     def _get_layer_activations(self, model, input_data, target_layer_name):
         """Get activations from the layer before target layer."""
         activations = None

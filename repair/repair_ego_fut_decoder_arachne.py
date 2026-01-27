@@ -36,6 +36,20 @@ if arachne_path not in sys.path:
     sys.path.insert(0, arachne_path)
 from arachne_pytorch import ArachnePyTorch, extract_frame_identifiers, build_frame_data_dict
 
+def get_delta_traj(gt_traj):
+    """Convert absolute trajectory [T, 2] to delta trajectory [T, 2]."""
+    # gt_traj is tensor or numpy
+    if not isinstance(gt_traj, torch.Tensor):
+        gt_traj = torch.tensor(gt_traj, dtype=torch.float32)
+    
+    delta_traj = torch.zeros_like(gt_traj)
+    # First point: delta from (0,0) is just the point itself
+    delta_traj[0] = gt_traj[0]
+    # Subsequent points: difference from previous point
+    delta_traj[1:] = gt_traj[1:] - gt_traj[:-1]
+    return delta_traj
+
+
 
 class MultiLayerWrapper(nn.Module):
     """
@@ -164,6 +178,8 @@ def extract_features(model, data_infos, threshold_good, threshold_bad,
     
     pos_feat = []
     neg_feat = []
+    pos_gt = []
+    neg_gt = []
     pos_l2 = []
     neg_l2 = []
     collision_l2 = []              # Track L2 values for collision-based negatives separately
@@ -240,10 +256,12 @@ def extract_features(model, data_infos, threshold_good, threshold_bad,
                 # No middle/neutral category for semSegRep
                 if l2_error < threshold_good:  # threshold_good == threshold_bad for semSegRep
                     pos_feat.append(ego_features)
+                    pos_gt.append(get_delta_traj(gt_traj))
                     pos_l2.append(l2_error)
                     positive_no_collision_count += 1
                 else:  # l2_error >= threshold_good
                     neg_feat.append(ego_features)
+                    neg_gt.append(get_delta_traj(gt_traj))
                     neg_l2.append(l2_error)
                     negative_no_collision_l2.append(l2_error)  # Track for consistency
                     negative_no_collision_count += 1
@@ -263,6 +281,7 @@ def extract_features(model, data_infos, threshold_good, threshold_bad,
                 if has_collision:
                     # Collision frames are always negative (strong system-level metric)
                     neg_feat.append(ego_features)
+                    neg_gt.append(get_delta_traj(gt_traj))
                     neg_l2.append(l2_error)
                     collision_l2.append(l2_error)
                     collision_count += 1
@@ -270,10 +289,12 @@ def extract_features(model, data_infos, threshold_good, threshold_bad,
                     # No collision: classify based on L2 error using statistical thresholds
                     if l2_error < collision_threshold_good:  # L2 < mean - alpha*std
                         pos_feat.append(ego_features)
+                        pos_gt.append(get_delta_traj(gt_traj))
                         pos_l2.append(l2_error)
                         positive_no_collision_count += 1
                     elif l2_error > collision_threshold_bad:  # L2 > mean + alpha*std
                         neg_feat.append(ego_features)
+                        neg_gt.append(get_delta_traj(gt_traj))
                         neg_l2.append(l2_error)
                         negative_no_collision_l2.append(l2_error)
                         negative_no_collision_count += 1
@@ -337,7 +358,7 @@ def extract_features(model, data_infos, threshold_good, threshold_bad,
         print(f"\n  Category 1 details (positive):")
         print(f"    L2 range: [{min(pos_l2):.3f}, {max(pos_l2):.3f}] (all < {threshold_display:.3f})")
     
-    return pos_feat, neg_feat
+    return pos_feat, neg_feat, pos_gt, neg_gt
 
 
 def main():
@@ -566,7 +587,7 @@ def main():
     # Extract features with classification based on repair method
     if args.rep_method == 'Arachne_v1':
         # Classification uses collision + mean ± alpha*std logic
-        pos_feat, neg_feat = extract_features(
+        pos_feat, neg_feat, pos_gt, neg_gt = extract_features(
             vad_model, data_infos, threshold_good, threshold_bad,
             mean_l2=mean_l2_for_classification,
             std_l2=std_l2_for_classification,
@@ -577,7 +598,7 @@ def main():
     elif args.rep_method == 'Arachne_v2':
         # Arachne_v2 uses the same classification logic as Arachne_v1
         # The difference is in localization: v2 uses changed/unchanged method
-        pos_feat, neg_feat = extract_features(
+        pos_feat, neg_feat, pos_gt, neg_gt = extract_features(
             vad_model, data_infos, threshold_good, threshold_bad,
             mean_l2=mean_l2_for_classification,
             std_l2=std_l2_for_classification,
@@ -587,7 +608,7 @@ def main():
         )
     elif args.rep_method == 'semSegRep':
         # For semSegRep: simple fixed threshold classification (no collision, no statistics)
-        pos_feat, neg_feat = extract_features(
+        pos_feat, neg_feat, pos_gt, neg_gt = extract_features(
             vad_model, data_infos, threshold_good, threshold_bad,
             mean_l2=None,
             std_l2=None,
@@ -639,7 +660,8 @@ def main():
     # Stack features and create dummy labels (arachne_pytorch expects tuple (features, labels))
     if pos_feat:
         pos_feat_dim = pos_feat[0].shape[0]
-        input_pos = (torch.stack(pos_feat), torch.empty(len(pos_feat), 1))
+        # Pass actual ground truth labels instead of empty placeholders
+        input_pos = (torch.stack(pos_feat), torch.stack(pos_gt))
     else:
         # Need to get feature dimension from neg_feat or data_infos
         if neg_feat:
@@ -652,7 +674,8 @@ def main():
     
     if neg_feat:
         neg_feat_dim = neg_feat[0].shape[0]
-        input_neg = (torch.stack(neg_feat), torch.empty(len(neg_feat), 1))
+        # Pass actual ground truth labels instead of empty placeholders
+        input_neg = (torch.stack(neg_feat), torch.stack(neg_gt))
     else:
         # Need to get feature dimension from pos_feat or data_infos
         if pos_feat:
