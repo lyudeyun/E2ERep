@@ -223,6 +223,8 @@ def extract_features(model, data_infos, threshold_good, threshold_bad,
             
             # Compute L2 error
             gt_traj = torch.tensor(info['ground_truth'], dtype=torch.float32)  # [T, 2]
+            # Append cmd_idx to GT for Arachne to select correct mode
+            cmd_idx_val = info.get('ego_fut_cmd_idx', 0)
             cmd_idx = info.get('ego_fut_cmd_idx', 0)
             
             # Reshape prediction based on model attributes.
@@ -256,12 +258,18 @@ def extract_features(model, data_infos, threshold_good, threshold_bad,
                 # No middle/neutral category for semSegRep
                 if l2_error < threshold_good:  # threshold_good == threshold_bad for semSegRep
                     pos_feat.append(ego_features)
-                    pos_gt.append(get_delta_traj(gt_traj))
+                    # Use delta GT + cmd_idx
+                    delta_gt = get_delta_traj(gt_traj).view(-1)
+                    gt_combined = torch.cat([delta_gt, torch.tensor([float(cmd_idx_val)])])
+                    pos_gt.append(gt_combined)
                     pos_l2.append(l2_error)
                     positive_no_collision_count += 1
                 else:  # l2_error >= threshold_good
                     neg_feat.append(ego_features)
-                    neg_gt.append(get_delta_traj(gt_traj))
+                    # Use delta GT + cmd_idx
+                    delta_gt = get_delta_traj(gt_traj).view(-1)
+                    gt_combined = torch.cat([delta_gt, torch.tensor([float(cmd_idx_val)])])
+                    neg_gt.append(gt_combined)
                     neg_l2.append(l2_error)
                     negative_no_collision_l2.append(l2_error)  # Track for consistency
                     negative_no_collision_count += 1
@@ -272,16 +280,19 @@ def extract_features(model, data_infos, threshold_good, threshold_bad,
                 #    - If L2_error < mean - 0.5*std: frame = positive
                 #    - If L2_error > mean + 0.5*std: frame = negative
                 #    - Else: frame = neutral
-                
+
                 # Check for collision using the same time horizon as L2 error
                 collision_field = f'plan_obj_box_col_{time_horizon}s'
                 col_value = info.get(collision_field, 0.0)
                 has_collision = (col_value > 0)
-                
+
                 if has_collision:
                     # Collision frames are always negative (strong system-level metric)
                     neg_feat.append(ego_features)
-                    neg_gt.append(get_delta_traj(gt_traj))
+                    # Use delta GT + cmd_idx
+                    delta_gt = get_delta_traj(gt_traj).view(-1)
+                    gt_combined = torch.cat([delta_gt, torch.tensor([float(cmd_idx_val)])])
+                    neg_gt.append(gt_combined)
                     neg_l2.append(l2_error)
                     collision_l2.append(l2_error)
                     collision_count += 1
@@ -289,12 +300,18 @@ def extract_features(model, data_infos, threshold_good, threshold_bad,
                     # No collision: classify based on L2 error using statistical thresholds
                     if l2_error < collision_threshold_good:  # L2 < mean - alpha*std
                         pos_feat.append(ego_features)
-                        pos_gt.append(get_delta_traj(gt_traj))
+                        # Use delta GT + cmd_idx
+                        delta_gt = get_delta_traj(gt_traj).view(-1)
+                        gt_combined = torch.cat([delta_gt, torch.tensor([float(cmd_idx_val)])])
+                        pos_gt.append(gt_combined)
                         pos_l2.append(l2_error)
                         positive_no_collision_count += 1
                     elif l2_error > collision_threshold_bad:  # L2 > mean + alpha*std
                         neg_feat.append(ego_features)
-                        neg_gt.append(get_delta_traj(gt_traj))
+                        # Use delta GT + cmd_idx
+                        delta_gt = get_delta_traj(gt_traj).view(-1)
+                        gt_combined = torch.cat([delta_gt, torch.tensor([float(cmd_idx_val)])])
+                        neg_gt.append(gt_combined)
                         neg_l2.append(l2_error)
                         negative_no_collision_l2.append(l2_error)
                         negative_no_collision_count += 1

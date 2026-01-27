@@ -63,10 +63,19 @@ def _compute_collision_from_occ(args):
 def _resolve_occ_path(occ_path):
     if not occ_path:
         return occ_path
-    if os.path.isabs(occ_path):
-        return occ_path
-    return str(REPO_ROOT / occ_path)
-
+    
+    path_str = str(occ_path)
+    
+    # Fix legacy path structure: insert /VAD/ if missing
+    if "baseline/vad_occ_cache" in path_str and "/VAD/" not in path_str:
+        path_str = path_str.replace("baseline/vad_occ_cache", "baseline/VAD/vad_occ_cache")
+    
+    # If absolute, return as is
+    if os.path.isabs(path_str):
+        return path_str
+    
+    # Relative path: resolve against REPO_ROOT
+    return str(REPO_ROOT / path_str)
 # Import optimizers
 # Handle both relative import (when used as package) and absolute import (when used as standalone module)
 try:
@@ -259,105 +268,114 @@ class ArachnePyTorch:
     
     def _compute_gradient_loss(self, model, input_neg):
         """
-        Compute Gradient Loss for all weights in target layer(s).
-        
-        GL(w_ij) = |∂L/∂w_ij|
-        
-        IMPORTANT: This function uses the RAW decoder output (delta/displacement values),
-        NOT absolute positions. This is correct for localization because GL/FI should
-        be computed based on the model's raw behavior, not on post-processed values.
+        Compute gradient of the loss w.r.t. weights.
+        Supports multi-mode VAD output by selecting the mode specified in target[:, -1].
         """
-        candidates = []
-        
-        # Convert to tensors (handle both tensor and numpy inputs)
-        if isinstance(input_neg[0], torch.Tensor):
-            X_neg = input_neg[0].clone().detach().to(dtype=torch.float32, device=self.device)
-        else:
-            X_neg = torch.tensor(input_neg[0], dtype=torch.float32).to(self.device)
-        if isinstance(input_neg[1], torch.Tensor):
-            y_neg = input_neg[1].clone().detach().to(dtype=torch.float32, device=self.device)
-        else:
-            y_neg = torch.tensor(input_neg[1], dtype=torch.float32).to(self.device)
-        
-        # Find target layers (can be multiple)
-        target_layer_infos = self._find_target_layers(model)
-        
-        # Forward pass
+        model.eval()
         model.zero_grad()
+        
+        if isinstance(input_neg, (list, tuple)):
+            X_neg, y_neg = input_neg
+        else:
+            # Fallback if just tensor
+            X_neg = input_neg
+            y_neg = torch.empty(0)
+
+        # Move to device
+        if isinstance(X_neg, torch.Tensor):
+            X_neg = X_neg.clone().detach().to(dtype=torch.float32, device=self.device)
+        else:
+            X_neg = torch.tensor(X_neg, dtype=torch.float32).to(self.device)
+            
+        if isinstance(y_neg, torch.Tensor):
+            y_neg = y_neg.clone().detach().to(dtype=torch.float32, device=self.device)
+        else:
+            y_neg = torch.tensor(y_neg, dtype=torch.float32).to(self.device)
+
         outputs = model(X_neg)
         
-        # IMPORTANT: outputs here are RAW decoder outputs (delta/displacement values, not absolute positions)
-        # This is correct for GL computation - we want to identify weights that contribute
-        # to large raw predictions, which correlate with poor trajectory predictions.
+        # --- Gradient Loss Logic ---
+        loss = 0.0
         
-        # For VAD trajectory prediction, we use L1Loss (same as VAD training)
-        # The outputs should be [batch, 36] trajectory predictions (delta values)
-        
-        # For negative samples, we want to minimize the L1 magnitude of predictions
-        # This helps identify weights that contribute to large predictions (bad cases)
-        # We use L1 norm as proxy for prediction magnitude (consistent with VAD training)
-        if outputs.dim() == 1:
-            # If outputs is 1D [batch*36] or just [36], reshape appropriately
-            if len(outputs) == 36:
-                # Single sample compressed to [36], expand to [1, 36]
-                outputs = outputs.unsqueeze(0)
-            else:
-                # Multiple samples compressed to [batch*36], reshape to [batch, 36]
-                batch_size = len(outputs) // 36
-                outputs = outputs.reshape(batch_size, 36)
-        # MODIFIED: Use L1 Loss against Ground Truth (y_neg) for Gradient Loss
-        # This aligns with the official Arachne implementation logic (Gradient of Error).
-        
-        # Ensure shapes match between outputs and y_neg
-        # outputs: [batch, 12] or [batch, 6, 2]
-        # y_neg: [batch, 6, 2] (from repair script)
-        
-        if y_neg.numel() > 0: # Ensure we have valid GT
+        # Check if we have valid Ground Truth
+        if y_neg.numel() > 0:
             target = y_neg
-            if outputs.shape != target.shape:
-                # Try to reshape target to match outputs
-                target = target.view(outputs.shape)
             
-            # Compute L1 Loss (mean reduction is standard for gradients)
-            loss_func = torch.nn.L1Loss()
-            loss = loss_func(outputs, target)
-        else:
-            # Fallback to magnitude if no GT provided (should not happen with new repair script)
-            print("Warning: No Ground Truth labels provided for Gradient Loss. Falling back to Magnitude Loss.")
-            if outputs.dim() == 1:
-                if len(outputs) == 36:
-                    outputs = outputs.unsqueeze(0)
+            # Case 1: VAD Multi-mode handling
+            # If target has 13 elements (12 coords + 1 cmd_idx) and output has 72 (6*12)
+            if target.dim() == 2 and target.shape[1] == 13 and outputs.shape[1] == 72:
+                # 1. Split target into coords and cmd_idx
+                target_coords = target[:, :12]  # [B, 12]
+                cmd_idxs = target[:, 12].long() # [B]
+                
+                # 2. Reshape output to [B, 6, 12]
+                # VAD output is [batch, 6 modes * 6 steps * 2 coords] = [batch, 72]
+                batch_size = outputs.shape[0]
+                outputs_reshaped = outputs.view(batch_size, 6, 12)
+                
+                # 3. Select correct mode based on cmd_idx
+                # We need to gather along dim 1. 
+                # cmd_idxs is [B], make it [B, 1, 12] for gather
+                cmd_idxs_expanded = cmd_idxs.view(batch_size, 1, 1).expand(batch_size, 1, 12)
+                selected_output = torch.gather(outputs_reshaped, 1, cmd_idxs_expanded).squeeze(1) # [B, 12]
+                
+                # 4. Compute Loss
+                loss_func = torch.nn.L1Loss()
+                loss = loss_func(selected_output, target_coords)
+                
+            # Case 2: Standard matching shapes (or simple reshape)
+            else:
+                if outputs.shape != target.shape:
+                    # Try to view, but warn if sizes don't match
+                    if outputs.numel() == target.numel():
+                        target = target.view(outputs.shape)
+                        loss_func = torch.nn.L1Loss()
+                        loss = loss_func(outputs, target)
+                    else:
+                        # Fallback: Magnitude loss if shapes really don't match
+                        # print(f"Warning: GL shape mismatch: Out {outputs.shape} vs Tgt {target.shape}. Using magnitude.")
+                        if outputs.dim() == 1:
+                            loss = torch.mean(torch.abs(outputs))
+                        else:
+                            loss = torch.mean(torch.mean(torch.abs(outputs), dim=1))
                 else:
-                    batch_size = len(outputs) // 36
-                    outputs = outputs.reshape(batch_size, 36)
-            prediction_l1_magnitude = torch.sum(torch.abs(outputs), dim=1)
-            loss = torch.mean(prediction_l1_magnitude)
-        
-        # Backward pass to get gradients
+                    loss_func = torch.nn.L1Loss()
+                    loss = loss_func(outputs, target)
+        else:
+            # No GT provided: Use output magnitude as proxy loss
+            # (Minimizing output magnitude is a heuristic for "suppressing abnormal activations")
+            if outputs.dim() == 1:
+                loss = torch.mean(torch.abs(outputs))
+            else:
+                loss = torch.mean(torch.mean(torch.abs(outputs), dim=1))
+                
         loss.backward()
         
-        # Collect gradients from all target layers
-        for layer_name, layer in target_layer_infos:
-            if layer.weight.grad is None:
-                print(f"Warning: No gradient for {layer_name}, skipping")
-                continue
-            
-            grad = layer.weight.grad.cpu().numpy()
-            
-            print(f"Processing layer: {layer_name}, shape: {grad.shape}")
-            total_weights = grad.shape[0] * grad.shape[1]
-            for j in range(grad.shape[0]):
-                for i in range(grad.shape[1]):
-                    gl = np.abs(grad[j, i])
-                    candidates.append([layer_name, i, j, gl])
-            print(f"  Completed processing {total_weights} weights for {layer_name}", flush=True)
+        # Collect per-weight Gradient Loss (GL) candidates
+        # Return format: list of (layer_name, i_in, j_out, gl_value)
+        candidates = []
+        for name, module in model.named_modules():
+            if hasattr(module, 'weight') and module.weight is not None and module.weight.grad is not None:
+                grad = module.weight.grad.detach().cpu().numpy()
+                
+                # For Linear layers (and similar), weight.grad is typically 2D: [Out, In]
+                if grad.ndim == 2:
+                    out_dim, in_dim = grad.shape
+                    for j in range(out_dim):      # output index
+                        for i in range(in_dim):   # input index
+                            gl = float(abs(grad[j, i]))
+                            candidates.append((name, i, j, gl))
+                else:
+                    # Fallback for other shapes: flatten and assign a synthetic index
+                    flat = np.abs(grad).reshape(-1)
+                    for idx, gl in enumerate(flat):
+                        candidates.append((name, idx, 0, float(gl)))
         
-        # Sort by gradient loss (descending)
+        # Sort candidates by GL descending so that _compute_forward_impact
+        # can simply take candidates[:num_grad]
         candidates.sort(key=lambda x: x[3], reverse=True)
-        print(f"Total candidate weights from {len(target_layer_infos)} layer(s): {len(candidates)}")
         
         return candidates
-    
     def _compute_forward_impact(self, model, input_neg, candidates, num_grad):
         """
         Compute Forward Impact (FI) strictly aligning with Arachne Official Code.
@@ -494,7 +512,9 @@ class ArachnePyTorch:
                 # 3. Combine: E[Front] * E[Behind]
                 fi_val = front_mean * behind_val
                 
-                pool[(layer_name, i, j)] = [gl, fi_val]
+                # Store full record so downstream code can access
+                # [layer_name, i, j, GL, FI]
+                pool[(layer_name, i, j)] = [layer_name, i, j, gl, fi_val]
         
         return pool
     def _get_layer_activations(self, model, input_data, target_layer_name):
