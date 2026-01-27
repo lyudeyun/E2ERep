@@ -241,7 +241,7 @@ def run_repair(model_name, model_type, baseline_json, exp_dir, repo_root,
     
     # Choose repair script based on model type
     if model_type == "VAD":
-        repair_script = repo_root / "repair" / "repair_ego_fut_decoder_arachne.py"
+        repair_script = repo_root / "repair_vad" / "repair_ego_fut_decoder_arachne.py"
         repaired_model_name = "VAD_repaired_both_layers.pth"
     elif model_type == "UniAD":
         repair_script = repo_root / "repair_uniad" / "repair_planning_head_arachne.py"
