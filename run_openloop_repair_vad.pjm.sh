@@ -28,7 +28,7 @@ mkdir -p logs
 CUDA_VISIBLE_DEVICES=0 \
 python3 run_experiment.py \
   --model-type VAD \
-  --vad-name VAD_base \
+  --model-name VAD_base \
   --rep-method Arachne_v2 \
   --search-algo DE \
   --run-idx 1 \
@@ -60,7 +60,7 @@ python3 run_experiment.py \
 CUDA_VISIBLE_DEVICES=0 \
 python3 run_experiment.py \
   --model-type VAD \
-  --vad-name VAD_base \
+  --model-name VAD_base \
   --rep-method Arachne_v2 \
   --search-algo DE \
   --run-idx 1 \
@@ -92,7 +92,7 @@ python3 run_experiment.py \
 CUDA_VISIBLE_DEVICES=0 \
 python3 run_experiment.py \
   --model-type VAD \
-  --vad-name VAD_base \
+  --model-name VAD_base \
   --rep-method Arachne_v2 \
   --search-algo DE \
   --run-idx 1 \
@@ -124,7 +124,7 @@ python3 run_experiment.py \
 CUDA_VISIBLE_DEVICES=0 \
 python3 run_experiment.py \
   --model-type VAD \
-  --vad-name VAD_base \
+  --model-name VAD_base \
   --rep-method semSegRep \
   --search-algo DE \
   --run-idx 1 \
@@ -156,7 +156,7 @@ python3 run_experiment.py \
 CUDA_VISIBLE_DEVICES=0 \
 python3 run_experiment.py \
   --model-type VAD \
-  --vad-name VAD_base \
+  --model-name VAD_base \
   --rep-method semSegRep \
   --search-algo DE \
   --run-idx 1 \
@@ -188,7 +188,7 @@ python3 run_experiment.py \
 CUDA_VISIBLE_DEVICES=0 \
 python3 run_experiment.py \
   --model-type VAD \
-  --vad-name VAD_base \
+  --model-name VAD_base \
   --rep-method semSegRep \
   --search-algo DE \
   --run-idx 1 \
