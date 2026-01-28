@@ -1,0 +1,30 @@
+input_json: baseline/uniad_base_baseline_b2d_infos_val_partA_25clips.json
+output_json: baseline/uniad_base_baseline_b2d_infos_val_partA_25clips_vadRule_new.json
+total_items: 5685
+valid_items (VAD rule): 4935
+
+avg_all (VAD L2):
+  plan_L2_1s: 0.3782280407162559 (n=5685)
+  plan_L2_2s: 0.7135061299196178 (n=5685)
+  plan_L2_3s: 1.08413404151184 (n=5685)
+
+avg_valid (VAD L2):
+  plan_L2_1s: 0.3897195751222683 (n=4935)
+  plan_L2_2s: 0.76029926165972 (n=4935)
+  plan_L2_3s: 1.1985422178141025 (n=4935)
+
+avg_all (VAD collision interval):
+  plan_obj_col_1s: -0.021459982409850482 (n=5685)
+  plan_obj_col_2s: -0.019898856640281442 (n=5685)
+  plan_obj_col_3s: -0.01658848810845964 (n=5685)
+  plan_obj_box_col_1s: -0.016710642040457344 (n=5685)
+  plan_obj_box_col_2s: -0.011169744942832014 (n=5685)
+  plan_obj_box_col_3s: -0.003654841913991018 (n=5685)
+
+avg_valid (VAD collision interval):
+  plan_obj_col_1s: 0.00030395136778115504 (n=4935)
+  plan_obj_col_2s: 0.0012917933130699088 (n=4935)
+  plan_obj_col_3s: 0.0029100529691006307 (n=4935)
+  plan_obj_box_col_1s: 0.0043566362715298885 (n=4935)
+  plan_obj_box_col_2s: 0.009447821681864236 (n=4935)
+  plan_obj_box_col_3s: 0.013998649290227228 (n=4935)
