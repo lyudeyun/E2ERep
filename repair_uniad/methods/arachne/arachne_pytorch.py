@@ -1811,7 +1811,7 @@ class ArachnePyTorch:
         # Add debug logging similar to VAD (for individual evaluation)
         if not use_original_l2_for_classification:
             mean_l2 = total_l2_error / valid_frame_count if valid_frame_count > 0 else float('inf')
-            print(f"[fitness-debug] total_l2={total_l2_error:.6f} mean_l2={mean_l2:.6f} "
+            print(f"[fitness-debug] fitness={fitness:.6f} total_l2={total_l2_error:.6f} mean_l2={mean_l2:.6f} "
                   f"collision_count={collision_count} valid_frames={valid_frame_count}", flush=True)
 
         return float(fitness)
