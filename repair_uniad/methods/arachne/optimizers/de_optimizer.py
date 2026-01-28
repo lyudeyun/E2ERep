@@ -137,9 +137,15 @@ class DEOptimizer:
                 weight_max = layer_info['max']
                 weight_range = layer_info.get('range', weight_max - weight_min)
                 
-                # Use same perturbation as VAD/PSO: 10% of weight range
-                perturbation_range = weight_range * 0.1  # 10% of weight range (same as VAD/PSO)
-                initial_weight = original_weight + np.random.uniform(-perturbation_range, perturbation_range)
+                # Use larger perturbation for better exploration: 10% of weight range (default)
+                perturbation_range = weight_range * 0.1  # Reverted to 0.1
+                
+                # First particle is exactly the original model (no perturbation)
+                if len(individuals) == 0:
+                    initial_weight = original_weight
+                else:
+                    initial_weight = original_weight + np.random.uniform(-perturbation_range, perturbation_range)
+                
                 initial_weight = np.clip(initial_weight, weight_min, weight_max)
                 
                 
@@ -186,12 +192,18 @@ class DEOptimizer:
         print("\nEvaluating original model...", flush=True)
         frame_counts_for_logging = None
         if use_cached_eval:
-            # For original model evaluation, use original L2 from JSON for classification consistency
+            # For original model evaluation, we MUST re-compute L2/collision using the current model forward pass
+            # instead of using JSON values. This ensures that the baseline fitness is consistent with
+            # the fitness of the individuals (which are always computed).
+            # If we use JSON L2 as baseline but our computation yields a worse value (due to lack of collision optimization),
+            # DE will think all individuals are worse than original, preventing optimization.
+            print("Evaluating original model (re-computing L2/collision to ensure consistency)...", flush=True)
             result = evaluate_fitness_openloop_fn(
                 model, frame_data_dict,
                 positive_frames, negative_frames,
                 threshold_good, threshold_bad, fitness_type, rep_method,
-                use_original_l2_for_classification=True, time_horizon=time_horizon
+                use_original_l2_for_classification=False,  # CHANGED TO FALSE for consistency
+                time_horizon=time_horizon
             )
             # Handle both return formats: (fitness, frame_counts) or just fitness
             if isinstance(result, tuple) and len(result) == 2:
@@ -303,7 +315,6 @@ class DEOptimizer:
                 fitness = evaluate_fitness_fn(
                     modified_model, X_neg, y_neg, X_pos, y_pos, loss_fn
                 )
-            
             
             individual['fitness'] = fitness
             individual['best_fitness'] = fitness

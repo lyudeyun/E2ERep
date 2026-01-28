@@ -15,6 +15,8 @@ import copy
 import multiprocessing as mp
 from mmcv.models.utils.functional import bivariate_gaussian_activation
 
+REPO_ROOT = Path(__file__).resolve().parents[3]
+
 # Global collision metric instance (lazy initialization)
 _COLLISION_METRIC = None
 
@@ -62,17 +64,26 @@ def _compute_collision_from_occ(args):
 
 
 def _resolve_occ_path(occ_path):
-    """Resolve relative occ_path to absolute path."""
     if not occ_path:
         return occ_path
-    if os.path.isabs(occ_path):
-        return occ_path
-    # Try to resolve relative to current working directory or repo root
-    if os.path.exists(occ_path):
-        return os.path.abspath(occ_path)
-    # If not found, return as-is (caller will handle error)
-    return occ_path
+    
+    # Ensure REPO_ROOT is available even in worker processes
+    # (Global variables might not be reliable in some multiprocessing contexts)
+    repo_root = Path(__file__).resolve().parents[3]
 
+    path_str = str(occ_path)
+    
+    # Fix legacy path structure: insert /VAD/ if missing (UniAD might use similar structure?)
+    if "baseline/vad_occ_cache" in path_str and "/VAD/" not in path_str:
+        path_str = path_str.replace("baseline/vad_occ_cache", "baseline/VAD/vad_occ_cache")
+    if "baseline/uniad_occ_cache" in path_str and "/UniAD/" not in path_str:
+        path_str = path_str.replace("baseline/uniad_occ_cache", "baseline/UniAD/uniad_occ_cache")
+    
+    if os.path.isabs(path_str):
+        return path_str
+    
+    # Relative path: resolve against repo_root
+    return str(repo_root / path_str)
 # Import optimizers
 # Handle both relative import (when used as package) and absolute import (when used as standalone module)
 try:
@@ -508,7 +519,7 @@ class ArachnePyTorch:
                 # 3. Combine: E[Front] * E[Behind]
                 fi_val = front_mean * behind_val
                 
-                pool[(layer_name, i, j)] = [gl, fi_val]
+                pool[(layer_name, i, j)] = [layer_name, i, j, gl, fi_val]
         
         return pool
     def _get_layer_activations(self, model, input_data, target_layer_name):
@@ -1797,8 +1808,12 @@ class ArachnePyTorch:
                 'total_evaluated': total_frames_evaluated
             }
             
-            return float(fitness), frame_counts
-        
+        # Add debug logging similar to VAD (for individual evaluation)
+        if not use_original_l2_for_classification:
+            mean_l2 = total_l2_error / valid_frame_count if valid_frame_count > 0 else float('inf')
+            print(f"[fitness-debug] total_l2={total_l2_error:.6f} mean_l2={mean_l2:.6f} "
+                  f"collision_count={collision_count} valid_frames={valid_frame_count}", flush=True)
+
         return float(fitness)
     
     def _compute_l2_error(self, pred_traj, gt_traj, cmd_idx=0):
@@ -1979,6 +1994,9 @@ class ArachnePyTorch:
         pred_traj_abs_flipped[:, :, 0] = -pred_traj_abs_flipped[:, :, 0]
         gt_traj_flipped = gt_traj.clone()        
         diff = pred_traj_abs_flipped - gt_traj_flipped
+        
+        # Try without flip
+        # diff = pred_traj_abs - gt_traj
         
         # Apply mask if provided (matches VAD rule: l2 = sqrt(((pred - gt) ** 2) * mask).sum(axis=-1))
         if gt_mask is not None:

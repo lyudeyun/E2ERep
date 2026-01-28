@@ -162,6 +162,15 @@ def predict_traj_from_features(model, ego_features):
     return out[0]  # [steps, 2]
 
 
+def get_delta_traj(gt_traj):
+    """Convert absolute trajectory to delta trajectory."""
+    # gt_traj: [steps, 2]
+    delta_traj = torch.zeros_like(gt_traj)
+    delta_traj[0] = gt_traj[0]
+    delta_traj[1:] = gt_traj[1:] - gt_traj[:-1]
+    return delta_traj
+
+
 def extract_features(model, data_infos, threshold_good, threshold_bad,
                      mean_l2=None, std_l2=None, alpha=0.5, rep_method='Arachne_v1', time_horizon=3):
     model.eval()
@@ -236,6 +245,15 @@ def extract_features(model, data_infos, threshold_good, threshold_bad,
                         negative_no_collision_count += 1
                     else:
                         middle_no_collision_count += 1
+    
+    print("-" * 40)
+    print("Initial Classification Statistics:")
+    print(f"  Positive (no collision, < thresh_good): {positive_no_collision_count}")
+    print(f"  Negative (no collision, > thresh_bad) : {negative_no_collision_count}")
+    print(f"  Middle   (no collision, between)      : {middle_no_collision_count}")
+    print(f"  Collision                             : {collision_count}")
+    print(f"  Total Processed                       : {processed_frames}")
+    print("-" * 40)
 
     return pos_feat, neg_feat, pos_gt, neg_gt
 
@@ -359,7 +377,12 @@ def main():
                 pred_traj = predict_traj_from_features(uniad_model, ego_features)
                 gt_traj = torch.tensor(info['ground_truth'], dtype=torch.float32)
                 min_len = min(num_timesteps, int(pred_traj.shape[0]), int(gt_traj.shape[0]))
-                l2_error = torch.norm(pred_traj[:min_len] - gt_traj[:min_len], dim=1).mean().item()
+                
+                # IMPORTANT: Flip X to match VAD/B2D evaluation metric (and JSON plan_L2_3s)
+                pred_traj_flipped = pred_traj.clone()
+                pred_traj_flipped[:, 0] = -pred_traj_flipped[:, 0]
+                
+                l2_error = torch.norm(pred_traj_flipped[:min_len] - gt_traj[:min_len], dim=1).mean().item()
                 if not np.isnan(l2_error) and not np.isinf(l2_error):
                     l2_errors.append(float(l2_error))
         if len(l2_errors) == 0:
@@ -369,6 +392,15 @@ def main():
         std_l2 = float(np.std(l2_errors))
         threshold_good = mean_l2 - args.alpha * std_l2
         threshold_bad = mean_l2 + args.alpha * std_l2
+        
+        print("-" * 40)
+        print(f"Code-Computed L2 Statistics:")
+        print(f"  Mean: {mean_l2:.6f}")
+        print(f"  Std:  {std_l2:.6f}")
+        print(f"  Threshold Good: {threshold_good:.6f}")
+        print(f"  Threshold Bad:  {threshold_bad:.6f}")
+        print("-" * 40)
+        
         mean_l2_for_classification = mean_l2
         std_l2_for_classification = std_l2
     else:
@@ -387,7 +419,12 @@ def main():
                 pred_traj = predict_traj_from_features(uniad_model, ego_features)
                 gt_traj = torch.tensor(info['ground_truth'], dtype=torch.float32)
                 min_len = min(num_timesteps, int(pred_traj.shape[0]), int(gt_traj.shape[0]))
-                l2_error = torch.norm(pred_traj[:min_len] - gt_traj[:min_len], dim=1).mean().item()
+                
+                # IMPORTANT: Flip X to match VAD/B2D evaluation metric (and JSON plan_L2_3s)
+                pred_traj_flipped = pred_traj.clone()
+                pred_traj_flipped[:, 0] = -pred_traj_flipped[:, 0]
+                
+                l2_error = torch.norm(pred_traj_flipped[:min_len] - gt_traj[:min_len], dim=1).mean().item()
                 if not np.isnan(l2_error) and not np.isinf(l2_error):
                     l2_errors.append(float(l2_error))
         if len(l2_errors) == 0:
