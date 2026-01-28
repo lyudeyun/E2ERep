@@ -1,0 +1,12 @@
+/home/deyun/git/B2DRepair/Bench2DriveZoo/mmcv/models/modules/multi_scale_deformable_attn_function.py:18: FutureWarning: `torch.cuda.amp.custom_fwd(args...)` is deprecated. Please use `torch.amp.custom_fwd(args..., device_type='cuda')` instead.
+  @custom_fwd(cast_inputs=torch.float16)
+/home/deyun/git/B2DRepair/Bench2DriveZoo/mmcv/models/modules/multi_scale_deformable_attn_function.py:57: FutureWarning: `torch.cuda.amp.custom_bwd(args...)` is deprecated. Please use `torch.amp.custom_bwd(args..., device_type='cuda')` instead.
+  def backward(ctx, grad_output):
+/home/deyun/git/B2DRepair/Bench2DriveZoo/mmcv/models/modules/multi_scale_deformable_attn_function.py:93: FutureWarning: `torch.cuda.amp.custom_fwd(args...)` is deprecated. Please use `torch.amp.custom_fwd(args..., device_type='cuda')` instead.
+  @custom_fwd(cast_inputs=torch.float32)
+/home/deyun/git/B2DRepair/Bench2DriveZoo/mmcv/models/modules/multi_scale_deformable_attn_function.py:133: FutureWarning: `torch.cuda.amp.custom_bwd(args...)` is deprecated. Please use `torch.amp.custom_bwd(args..., device_type='cuda')` instead.
+  def backward(ctx, grad_output):
+/home/deyun/git/B2DRepair/Bench2DriveZoo/adzoo/bevformer/mmdet3d_plugin/dd3d/structures/boxes3d.py:75: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+  @amp.autocast(enabled=False)
+load checkpoint from path: Bench2DriveZoo/ckpts/uniad_tiny_b2d.pth
+[                                                  ] 0/5685, elapsed: 0s, ETA:
