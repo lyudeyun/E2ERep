@@ -11,6 +11,8 @@ import argparse
 import re
 import os
 import shlex
+import smtplib
+from email.message import EmailMessage
 
 
 def str2bool(v):
@@ -67,6 +69,37 @@ def get_model_paths(model_name, model_type, repo_root):
 def get_vad_paths(vad_name, repo_root):
     """Legacy function for backward compatibility."""
     return get_model_paths(vad_name, "VAD", repo_root)
+
+
+def send_email_notification(subject: str, body: str) -> None:
+    """
+    Send an email notification if SMTP environment variables are configured.
+    
+    当前版本直接使用固定的 Gmail 配置，不依赖环境变量。
+    """
+    # 直接使用固定配置（注意：如果提交到 Git，有泄露密码的风险）
+    host = "smtp.gmail.com"
+    port = 587
+    user = "deyunlyu@gmail.com"
+    password = "ctmktibfuxcanswd"  # 建议后续改成环境变量方式
+    sender = "deyunlyu@gmail.com"
+    recipient = "lyudeyun@gmail.com"
+
+    try:
+        msg = EmailMessage()
+        msg["Subject"] = subject
+        msg["From"] = sender
+        msg["To"] = recipient
+        msg.set_content(body)
+
+        with smtplib.SMTP(host, port, timeout=30) as server:
+            server.starttls()
+            server.login(user, password)
+            server.send_message(msg)
+        print(f"[EMAIL] Notification sent to {recipient}.")
+    except Exception as e:
+        # 不让异常影响主流程，只打印提示
+        print(f"[EMAIL] Failed to send notification: {e}")
 
 
 def generate_experiment_name(model_name, rep_method, search_algo, search_algo_params, 
@@ -982,8 +1015,35 @@ def main():
         print(f"\n{'='*80}")
         print(f"OVERALL SUMMARY: {total_success_count}/{total_experiments} successful")
         print(f"{'='*80}")
-        
-        return 0 if total_success_count == total_experiments else 1
+
+        exit_code = 0 if total_success_count == total_experiments else 1
+
+        # Optional email notification
+        try:
+            script_path = Path(__file__).resolve()
+            cmd_line = " ".join(sys.argv)
+            subj = f"[B2DRepair] Experiments finished (model={args.model_name}, fitness=all)"
+            body_lines = [
+                f"Script: {script_path}",
+                f"Command line: {cmd_line}",
+                "",
+                f"Model type: {args.model_type}",
+                f"Model name: {args.model_name}",
+                f"Rep method: {args.rep_method}",
+                f"Search algo: {args.search_algo}",
+                f"Fitness types: {fitness_types}",
+                f"Num runs per type: {args.num_runs}",
+                f"Exp dir: {base_dir}",
+                "",
+                f"Overall successful: {total_success_count}/{total_experiments}",
+                f"Exit code: {exit_code}",
+            ]
+            send_email_notification(subj, "\n".join(body_lines))
+        except Exception as _e:
+            # 邮件失败不影响主流程
+            pass
+
+        return exit_code
     else:
         # Normal single fitness type execution
         success_count = 0
@@ -1010,8 +1070,34 @@ def main():
             print(f"\n{'='*80}")
             print(f"SUMMARY: {success_count}/{args.num_runs} successful")
             print(f"{'='*80}")
-        
-        return 0 if success_count == args.num_runs else 1
+
+        exit_code = 0 if success_count == args.num_runs else 1
+
+        # Optional email notification
+        try:
+            script_path = Path(__file__).resolve()
+            cmd_line = " ".join(sys.argv)
+            subj = f"[B2DRepair] Experiments finished (model={args.model_name}, fitness={args.fitness})"
+            body_lines = [
+                f"Script: {script_path}",
+                f"Command line: {cmd_line}",
+                "",
+                f"Model type: {args.model_type}",
+                f"Model name: {args.model_name}",
+                f"Rep method: {args.rep_method}",
+                f"Search algo: {args.search_algo}",
+                f"Fitness type: {args.fitness}",
+                f"Num runs: {args.num_runs}",
+                f"Exp dir: {base_dir}",
+                "",
+                f"Successful runs: {success_count}/{args.num_runs}",
+                f"Exit code: {exit_code}",
+            ]
+            send_email_notification(subj, "\n".join(body_lines))
+        except Exception as _e:
+            pass
+
+        return exit_code
 
 
 if __name__ == "__main__":
