@@ -66,6 +66,12 @@ def parse_args():
         'Note that the quotation marks are necessary and that no white space '
         'is allowed.')
     parser.add_argument(
+        '--eval-options',
+        nargs='+',
+        action=DictAction,
+        help='custom options for evaluation, the key-value pair in xxx=yyy '
+        'format will be kwargs for dataset.evaluate() function')
+    parser.add_argument(
         '--collect-data',
         action='store_true',
         help='Collect per-frame planning metrics and intermediate info into a JSON file.')
@@ -164,8 +170,9 @@ def main():
         if args.out:
             print(f'\nwriting results to {args.out}')
             dump(outputs, args.out)
-        kwargs = {}
-        kwargs['jsonfile_prefix'] = osp.join('test', args.config.split('/')[-1].split('.')[-2], time.ctime().replace(' ', '_').replace(':', '_'))
+        kwargs = {} if args.eval_options is None else args.eval_options
+        if 'jsonfile_prefix' not in kwargs:
+            kwargs['jsonfile_prefix'] = osp.join('test', args.config.split('/')[-1].split('.')[-2], time.ctime().replace(' ', '_').replace(':', '_'))
 
         if args.eval:
             eval_kwargs = cfg.get('evaluation', {}).copy()

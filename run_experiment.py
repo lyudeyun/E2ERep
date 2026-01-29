@@ -395,9 +395,9 @@ def run_evaluation(model_name, model_type, repaired_model, eval_dataset, exp_dir
     else:
         cfg_options = f"data.test.ann_file='{ann_file}'"
 
-    tmp_eval_dir = None  # 仅 VAD 使用，评估中间文件写临时目录，跑完即删
+    tmp_eval_dir = None  # VAD/UniAD 评估中间文件写临时目录，跑完即删，不落盘
+    tmp_eval_dir = tempfile.mkdtemp(prefix="b2d_eval_")
     if model_type == "VAD":
-        tmp_eval_dir = tempfile.mkdtemp(prefix="b2d_eval_")
         cmd = [
             f"CUDA_VISIBLE_DEVICES={cuda_device}",
             sys.executable,
@@ -425,6 +425,7 @@ def run_evaluation(model_name, model_type, repaired_model, eval_dataset, exp_dir
             "--launcher", "pytorch",
             "--cfg-options", cfg_options,
             "--eval", "bbox",
+            "--eval-options", f"jsonfile_prefix={tmp_eval_dir}",
             "--collect-data",
             "--data-output", str(output_json),
         ]
