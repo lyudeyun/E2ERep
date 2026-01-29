@@ -11,6 +11,8 @@ import argparse
 import re
 import os
 import shlex
+import shutil
+import tempfile
 import smtplib
 from email.message import EmailMessage
 
@@ -393,7 +395,9 @@ def run_evaluation(model_name, model_type, repaired_model, eval_dataset, exp_dir
     else:
         cfg_options = f"data.test.ann_file='{ann_file}'"
 
+    tmp_eval_dir = None  # 仅 VAD 使用，评估中间文件写临时目录，跑完即删
     if model_type == "VAD":
+        tmp_eval_dir = tempfile.mkdtemp(prefix="b2d_eval_")
         cmd = [
             f"CUDA_VISIBLE_DEVICES={cuda_device}",
             sys.executable,
@@ -405,7 +409,7 @@ def run_evaluation(model_name, model_type, repaired_model, eval_dataset, exp_dir
             '--launcher', 'none',
             '--eval', 'bbox',
             '--tmpdir', 'tmp',
-            '--eval-options', 'jsonfile_prefix=None',
+            '--eval-options', f'jsonfile_prefix={tmp_eval_dir}',
             '--collect-data',
             '--data-output', str(output_json),
         ]
@@ -441,11 +445,14 @@ def run_evaluation(model_name, model_type, repaired_model, eval_dataset, exp_dir
         f.flush()
         result = subprocess.run(cmd_str, shell=True, cwd=b2d_root,
                               stdout=f, stderr=subprocess.STDOUT, text=True, bufsize=1)
-    
+
+    if tmp_eval_dir is not None:
+        shutil.rmtree(tmp_eval_dir, ignore_errors=True)
+
     if result.returncode != 0:
         print(f"ERROR: Evaluation failed. Check {log_file}")
         return False
-    
+
     print(f"Evaluation results: {output_json}")
     return True
 
