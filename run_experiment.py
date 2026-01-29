@@ -13,7 +13,6 @@ import os
 import shlex
 import shutil
 import tempfile
-import socket
 import smtplib
 from email.message import EmailMessage
 
@@ -396,12 +395,6 @@ def run_evaluation(model_name, model_type, repaired_model, eval_dataset, exp_dir
     else:
         cfg_options = f"data.test.ann_file='{ann_file}'"
 
-    def _pick_free_port() -> int:
-        # Bind to port 0 to let OS choose an available ephemeral port.
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(("127.0.0.1", 0))
-            return int(s.getsockname()[1])
-
     # VAD/UniAD 评估中间文件写临时目录，跑完即删，不落盘
     tmp_eval_dir = tempfile.mkdtemp(prefix="b2d_eval_")
     if model_type == "VAD":
@@ -421,14 +414,13 @@ def run_evaluation(model_name, model_type, repaired_model, eval_dataset, exp_dir
             '--data-output', str(output_json),
         ]
     elif model_type == "UniAD":
-        # torchrun 默认使用 29500 端口，多任务并行会冲突；为每次评估挑一个空闲端口
-        master_port = _pick_free_port()
+        # torchrun 默认 rendezvous 使用 29500，多任务并行会端口冲突。
+        # 使用 --standalone 让 torchrun 自动选择空闲端口/rdzv_id，避免冲突。
         cmd = [
             f"PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True",
             f"CUDA_VISIBLE_DEVICES={cuda_device}",
-            "MASTER_ADDR=127.0.0.1",
-            f"MASTER_PORT={master_port}",
             "torchrun",
+            "--standalone",
             "--nproc_per_node=1",
             str(repo_root / "Bench2DriveZoo" / "adzoo" / "uniad" / "test.py"),
             str(model_paths['config']),
