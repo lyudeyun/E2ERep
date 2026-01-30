@@ -14,7 +14,7 @@ set -euo pipefail
 
 # ==== 可调参数（按需修改）====
 # 实验根目录（其下每个子目录为一个实验，会扫描并重跑未完成开环评估的）
-EXP_DIR="${EXP_DIR:-/home/pj25001076/ku50002427/data/uniad_base_Arachne_v2_DE_results}"
+EXP_DIR="${EXP_DIR:-/home/pj25001076/ku50002427/git/B2DRepair/uniad_base_Arachne_v2_DE_results}"
 # 评估数据集 PKL（相对路径相对于 B2DRepair 仓库根）
 EVAL_DATASET="${EVAL_DATASET:-Bench2DriveZoo/data/infos/b2d_infos_val_partB_25clips.pkl}"
 # 使用的 GPU
