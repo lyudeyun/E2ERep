@@ -4,6 +4,7 @@
 批量重新运行开环评估，针对修复成功但评估失败的实验。
 
 用法:
+    # 批量：--exp-dir 指向实验根目录（其子目录为多个实验）
     python3 batch_reeval_openloop.py \
         --exp-dir /data1/uniad_tiny_Arachne_v2_DE_results \
         --eval-dataset Bench2DriveZoo/data/infos/b2d_infos_val_partB_25clips.pkl \
@@ -11,6 +12,12 @@
         [--jobs 3] \
         [--occ-output-dir baseline/UniAD/uniad_occ_cache] \
         [--dry-run]
+
+    # 单个实验：--exp-dir 直接指向一个实验目录（含 repair/repair_output 的目录）
+    python3 batch_reeval_openloop.py \
+        --exp-dir /data1/uniad_tiny_semSegRep_DE_results/UniAD_tiny_REP_VAL_t3s_semSegRep_DE_w7_p14_i50_es5_DISC_1 \
+        --eval-dataset Bench2DriveZoo/data/infos/b2d_infos_val_partB_25clips.pkl \
+        --eval-cuda-device 0
 """
 
 import sys
@@ -83,7 +90,7 @@ def main():
         '--exp-dir',
         type=str,
         required=True,
-        help='实验根目录（例如: /data1/uniad_tiny_Arachne_v2_DE_results）'
+        help='实验根目录（批量）或单个实验目录（含 repair/repair_output 的路径）'
     )
     parser.add_argument(
         '--eval-dataset',
@@ -133,16 +140,21 @@ def main():
         print(f"ERROR: 评估数据集不存在: {eval_dataset}")
         return 1
     
-    # 扫描所有实验目录
+    # 扫描实验目录：若当前路径本身是单个实验目录则只评估它，否则扫描其子目录
     print(f"扫描实验目录: {exp_base_dir}")
     print("=" * 80)
     
     exp_dirs_to_reeval = []
+    info_self = parse_exp_dir_name(exp_base_dir.name)
+    if info_self is not None and (exp_base_dir / "repair" / "repair_output").is_dir():
+        # --exp-dir 指向的是单个实验目录，只评估这一个
+        candidates = [exp_base_dir]
+        print("  (检测到单个实验目录，仅评估该目录)")
+    else:
+        # --exp-dir 是实验根目录，扫描其下所有子目录
+        candidates = [item for item in exp_base_dir.iterdir() if item.is_dir()]
     
-    for item in exp_base_dir.iterdir():
-        if not item.is_dir():
-            continue
-        
+    for item in candidates:
         exp_dir_name = item.name
         
         # 解析实验信息
