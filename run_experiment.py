@@ -229,17 +229,25 @@ def generate_baseline_json(model_name, model_type, repair_dataset, base_dir, rep
         raise ValueError(f"Unknown model type: {model_type}")
     
     if occ_output_dir:
-        cmd.extend(['--occ-output-dir', str(occ_output_dir)])
+        occ_dir = Path(occ_output_dir)
+        if not occ_dir.is_absolute():
+            occ_dir = (repo_root / occ_dir).resolve()
+        cmd.extend(['--occ-output-dir', str(occ_dir)])
     
     cmd_str = ' '.join(cmd)
     print(f"Command: {cmd_str}")
     
     b2d_root = repo_root / "Bench2DriveZoo"
+    run_env = os.environ.copy()
+    conda_prefix = os.environ.get("CONDA_PREFIX")
+    if conda_prefix:
+        conda_lib = os.path.join(conda_prefix, "lib")
+        run_env["LD_LIBRARY_PATH"] = conda_lib + os.pathsep + run_env.get("LD_LIBRARY_PATH", "")
     with open(log_file, 'w', buffering=1) as f:  # Line buffering for real-time output
         # Also record the exact command (including cfg-options) into the log for debugging.
         f.write(f"CMD: {cmd_str}\n")
         f.flush()
-        result = subprocess.run(cmd_str, shell=True, cwd=b2d_root,
+        result = subprocess.run(cmd_str, shell=True, cwd=b2d_root, env=run_env,
                               stdout=f, stderr=subprocess.STDOUT, text=True, bufsize=1)
     
     if result.returncode != 0 or not baseline_json.exists():
@@ -436,18 +444,28 @@ def run_evaluation(model_name, model_type, repaired_model, eval_dataset, exp_dir
         raise ValueError(f"Unknown model type: {model_type}")
     
     if occ_output_dir:
-        cmd.extend(['--occ-output-dir', str(occ_output_dir)])
+        occ_dir = Path(occ_output_dir)
+        if not occ_dir.is_absolute():
+            occ_dir = (repo_root / occ_dir).resolve()
+        cmd.extend(['--occ-output-dir', str(occ_dir)])
     
     cmd_str = ' '.join(cmd)
     print(f"Command: {cmd_str}")
     log_file = (eval_dir / f"{model_lower}_rep_val.log").resolve()
     
     b2d_root = repo_root / "Bench2DriveZoo"
+    # 在集群/旧系统上，系统 libstdc++ 可能缺少 GLIBCXX_3.4.30，导致 llvmlite/numba 加载失败。
+    # 子进程继承环境时优先使用 conda 的 lib，避免 GLIBCXX_3.4.30 not found。
+    run_env = os.environ.copy()
+    conda_prefix = os.environ.get("CONDA_PREFIX")
+    if conda_prefix:
+        conda_lib = os.path.join(conda_prefix, "lib")
+        run_env["LD_LIBRARY_PATH"] = conda_lib + os.pathsep + run_env.get("LD_LIBRARY_PATH", "")
     with open(log_file, 'w', buffering=1) as f:  # Line buffering for real-time output
         # Record the exact command (including cfg-options) into the log.
         f.write(f"CMD: {cmd_str}\n")
         f.flush()
-        result = subprocess.run(cmd_str, shell=True, cwd=b2d_root,
+        result = subprocess.run(cmd_str, shell=True, cwd=b2d_root, env=run_env,
                               stdout=f, stderr=subprocess.STDOUT, text=True, bufsize=1)
 
     if tmp_eval_dir is not None:
