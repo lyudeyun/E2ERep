@@ -29,6 +29,7 @@ python calculate_a12.py
 import os
 import re
 import sys
+import argparse
 from pathlib import Path
 
 try:
@@ -87,6 +88,17 @@ def calculate_a12(group1, group2):
     a12 = (r1 - n1 * (n1 + 1) / 2) / (n1 * n2)
     
     return a12
+
+def _get_metric_values(all_data, config_name, metric):
+    """安全获取某个配置在某个metric上的所有重复实验值（list），拿不到就返回None"""
+    if config_name not in all_data:
+        return None
+    if metric not in all_data[config_name]:
+        return None
+    values = all_data[config_name][metric]
+    if not values:
+        return None
+    return values
 
 
 def interpret_a12(a12):
@@ -267,9 +279,56 @@ def generate_config_name(method, weight_count, fitness_type):
     """生成配置名称"""
     return f"{method}_w{weight_count}_{fitness_type}"
 
+def generate_group_name(method, fitness_type):
+    """生成分组名称（方法 + fitness），用于6×6大表"""
+    return f"{method}_{fitness_type}"
+
+def _metric_short_name(metric: str) -> str:
+    """
+    将metric压缩成更短的名字，避免Excel sheet name超过31字符限制
+    """
+    mapping = {
+        'plan_L2_1s': 'L2_1s',
+        'plan_L2_2s': 'L2_2s',
+        'plan_L2_3s': 'L2_3s',
+        'plan_obj_box_col_1s': 'COL_1s',
+        'plan_obj_box_col_2s': 'COL_2s',
+        'plan_obj_box_col_3s': 'COL_3s',
+    }
+    return mapping.get(metric, metric)
+
+def _make_unique_sheet_name(base: str, used: set) -> str:
+    """
+    Excel sheet name长度限制为31。这里做：
+    - 截断到<=31
+    - 若重名，追加 _1/_2...
+    """
+    base = base[:31]
+    if base not in used:
+        used.add(base)
+        return base
+    i = 1
+    while True:
+        suffix = f"_{i}"
+        candidate = (base[:31 - len(suffix)] + suffix)[:31]
+        if candidate not in used:
+            used.add(candidate)
+            return candidate
+        i += 1
+
 
 def main():
     """计算所有18种配置之间的Aˆ12比较"""
+    # 解析命令行参数
+    parser = argparse.ArgumentParser(description='计算Aˆ12统计量')
+    parser.add_argument('--time_horizon', type=str, choices=['1s', '2s', '3s'], default=None,
+                        help='指定time horizon，只读取该目录下的数据（默认：读取所有）')
+    parser.add_argument('--compare_horizons', action='store_true',
+                        help='进行time horizon之间的比较（1s vs 2s vs 3s）')
+    parser.add_argument('--self_check', action='store_true',
+                        help='对6×6表格内部的A12计算做一致性自检（反向比较之和应为1，对角线应为0.5）')
+    args = parser.parse_args()
+    
     # 实验根目录
     base_dirs = [
         '/home/deyun/git/B2DRepair/vad_base_Arachne_v2_DE_results',
@@ -278,9 +337,13 @@ def main():
     
     # 存储所有数据：config -> metric -> [所有重复实验的值]
     all_data = {}
+    # 存储time horizon数据：config -> repetition -> time_horizon -> metric -> value
+    time_horizon_data = {}
     
     print("=" * 80)
     print("Step 1: 提取所有实验的指标数据")
+    if args.time_horizon:
+        print(f"只读取 time_horizon={args.time_horizon} 的数据")
     print("=" * 80)
     
     for base_dir in base_dirs:
@@ -290,6 +353,18 @@ def main():
         
         print(f"\n处理目录: {base_dir}")
         base_path = Path(base_dir)
+        
+        # 如果指定了time_horizon，只在该目录下查找
+        if args.time_horizon:
+            search_path = base_path / args.time_horizon
+            if not search_path.exists():
+                print(f"  Warning: {search_path} not found")
+                continue
+            exp_folders = []
+            for exp_folder in search_path.rglob('VAD_base_REP_VAL_*'):
+                if exp_folder.is_dir():
+                    exp_folders.append(exp_folder)
+        else:
         # 递归查找所有以 VAD_base_REP_VAL_ 开头的文件夹
         exp_folders = []
         for exp_folder in base_path.rglob('VAD_base_REP_VAL_*'):
@@ -303,6 +378,17 @@ def main():
             log_file = exp_folder / 'open_loop_eval' / 'vad_base_rep_val.log'
             
             if not log_file.exists():
+                continue
+            
+            # 从路径中提取time horizon
+            time_horizon = None
+            folder_path_str = str(exp_folder)
+            horizon_match = re.search(r'/([123])s/', folder_path_str)
+            if horizon_match:
+                time_horizon = f"{horizon_match.group(1)}s"
+            
+            # 如果指定了time_horizon，只处理匹配的
+            if args.time_horizon and time_horizon != args.time_horizon:
                 continue
             
             # 解析实验配置
@@ -320,6 +406,14 @@ def main():
             # 生成配置名称
             config_name = generate_config_name(method, weight_count, fitness_type)
             
+            # 存储time horizon数据（用于time horizon比较）
+            if time_horizon:
+                if config_name not in time_horizon_data:
+                    time_horizon_data[config_name] = {}
+                if repetition not in time_horizon_data[config_name]:
+                    time_horizon_data[config_name][repetition] = {}
+                time_horizon_data[config_name][repetition][time_horizon] = metrics
+            
             # 初始化配置数据
             if config_name not in all_data:
                 all_data[config_name] = {}
@@ -331,177 +425,168 @@ def main():
                         all_data[config_name][metric_name] = []
                     all_data[config_name][metric_name].append(metric_value)
     
-    # 定义要分析的指标
+    # 定义要分析的指标（总是6个metric，不管time_horizon是什么）
     metrics_to_analyze = [
         'plan_L2_1s', 'plan_L2_2s', 'plan_L2_3s',
         'plan_obj_box_col_1s', 'plan_obj_box_col_2s', 'plan_obj_box_col_3s'
     ]
     
-    # 生成所有配置的列表（按固定顺序：方法 -> 权重 -> fitness）
+    # 固定的枚举顺序（用于输出表格的行/列顺序）
     methods = ['Arachne_v2', 'semSegRep']
     weight_counts = [26, 52, 105]
     fitness_types = ['DISC', 'CONT', 'CONT2']
     
-    configs = []
+    # 6×6分组（方法 + fitness），顺序与截图一致
+    groups = []
     for method in methods:
-        for weight_count in weight_counts:
             for fitness_type in fitness_types:
-                config_name = generate_config_name(method, weight_count, fitness_type)
-                configs.append(config_name)
+            groups.append(generate_group_name(method, fitness_type))
     
-    print(f"\n总共找到 {len(configs)} 种配置")
-    print(f"实际有数据的配置: {len(all_data)} 种")
-    
-    # 检查每个配置是否有数据
-    missing_configs = []
-    for config in configs:
-        if config not in all_data:
-            missing_configs.append(config)
-        else:
-            for metric in metrics_to_analyze:
-                if metric not in all_data[config] or len(all_data[config][metric]) == 0:
-                    missing_configs.append(f"{config}_{metric}")
-                    break
-    
-    if missing_configs:
-        print(f"\n警告: 以下配置缺少数据:")
-        for config in missing_configs[:20]:
-            print(f"  - {config}")
-        if len(missing_configs) > 20:
-            print(f"  ... 还有 {len(missing_configs) - 20} 个")
+    print(f"实际有数据的配置: {len(all_data)} 种（18种理论配置中的子集）")
     
     if len(all_data) == 0:
         print("\n错误: 没有提取到任何实验数据！")
         sys.exit(1)
     
     print("\n" + "=" * 80)
-    print("Step 2: 计算Aˆ12统计量（18×18比较表格）")
+    print("Step 2: 计算Aˆ12统计量（6×6分组表：方法+fitness；每格包含w26/w52/w105三条比较）")
     print("=" * 80)
-    print("18种配置 = 2个方法 × 3个权重 × 3个fitness函数")
-    print("配置顺序：先方法，再权重，再fitness")
+    print("分组顺序：先方法，再fitness（例如：Arachne_v2_DISC / Arachne_v2_CONT / Arachne_v2_CONT2 / semSegRep_...）")
     
-    # 创建Excel文件
+    # 创建Excel文件（根据time_horizon调整文件名）
+    if args.time_horizon:
+        excel_file = f'a12_comparison_results_{args.time_horizon}.xlsx'
+    else:
     excel_file = 'a12_comparison_results.xlsx'
     excel_writer = pd.ExcelWriter(excel_file, engine='openpyxl')
+    used_sheet_names = set()
     
     # 为每个metric生成18×18表格
     for metric in metrics_to_analyze:
         print(f"\n指标: {metric}")
         print("=" * 80)
         
-        # 构建18×18矩阵
-        matrix = np.full((18, 18), np.nan)
-        effect_size_matrix = {}
+        # ----------------------------
+        # 先生成 6×6 分组表（方法+fitness），列按“分组 × 权重子列(w26/w52/w105)”展开
+        # 这样Excel里会显示为：每个分组列下面有3个子列（w26/w52/w105），符合截图格式。
+        # ----------------------------
+        weight_labels = [f"w{w}" for w in weight_counts]
+        grouped_columns = pd.MultiIndex.from_product([groups, weight_labels])
+        effect_matrix = []
+        numeric_matrix = []
+
+        for row_group in groups:
+            # 注意：method 里可能包含下划线（例如 Arachne_v2），所以必须从右侧切分
+            row_method, row_fitness = row_group.rsplit('_', 1)
+            effect_row = []
+            numeric_row = []
+
+            for col_group in groups:
+                col_method, col_fitness = col_group.rsplit('_', 1)
+
+                # 对角线：同组 vs 同组
+                if row_group == col_group:
+                    for _w in weight_counts:
+                        effect_row.append("equivalent")
+                        numeric_row.append(0.5)
+                    continue
+
+                for w in weight_counts:
+                    row_cfg = generate_config_name(row_method, w, row_fitness)
+                    col_cfg = generate_config_name(col_method, w, col_fitness)
+
+                    if row_cfg in all_data and col_cfg in all_data and metric in all_data[row_cfg] and metric in all_data[col_cfg]:
+                        v1 = all_data[row_cfg][metric]
+                        v2 = all_data[col_cfg][metric]
+                        if len(v1) > 0 and len(v2) > 0:
+                            a12 = calculate_a12(v1, v2)
+                            if a12 is None:
+                                effect_row.append("N/A")
+                                numeric_row.append(np.nan)
+                            else:
+                                effect_row.append(interpret_a12_directional(a12, row_cfg, col_cfg))
+                                numeric_row.append(float(a12))
+                        else:
+                            effect_row.append("N/A")
+                            numeric_row.append(np.nan)
+                    else:
+                        effect_row.append("N/A")
+                        numeric_row.append(np.nan)
+
+            effect_matrix.append(effect_row)
+            numeric_matrix.append(numeric_row)
+
+        grouped_effect_df = pd.DataFrame(effect_matrix, index=groups, columns=grouped_columns)
+        grouped_numeric_df = pd.DataFrame(numeric_matrix, index=groups, columns=grouped_columns)
+
+        # 写入 Excel（6×6）
+        mshort = _metric_short_name(metric)
+        sheet_g6_effect = _make_unique_sheet_name(f"G6_{mshort}_eff", used_sheet_names)
+        sheet_g6_values = _make_unique_sheet_name(f"G6_{mshort}_val", used_sheet_names)
+        grouped_effect_df.to_excel(excel_writer, sheet_name=sheet_g6_effect, index=True, merge_cells=True)
+        grouped_numeric_df.to_excel(excel_writer, sheet_name=sheet_g6_values, index=True, merge_cells=True)
         
-        for i, config1 in enumerate(configs):
-            for j, config2 in enumerate(configs):
-                if i == j:
-                    # 对角线：自己和自己比较
-                    matrix[i, j] = 0.5
-                    effect_size_matrix[(i, j)] = "equivalent"
+        # ----------------------------
+        # 可选：一致性自检
+        # ----------------------------
+        if args.self_check:
+            # A12(X,Y) + A12(Y,X) 应为 1（含tie的0.5项也成立），对角线应为0.5
+            mismatches = []
+            checked = 0
+            for row_group in groups:
+                row_method, row_fitness = row_group.rsplit('_', 1)
+                for col_group in groups:
+                    col_method, col_fitness = col_group.rsplit('_', 1)
+                    for w in weight_counts:
+                        row_cfg = generate_config_name(row_method, w, row_fitness)
+                        col_cfg = generate_config_name(col_method, w, col_fitness)
+
+                        if row_group == col_group:
+                            # 对角线：必须等价（0.5）
+                            v = _get_metric_values(all_data, row_cfg, metric)
+                            if v is not None:
+                                a = calculate_a12(v, v)
+                                checked += 1
+                                if a is None or abs(a - 0.5) > 1e-12:
+                                    mismatches.append((metric, row_group, col_group, w, f"diag a12={a}"))
+                            continue
+
+                        v1 = _get_metric_values(all_data, row_cfg, metric)
+                        v2 = _get_metric_values(all_data, col_cfg, metric)
+                        if v1 is None or v2 is None:
+                            continue  # 没数据的不检
+
+                        a12_12 = calculate_a12(v1, v2)
+                        a12_21 = calculate_a12(v2, v1)
+                        checked += 1
+                        if a12_12 is None or a12_21 is None:
+                            mismatches.append((metric, row_group, col_group, w, "a12 is None"))
+                            continue
+                        if abs((a12_12 + a12_21) - 1.0) > 1e-9:
+                            mismatches.append((metric, row_group, col_group, w, f"a12+a21={a12_12+a12_21}"))
+
+            if mismatches:
+                print("\n[SELF_CHECK] 发现A12一致性异常：")
+                for item in mismatches[:50]:
+                    m, rg, cg, w, msg = item
+                    print(f"  - metric={m}, cell={rg} vs {cg}, w{w}: {msg}")
+                if len(mismatches) > 50:
+                    print(f"  ... 还有 {len(mismatches)-50} 条")
+                raise SystemExit("[SELF_CHECK] FAILED")
                 else:
-                    # 获取两个配置的所有重复实验值
-                    if config1 in all_data and config2 in all_data:
-                        if metric in all_data[config1] and metric in all_data[config2]:
-                            values1 = all_data[config1][metric]
-                            values2 = all_data[config2][metric]
-                            
-                            if len(values1) > 0 and len(values2) > 0:
-                                a12 = calculate_a12(values1, values2)
-                                if a12 is not None:
-                                    matrix[i, j] = a12
-                                    effect_size = interpret_a12_directional(a12, config1, config2)
-                                    effect_size_matrix[(i, j)] = effect_size
-        
-        # 打印表格（显示效应量解释）
-        print("\n18×18 Aˆ12 比较表格（显示效应量解释）:")
-        print("说明：行配置 vs 列配置（所有metric都是越小越好）")
-        print("  - better: 行配置更好（行配置的值更小，Aˆ12 < 0.5）")
-        print("  - worse: 行配置更差（行配置的值更大，Aˆ12 > 0.5）")
-        print("  - equivalent: 无差异（Aˆ12 = 0.5）")
-        print()
-        
-        # 计算最大配置名称长度
-        max_config_len = max([len(config) for config in configs]) if configs else 20
-        max_config_len = max(max_config_len, 20)  # 至少20个字符
-        
-        # 表头
-        header = f"{'':{max_config_len}s}"
-        for config in configs:
-            header += f"\t{config:{max_config_len}s}"
-        print(header)
-        print("-" * len(header))
-        
-        for i, config1 in enumerate(configs):
-            row_str = f"{config1:{max_config_len}s}"
-            for j, config2 in enumerate(configs):
-                if (i, j) in effect_size_matrix:
-                    row_str += f"\t{effect_size_matrix[(i, j)]:{max_config_len}s}"
-                elif not np.isnan(matrix[i, j]):
-                    row_str += f"\t{matrix[i, j]:.4f}"
-                else:
-                    row_str += f"\t{'N/A':{max_config_len}s}"
-            print(row_str)
-        
-        # 也可以打印数值表格
-        print("\n18×18 Aˆ12 比较表格（显示数值）:")
-        print("说明：Aˆ12 = P(行配置 > 列配置) + 0.5 * P(行配置 = 列配置)")
-        print("  - Aˆ12 > 0.5: 行配置的值倾向于更大 → 行配置更差（metric越小越好）")
-        print("  - Aˆ12 < 0.5: 行配置的值倾向于更小 → 行配置更好（metric越小越好）")
-        print("  - Aˆ12 = 0.5: 无差异")
-        print()
-        
-        # 使用相同的最大配置名称长度
-        header = f"{'':{max_config_len}s}"
-        for config in configs:
-            header += f"\t{config:{max_config_len}s}"
-        print(header)
-        print("-" * len(header))
-        
-        for i, config1 in enumerate(configs):
-            row_str = f"{config1:{max_config_len}s}"
-            for j, config2 in enumerate(configs):
-                if not np.isnan(matrix[i, j]):
-                    row_str += f"\t{matrix[i, j]:.4f}"
-                else:
-                    row_str += f"\t{'N/A':{max_config_len}s}"
-            print(row_str)
-        
-        # 创建DataFrame并写入Excel
-        # 效应量解释表格
-        effect_size_data = []
-        for i, config1 in enumerate(configs):
-            row_data = [config1]
-            for j, config2 in enumerate(configs):
-                if (i, j) in effect_size_matrix:
-                    row_data.append(effect_size_matrix[(i, j)])
-                elif not np.isnan(matrix[i, j]):
-                    row_data.append(f"{matrix[i, j]:.4f}")
-                else:
-                    row_data.append("N/A")
-            effect_size_data.append(row_data)
-        
-        effect_size_df = pd.DataFrame(effect_size_data, columns=[''] + configs)
-        sheet_name_effect = f"{metric}_effect_size"
-        effect_size_df.to_excel(excel_writer, sheet_name=sheet_name_effect, index=False)
-        
-        # 数值表格
-        numeric_data = []
-        for i, config1 in enumerate(configs):
-            row_data = [config1]
-            for j, config2 in enumerate(configs):
-                if not np.isnan(matrix[i, j]):
-                    row_data.append(matrix[i, j])
-                else:
-                    row_data.append(np.nan)
-            numeric_data.append(row_data)
-        
-        numeric_df = pd.DataFrame(numeric_data, columns=[''] + configs)
-        sheet_name_numeric = f"{metric}_values"
-        numeric_df.to_excel(excel_writer, sheet_name=sheet_name_numeric, index=False)
+                print(f"[SELF_CHECK] PASSED for metric={metric} (checked={checked})")
     
     # 保存Excel文件
     excel_writer.close()
+    
+    # Time Horizon比较
+    if args.compare_horizons:
+        print("\n" + "=" * 80)
+        print("Step 3: Time Horizon比较（1s vs 2s vs 3s）")
+        print("=" * 80)
+        print("注意：由于1s和2s只有5个重复实验，而3s有10个重复实验，样本量不同")
+        print("Aˆ12不适合用于不同样本量的比较，请使用calculate_cohensd.py进行time horizon比较")
+        print("=" * 80)
     
     print("\n" + "=" * 80)
     print(f"分析完成！结果已保存到: {excel_file}")
