@@ -1,26 +1,26 @@
 #!/bin/bash
-# 批量闭环评估脚本 - 基于最佳开环配置
-# 用于评估指定配置的多个重复实验的修复后模型的闭环性能
+# 批量闭环评估脚本（VAD）- 基于最佳开环配置
+# 用于评估指定配置的多个重复实验的修复后 VAD 模型的闭环性能
 # 通常用于评估开环评估中表现最好的配置的所有重复实验
 #
 # 使用方法:
-#   bash leaderboard/scripts/batch_closed_loop_eval_based_on_best_open_loop_setting.sh \
+#   bash leaderboard/scripts/batch_closed_loop_eval_vad_based_on_best_open_loop_setting.sh \
 #     <EXPERIMENT_PATH> \
 #     [--fast] [--super-fast] [--gpu-rank GPU] [--port-base PORT] [--routes ROUTES]
 #
 # 示例:
 #   # 方式1: 指定一个特定的实验文件夹
-#   bash leaderboard/scripts/batch_closed_loop_eval_based_on_best_open_loop_setting.sh \
+#   bash leaderboard/scripts/batch_closed_loop_eval_vad_based_on_best_open_loop_setting.sh \
 #     vad_base_Arachne_v2_DE_results/VAD_base_REP_VAL_t3s_Arachne_v2_DE_w26_p52_i50_es5_CONT_1 \
 #     --fast
 #
 #   # 方式2: 指定一个父目录，自动查找所有包含.pth文件的子目录
-#   bash leaderboard/scripts/batch_closed_loop_eval_based_on_best_open_loop_setting.sh \
+#   bash leaderboard/scripts/batch_closed_loop_eval_vad_based_on_best_open_loop_setting.sh \
 #     vad_base_Arachne_v2_DE_results \
 #     --fast
 #
 #   # 方式3: 使用通配符模式（向后兼容）
-#   bash leaderboard/scripts/batch_closed_loop_eval_based_on_best_open_loop_setting.sh \
+#   bash leaderboard/scripts/batch_closed_loop_eval_vad_based_on_best_open_loop_setting.sh \
 #     "vad_base_Arachne_v2_DE_results/VAD_base_REP_VAL_t3s_Arachne_v2_DE_w26_p52_i50_es5_CONT_*" \
 #     --fast
 #
@@ -43,7 +43,7 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage:
-  bash leaderboard/scripts/batch_closed_loop_eval_based_on_best_open_loop_setting.sh \
+  bash leaderboard/scripts/batch_closed_loop_eval_vad_based_on_best_open_loop_setting.sh \
     <EXPERIMENT_PATH> \
     [OPTIONS]
 
@@ -65,33 +65,33 @@ Options:
 
 Examples:
   # 方式1: 指定单个实验文件夹
-  bash leaderboard/scripts/batch_closed_loop_eval_based_on_best_open_loop_setting.sh \
+  bash leaderboard/scripts/batch_closed_loop_eval_vad_based_on_best_open_loop_setting.sh \
     vad_base_Arachne_v2_DE_results/VAD_base_REP_VAL_t3s_Arachne_v2_DE_w26_p52_i50_es5_CONT_1 \
     --fast
 
   # 方式2: 指定父目录，自动查找所有实验（串行运行）
-  bash leaderboard/scripts/batch_closed_loop_eval_based_on_best_open_loop_setting.sh \
+  bash leaderboard/scripts/batch_closed_loop_eval_vad_based_on_best_open_loop_setting.sh \
     vad_base_Arachne_v2_DE_results \
     --fast
 
   # 方式3: 并行运行（N个实例，每个实例处理一部分实验）
   # 示例：3个实例并行（在3个不同的终端/tmux会话中分别运行）
-  bash leaderboard/scripts/batch_closed_loop_eval_based_on_best_open_loop_setting.sh \
+  bash leaderboard/scripts/batch_closed_loop_eval_vad_based_on_best_open_loop_setting.sh \
     vad_base_Arachne_v2_DE_results \
     --fast --instance-id 0 --total-instances 3
   
-  bash leaderboard/scripts/batch_closed_loop_eval_based_on_best_open_loop_setting.sh \
+  bash leaderboard/scripts/batch_closed_loop_eval_vad_based_on_best_open_loop_setting.sh \
     vad_base_Arachne_v2_DE_results \
     --fast --instance-id 1 --total-instances 3
   
-  bash leaderboard/scripts/batch_closed_loop_eval_based_on_best_open_loop_setting.sh \
+  bash leaderboard/scripts/batch_closed_loop_eval_vad_based_on_best_open_loop_setting.sh \
     vad_base_Arachne_v2_DE_results \
     --fast --instance-id 2 --total-instances 3
   
   # 超算环境示例：10个实例并行（使用SLURM作业数组）
   # sbatch --array=0-9 eval_job.sh
   # 其中 eval_job.sh 包含：
-  #   bash leaderboard/scripts/batch_closed_loop_eval_based_on_best_open_loop_setting.sh \
+  #   bash leaderboard/scripts/batch_closed_loop_eval_vad_based_on_best_open_loop_setting.sh \
   #     vad_base_Arachne_v2_DE_results \
   #     --fast --instance-id $SLURM_ARRAY_TASK_ID --total-instances 10
 EOF
@@ -263,8 +263,11 @@ if [ -f "${input_path}" ] && [[ "${input_path}" == *.pth ]]; then
   fi
 # 情况2: 如果输入路径是一个目录，检查是否是单个实验目录
 elif [ -d "${input_path}" ]; then
-  # 检查是否是单个实验目录（包含 repair_vad/repair_output/VAD_repaired_both_layers.pth）
-  pth_file="${input_path}/repair_vad/repair_output/VAD_repaired_both_layers.pth"
+  # 检查是否是单个实验目录（包含 repair/repair_output/VAD_repaired_both_layers.pth，与 run_experiment 一致）
+  pth_file="${input_path}/repair/repair_output/VAD_repaired_both_layers.pth"
+  if [ ! -f "${pth_file}" ]; then
+    pth_file="${input_path}/repair_vad/repair_output/VAD_repaired_both_layers.pth"
+  fi
   if [ -f "${pth_file}" ]; then
     # 单个实验目录
     MATCHED_EXPERIMENTS+=("${input_path}")
@@ -273,7 +276,8 @@ elif [ -d "${input_path}" ]; then
     # 父目录，查找所有包含.pth文件的子目录
     echo "在父目录中查找所有包含.pth文件的实验..."
     while IFS= read -r -d '' exp_dir; do
-      pth_file="${exp_dir}/repair_vad/repair_output/VAD_repaired_both_layers.pth"
+      pth_file="${exp_dir}/repair/repair_output/VAD_repaired_both_layers.pth"
+      [ -f "${pth_file}" ] || pth_file="${exp_dir}/repair_vad/repair_output/VAD_repaired_both_layers.pth"
       if [ -f "${pth_file}" ]; then
         MATCHED_EXPERIMENTS+=("${exp_dir}")
       fi
@@ -311,7 +315,8 @@ elif [[ "${EXPERIMENT_PATH}" == *"*"* ]]; then
   fi
   
   while IFS= read -r -d '' exp_dir; do
-    pth_file="${exp_dir}/repair_vad/repair_output/VAD_repaired_both_layers.pth"
+    pth_file="${exp_dir}/repair/repair_output/VAD_repaired_both_layers.pth"
+    [ -f "${pth_file}" ] || pth_file="${exp_dir}/repair_vad/repair_output/VAD_repaired_both_layers.pth"
     if [ -f "${pth_file}" ]; then
       MATCHED_EXPERIMENTS+=("${exp_dir}")
     fi
@@ -412,8 +417,9 @@ FAILED_EXPERIMENTS=()
 for i in "${!MATCHED_EXPERIMENTS[@]}"; do
   exp_dir="${MATCHED_EXPERIMENTS[$i]}"
   exp_name=$(basename "${exp_dir}")
-  pth_file="${exp_dir}/repair_vad/repair_output/VAD_repaired_both_layers.pth"
-  
+  pth_file="${exp_dir}/repair/repair_output/VAD_repaired_both_layers.pth"
+  [ -f "${pth_file}" ] || pth_file="${exp_dir}/repair_vad/repair_output/VAD_repaired_both_layers.pth"
+
   task_num=$((i + 1))
   echo "[${task_num}/${TOTAL_TASKS}] 评估: ${exp_name}"
   echo "  PTH文件: ${pth_file}"
