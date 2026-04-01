@@ -40,11 +40,11 @@ def batch_create_videos(input_dir, output_dir, fps, font_scale, text_color, text
     route_dirs = []
     for name in sorted(os.listdir(input_dir)):
         path = os.path.join(input_dir, name)
-        if os.path.isdir(path) and name.startswith("RouteScenario_") and is_route_dir(path):
+        if os.path.isdir(path) and is_route_dir(path):
             route_dirs.append(path)
 
     if not route_dirs:
-        raise RuntimeError(f"No valid RouteScenario_* folders found under: {input_dir}")
+        raise RuntimeError(f"No valid route folders found under: {input_dir}")
 
     os.makedirs(output_dir, exist_ok=True)
     for route_dir in route_dirs:
@@ -77,7 +77,7 @@ def parse_args():
     )
     parser.add_argument(
         "--input-dir",
-        help="Parent directory containing multiple RouteScenario_* folders for batch mode.",
+        help="Parent directory containing multiple route folders for batch mode.",
     )
     parser.add_argument(
         "--output-dir",
