@@ -83,6 +83,7 @@ def main(args):
     tree = ET.parse(routes_file)
     root = tree.getroot()
     routes = root.findall('route')
+    total_routes = len(routes)
     sorted_routes = sorted(routes, key=lambda x: x.get('town'))
     
     carla_path = os.environ["CARLA_ROOT"]
@@ -167,7 +168,7 @@ def main(args):
         Success_Res[scenario] = float(statis[0])/float(statis[1])
         Succ_Route_num += statis[0]
         Route_num += statis[1]
-    assert len(crash_route_list) == 220 - float(Route_num)
+    assert len(crash_route_list) == total_routes - float(Route_num)
     print(f"Mean:{Ability_Res['mean']}")
     print(f'Crashed Route num: {len(crash_route_list)}, Crashed Route ID: {crash_route_list}')
     print('Finished!')
