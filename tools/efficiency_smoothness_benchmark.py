@@ -240,7 +240,22 @@ def read_from_json(filepath, metric_dir=None):
     all_data = []
     driving_efficiency = []
     for record in data["_checkpoint"]["records"]:
-        filepath = os.path.join(metric_dir, record["save_name"], 'metric_info.json')
+        save_name = record["save_name"]
+        filepath = os.path.join(metric_dir, save_name, 'metric_info.json')
+        if not os.path.exists(filepath):
+            matched_dirs = []
+            for dirname in os.listdir(metric_dir):
+                dirpath = os.path.join(metric_dir, dirname)
+                if os.path.isdir(dirpath) and dirname.endswith(save_name):
+                    candidate = os.path.join(dirpath, 'metric_info.json')
+                    if os.path.exists(candidate):
+                        matched_dirs.append(candidate)
+            if len(matched_dirs) == 1:
+                filepath = matched_dirs[0]
+            elif len(matched_dirs) > 1:
+                raise RuntimeError(f"Multiple metric_info.json matches found for save_name={save_name}: {matched_dirs}")
+            else:
+                raise FileNotFoundError(f"metric_info.json not found for save_name={save_name} under metric_dir={metric_dir}")
         temp_dict = {}
         temp_dict["acceleration"] = []
         temp_dict["angular_velocity"] = []
