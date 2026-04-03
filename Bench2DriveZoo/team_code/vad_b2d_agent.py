@@ -92,7 +92,7 @@ class VadAgent(autonomous_agent.AutonomousAgent):
         if SAVE_PATH is not None:
             now = datetime.datetime.now()
             # string = pathlib.Path(os.environ['ROUTES']).stem + '_'
-            string += self.save_name
+            string = self.save_name
             self.save_path = pathlib.Path(os.environ['SAVE_PATH']) / string
             self.save_path.mkdir(parents=True, exist_ok=False)
             (self.save_path / 'rgb_front').mkdir()
