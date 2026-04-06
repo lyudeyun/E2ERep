@@ -20,6 +20,11 @@ import importlib
 import os
 import pkg_resources
 import sys
+try:
+    # Import torch before CARLA so CUDA can initialize in this process (torch agents / UniAD).
+    import torch  # noqa: F401
+except ImportError:
+    pass
 import carla
 import signal
 
@@ -202,7 +207,7 @@ class LeaderboardEvaluator(object):
         args.port = find_free_port(args.port)
         cmd1 = f"{os.path.join(self.carla_path, 'CarlaUE4.sh')} -RenderOffScreen -nosound -carla-rpc-port={args.port} -graphicsadapter={args.gpu_rank}"
         self.server = subprocess.Popen(cmd1, shell=True, preexec_fn=os.setsid)
-        print(cmd1, self.server.returncode, flush=True)
+        print(f"Starting CARLA server pid={self.server.pid}: {cmd1}", flush=True)
         atexit.register(os.killpg, self.server.pid, signal.SIGKILL)
         time.sleep(30)
             
@@ -498,7 +503,12 @@ class LeaderboardEvaluator(object):
             self.statistics_manager.validate_and_write_statistics(self.sensors_initialized, crashed)
         
         if crashed:
-            cmd2 = "ps -ef | grep '-graphicsadapter="+ str(args.gpu_rank) + "' | grep -v grep | awk '{print $2}' | xargs -r kill -9"
+            # Pattern starts with '-'; use 'grep -F --' so grep does not treat it as options.
+            cmd2 = (
+                "ps -ef | grep -F -- '-graphicsadapter="
+                + str(args.gpu_rank)
+                + "' | grep -v grep | awk '{print $2}' | xargs -r kill -9"
+            )
             server = subprocess.Popen(cmd2, shell=True, preexec_fn=os.setsid)
             atexit.register(os.killpg, server.pid, signal.SIGKILL)
 
