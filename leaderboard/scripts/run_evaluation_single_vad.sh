@@ -35,4 +35,13 @@ TM_PORT=$BASE_TM_PORT
 ROUTES="${BASE_ROUTES}.xml"
 CHECKPOINT_ENDPOINT="${BASE_CHECKPOINT_ENDPOINT}.json"
 export NOTIFY_EMAIL
-bash leaderboard/scripts/run_evaluation.sh $PORT $TM_PORT $IS_BENCH2DRIVE $ROUTES $TEAM_AGENT $TEAM_CONFIG $CHECKPOINT_ENDPOINT $SAVE_PATH $PLANNER_TYPE $GPU_RANK
+# Save full stdout/stderr next to checkpoint json (same basename, .log suffix)
+# Use "%.*" to strip the last extension, avoiding "xxx.json.log".
+LOG_FILE="${CHECKPOINT_ENDPOINT%.*}.log"
+mkdir -p "$(dirname "${LOG_FILE}")"
+
+bash leaderboard/scripts/run_evaluation.sh \
+  $PORT $TM_PORT $IS_BENCH2DRIVE $ROUTES $TEAM_AGENT $TEAM_CONFIG $CHECKPOINT_ENDPOINT $SAVE_PATH $PLANNER_TYPE $GPU_RANK \
+  2>&1 | tee -a "${LOG_FILE}"
+
+exit ${PIPESTATUS[0]}
