@@ -1,8 +1,8 @@
 #!/bin/bash
-# Repository root (script lives in leaderboard/scripts/)
+# Repository root (script lives in leaderboard/scripts/); used for default CARLA and PYTHONPATH
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
-# CARLA: prefer explicit CARLA_ROOT; else try Bench2DriveZoo-bundled CARLA under this repo
+# If CARLA_ROOT is unset, try Bench2DriveZoo-bundled CARLA first
 if [ -z "${CARLA_ROOT:-}" ]; then
   DEFAULT_CARLA="${REPO_ROOT}/Bench2DriveZoo/carla"
   if [ -f "${DEFAULT_CARLA}/CarlaUE4.sh" ] && [ -d "${DEFAULT_CARLA}/PythonAPI/carla/agents" ]; then
