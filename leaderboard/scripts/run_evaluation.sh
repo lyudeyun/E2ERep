@@ -15,6 +15,22 @@ if [ -z "${CARLA_ROOT:-}" ]; then
 fi
 
 export CARLA_SERVER=${CARLA_ROOT}/CarlaUE4.sh
+# Remove inherited CARLA PythonAPI / egg entries first.
+# Runtime evidence: import was crashing inside carla-0.9.15-py3.7...egg while this env uses Python 3.10.
+# Keep unrelated PYTHONPATH entries, but ensure only the current CARLA_ROOT paths are added back below.
+PYTHONPATH="$(python3 - <<'PY'
+import os
+parts = [p for p in os.environ.get("PYTHONPATH", "").split(":") if p]
+filtered = []
+for p in parts:
+    lp = p.lower()
+    if "/pythonapi" in lp or ("carla-" in lp and lp.endswith(".egg")):
+        continue
+    filtered.append(p)
+print(":".join(filtered))
+PY
+)"
+export PYTHONPATH
 export PYTHONPATH=$PYTHONPATH:${CARLA_ROOT}/PythonAPI
 export PYTHONPATH=$PYTHONPATH:${CARLA_ROOT}/PythonAPI/carla
 
