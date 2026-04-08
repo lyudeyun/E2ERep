@@ -1,6 +1,6 @@
 #!/bin/bash
-BASE_PORT=30000
-BASE_TM_PORT=50000
+BASE_PORT=30200
+BASE_TM_PORT=50200
 IS_BENCH2DRIVE=True
 BASE_ROUTES=leaderboard/data/bench2drive220
 TEAM_AGENT=Bench2DriveZoo/team_code/uniad_b2d_agent.py
@@ -42,6 +42,6 @@ mkdir -p "$(dirname "${LOG_FILE}")"
 
 bash leaderboard/scripts/run_evaluation.sh \
   $PORT $TM_PORT $IS_BENCH2DRIVE $ROUTES $TEAM_AGENT $TEAM_CONFIG $CHECKPOINT_ENDPOINT $SAVE_PATH $PLANNER_TYPE $GPU_RANK \
-  2>&1 | tee -a "${LOG_FILE}"
+  2>&1 | tee "${LOG_FILE}"
 
 exit ${PIPESTATUS[0]}

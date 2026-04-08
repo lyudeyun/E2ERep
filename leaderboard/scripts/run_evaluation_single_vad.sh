@@ -42,6 +42,6 @@ mkdir -p "$(dirname "${LOG_FILE}")"
 
 bash leaderboard/scripts/run_evaluation.sh \
   $PORT $TM_PORT $IS_BENCH2DRIVE $ROUTES $TEAM_AGENT $TEAM_CONFIG $CHECKPOINT_ENDPOINT $SAVE_PATH $PLANNER_TYPE $GPU_RANK \
-  2>&1 | tee -a "${LOG_FILE}"
+  2>&1 | tee "${LOG_FILE}"
 
 exit ${PIPESTATUS[0]}
