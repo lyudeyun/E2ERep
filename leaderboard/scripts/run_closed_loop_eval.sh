@@ -79,10 +79,51 @@ mkdir -p "$(dirname "${CHECKPOINT_ENDPOINT}")"
 mkdir -p "${SAVE_PATH}"
 
 export CARLA_SERVER="${CARLA_ROOT}/CarlaUE4.sh"
+# Remove inherited CARLA PythonAPI / egg entries first.
+# This avoids loading an ABI-incompatible egg such as py3.7 inside a Python 3.10 env.
+PYTHONPATH="$(python3 - <<'PY'
+import os
+parts = [p for p in os.environ.get("PYTHONPATH", "").split(":") if p]
+filtered = []
+for p in parts:
+    lp = p.lower()
+    if "/pythonapi" in lp or ("carla-" in lp and lp.endswith(".egg")):
+        continue
+    filtered.append(p)
+print(":".join(filtered))
+PY
+)"
+export PYTHONPATH
 export PYTHONPATH=$PYTHONPATH:"${CARLA_ROOT}/PythonAPI"
 export PYTHONPATH=$PYTHONPATH:"${CARLA_ROOT}/PythonAPI/carla"
-# Keep original egg path for compatibility (if present)
-export PYTHONPATH=$PYTHONPATH:"${CARLA_ROOT}/PythonAPI/carla/dist/carla-0.9.15-py3.7-linux-x86_64.egg"
+
+# CARLA .egg ABI must match the Python that runs leaderboard_evaluator.py.
+# Manual override: export CARLA_PY_EGG=/path/to/carla-0.9.15-py3.10-linux-x86_64.egg
+if [ -n "${CARLA_PY_EGG:-}" ] && [ -f "$CARLA_PY_EGG" ]; then
+  export PYTHONPATH=$PYTHONPATH:$CARLA_PY_EGG
+else
+  _PY="${PYTHON:-python}"
+  _MM="$(command -v "$_PY" >/dev/null 2>&1 && "$_PY" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || true)"
+  _MM="${_MM:-10}"
+  _DIST="$CARLA_ROOT/PythonAPI/carla/dist"
+  if [ "$_MM" = "3.8" ]; then
+    _EGG_MM="3.7"
+  else
+    _EGG_MM="$_MM"
+  fi
+  _TRY="$_DIST/carla-0.9.15-py${_EGG_MM}-linux-x86_64.egg"
+  if [ -f "$_TRY" ]; then
+    export PYTHONPATH=$PYTHONPATH:$_TRY
+  else
+    _FIRST="$(ls "$_DIST"/carla-*-py3.*-linux-x86_64.egg 2>/dev/null | head -1)"
+    if [ -n "$_FIRST" ] && [ -f "$_FIRST" ]; then
+      export PYTHONPATH=$PYTHONPATH:$_FIRST
+    else
+      echo "WARNING: No CARLA egg in $_DIST for Python ${_MM}; set CARLA_PY_EGG. Expected: $_TRY" >&2
+      export PYTHONPATH=$PYTHONPATH:$_TRY
+    fi
+  fi
+fi
 export PYTHONPATH=$PYTHONPATH:leaderboard
 export PYTHONPATH=$PYTHONPATH:leaderboard/team_code
 export PYTHONPATH=$PYTHONPATH:scenario_runner
