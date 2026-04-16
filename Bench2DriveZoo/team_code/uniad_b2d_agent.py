@@ -3,12 +3,13 @@ import json
 import datetime
 import pathlib
 import time
-import cv2
-import carla
-from collections import deque
 import math
+from collections import deque
 from collections import OrderedDict
+# Import torch before carla: on some Linux setups Carla's native libs load first and
+# break subsequent CUDA init in the same interpreter (torch.cuda.is_available() stays False).
 import torch
+import cv2
 import carla
 import numpy as np
 from PIL import Image
@@ -65,6 +66,14 @@ class UniadAgent(autonomous_agent.AutonomousAgent):
   
         self.model = build_model(cfg.model, train_cfg=cfg.get('train_cfg'), test_cfg=cfg.get('test_cfg'))
         checkpoint = load_checkpoint(self.model, self.ckpt_path, map_location='cpu', strict=True)
+        if not torch.cuda.is_available():
+            cv = os.environ.get("CUDA_VISIBLE_DEVICES", "<unset>")
+            raise RuntimeError(
+                "torch.cuda.is_available() is False before model.cuda(). "
+                f"CUDA_VISIBLE_DEVICES={cv!r}. "
+                "Use a GPU machine, fix drivers, and check: "
+                "CUDA_VISIBLE_DEVICES=0 python -c \"import torch; print(torch.cuda.is_available())\""
+            )
         self.model.cuda()
         self.model.eval()
         self.inference_only_pipeline = []
