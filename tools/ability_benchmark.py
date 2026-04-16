@@ -102,12 +102,18 @@ def main(args):
     sorted_routes = sorted(routes, key=lambda x: x.get('town'))
     
     carla_path = os.environ["CARLA_ROOT"]
-    cmd1 = f"{os.path.join(carla_path, 'CarlaUE4.sh')} -RenderOffScreen -nosound -carla-rpc-port={args.port}"
+    # Keep flags aligned with leaderboard/leaderboard_evaluator.py so headless Vulkan
+    # picks the same GPU as closed-loop runs (-graphicsadapter is often required).
+    cmd1 = (
+        f"{os.path.join(carla_path, 'CarlaUE4.sh')} -RenderOffScreen -nosound "
+        f"-carla-rpc-port={args.port} -graphicsadapter={args.gpu_rank}"
+    )
     server = subprocess.Popen(cmd1, shell=True, preexec_fn=os.setsid)
     atexit.register(cleanup_server, server)
     try:
         print(cmd1, server.returncode, flush=True)
-        time.sleep(10)
+        # CARLA cold start can exceed 10s; evaluator uses 30s before first RPC.
+        time.sleep(30)
         client = carla.Client(args.host, args.port)
         client.set_timeout(300)
         
@@ -198,6 +204,12 @@ if __name__=='__main__':
     argparser.add_argument('-r', '--result_file', nargs=None, default="", help='result json file')
     argparser.add_argument('-t', '--host', default='localhost', help='IP of the host server (default: localhost)')
     argparser.add_argument('-p', '--port', type=int, default=2000, help='carla rpc port')
+    argparser.add_argument(
+        '--gpu_rank',
+        type=int,
+        default=0,
+        help='UE4 -graphicsadapter index (default 0, same as leaderboard_evaluator)',
+    )
     args = argparser.parse_args()
     main(args)
     
