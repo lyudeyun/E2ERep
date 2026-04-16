@@ -1,19 +1,25 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-Visualize 6-command predicted trajectories and 1 GT trajectory per frame.
+Visualize predicted trajectories (e.g. VAD: six per-command trajectories, UniAD: one trajectory) and GT per frame.
 
-This script is intended to live at the same level as the `Bench2DriveZoo/` folder.
+Run from the repository root (the directory that contains ``mytools/`` and ``Bench2DriveZoo/``).
 
 Input JSON format (list of frames) is expected to contain:
-  - predictions: list with 6 elements, each is a (T,2) trajectory
+  - predictions: list of trajectories; length 6 (VAD-style) or 1 (UniAD-style), each (T,2)
   - ground_truth: (T,2) trajectory
-  - ego_fut_cmd_idx: int in [0..5] indicating the selected command (optional)
+  - ego_fut_cmd_idx: int in [0..5] indicating the selected motion command when there are six per-command trajectories (optional)
 
-Example:
-  conda run -n b2d_zoo python /home/deyun/git/B2DRepair/visualize_6cmd_trajs.py \
-    --input /home/deyun/git/B2DRepair/Bench2DriveZoo/data/infos/b2d_repair_collect_tiny_traj.json \
-    --output_dir /home/deyun/git/B2DRepair/trajectory_visualizations_6cmd
+Example (minimal — omit ``--output_dir`` to auto-name under repo root from ``len(predictions)``):
+
+  conda run -n b2d_zoo python mytools/visualize_openloop.py --input Bench2DriveZoo/data/infos/b2d_repair_collect_tiny_traj.json
+
+With lane map, other agents (GT boxes), and ``mytools/ego.png`` when data exists, add ``--scene`` (and optional ``--output_dir``).
+
+Parameter meanings and defaults: each flag is documented in ``main()`` via
+``parser.add_argument(..., help=...)`` (see around the ``ArgumentParser`` block), or run:
+
+  python mytools/visualize_openloop.py --help
 """
 
 import argparse
@@ -59,32 +65,13 @@ CMD_COLORS = [
     "#8c564b",  # brown
 ]
 
-def _scatter_traj_band(ax, xy, color="#1f77b4", score=1.0, dot_size=18, points_per_step=18, zorder=6, alpha=1.0):
-    """
-    MomAD-style trajectory rendering: a smooth band of points along the polyline.
-    xy: (T,2) absolute positions.
-    score: [0..1], used to fade towards white.
-    """
-    if xy is None:
-        return 0
-    pts = np.asarray(xy, dtype=float)
-    if pts.ndim != 2 or pts.shape[0] < 2 or pts.shape[1] < 2:
-        return 0
-    total_steps = (pts.shape[0] - 1) * int(points_per_step) + 1
-    # Interpolate piecewise linearly to densify
-    dense = np.zeros((total_steps, 2), dtype=float)
-    for i in range(total_steps - 1):
-        a = i // int(points_per_step)
-        b = min(a + 1, pts.shape[0] - 1)
-        t = (i / float(points_per_step)) - a
-        dense[i] = (1.0 - t) * pts[a, :2] + t * pts[b, :2]
-    dense[-1] = pts[-1, :2]
+fig_size = (16.0, 16.0)
+_VIZ_FONT_PT = 20.0
+# Upper-left metrics box and upper-right legend (axes/ticks stay _VIZ_FONT_PT).
+_CORNER_FONT_PT = 30.0
+# Shift ego icon/silhouette toward -forward (m) so the nose does not cover the first pred segment; tune if needed.
+_EGO_SHIFT_BACK_M = 0.35
 
-    # Fade to white by score (higher score = more saturated)
-    rgb = np.array(matplotlib.colors.to_rgb(color), dtype=float)
-    rgb = rgb * float(score) + (1.0 - float(score)) * np.ones_like(rgb)
-    ax.scatter(dense[:, 0], dense[:, 1], s=float(dot_size), c=[rgb], alpha=float(alpha), linewidths=0, zorder=zorder)
-    return int(dense.shape[0])
 
 def _prepend_origin_if_missing(xy, eps=1e-3):
     arr = np.asarray(xy, dtype=float)
@@ -96,20 +83,42 @@ def _prepend_origin_if_missing(xy, eps=1e-3):
     return np.concatenate([zero, arr[:, :2]], axis=0)
 
 
-def _apply_pretty_axes(ax, xlim, ylim):
-    ax.set_aspect("equal", "box")
-    if xlim is not None:
-        ax.set_xlim(float(xlim[0]), float(xlim[1]))
-    if ylim is not None:
-        ax.set_ylim(float(ylim[0]), float(ylim[1]))
-    ax.axis("off")
+def _resolve_repo_path(repo_root: Path, path_str: str) -> str:
+    """Absolute paths unchanged; relative paths are under ``repo_root`` (same rule as ``--output_dir``)."""
+    p = (path_str or "").strip()
+    if not p:
+        return ""
+    pt = Path(p).expanduser()
+    if pt.is_absolute():
+        return str(pt)
+    return str((repo_root / pt).resolve())
 
-    # Enlarge legend box in pretty mode (applied if legend exists)
-    leg = ax.get_legend()
-    if leg is not None:
-        frame = leg.get_frame()
-        frame.set_linewidth(1.2)
 
+def _default_b2d_infos_pkl_path(repo_root: Path) -> str:
+    for rel in (
+        "Bench2DriveZoo/data/infos/b2d_infos_val_partB_25clips.pkl",
+        "Bench2DriveZoo/data/infos/b2d_infos_val_partA_25clips.pkl",
+        "Bench2DriveZoo/data/infos/b2d_infos_val.pkl",
+    ):
+        cand = repo_root / rel
+        if cand.is_file():
+            return str(cand.resolve())
+    return ""
+
+
+def _default_map_infos_pkl_path(repo_root: Path) -> str:
+    cand = repo_root / "Bench2DriveZoo/data/infos/b2d_map_infos.pkl"
+    return str(cand.resolve()) if cand.is_file() else ""
+
+
+def _default_ego_icon_path() -> str:
+    """``mytools/ego.png`` or ``mytools/ego.jpg`` next to this script."""
+    mytools = Path(__file__).resolve().parent
+    for name in ("ego.png", "ego.jpg"):
+        cand = mytools / name
+        if cand.is_file():
+            return str(cand.resolve())
+    return ""
 
 
 def _safe_name(s):
@@ -146,12 +155,13 @@ def _box_corners_xy(cx, cy, length, width, yaw):
 
 def _resolve_ego_icon_path(icon_path):
     """
-    Resolve relative paths like ego.png: absolute path, then cwd, then this script's directory.
+    Resolve relative paths like ego.png: absolute path, then cwd, then this script's directory (``mytools/``).
     """
     p = Path(icon_path).expanduser()
     if p.is_file():
         return str(p.resolve())
-    for base in (Path.cwd(), Path(__file__).resolve().parent):
+    bases = [Path.cwd(), Path(__file__).resolve().parent]
+    for base in bases:
         cand = base / p
         if cand.is_file():
             return str(cand.resolve())
@@ -238,11 +248,20 @@ def _pad_icon_to_aspect(img, target_aspect_wh, pad_value=0.0):
     return np.pad(arr, pad, mode="constant", constant_values=0)
 
 
-def _draw_ego_car(ax, icon_path="", yaw=0.0, zorder=10, anchor="center", forward_axis="y"):
+def _draw_ego_car(
+    ax,
+    icon_path="",
+    yaw=0.0,
+    zorder=10,
+    anchor="center",
+    forward_axis="y",
+    along_shift_m=0.0,
+):
     """
     Draw the ego car at origin in LiDAR BEV frame (x forward, y left).
     - If icon_path is provided, render it via imshow with a fixed meter extent.
     - Otherwise, draw a simple car silhouette (rectangle + nose).
+    ``along_shift_m`` (m): move the drawn car toward -forward so traj near (0,0) stays visible (see ``_EGO_SHIFT_BACK_M``).
     """
     # Typical passenger car footprint (meters)
     length = 4.6
@@ -267,6 +286,10 @@ def _draw_ego_car(ax, icon_path="", yaw=0.0, zorder=10, anchor="center", forward
         else:
             ax0, ay0 = 0.0, 0.0
         extent = [-0.5 * width - ax0, 0.5 * width - ax0, -0.5 * length - ay0, 0.5 * length - ay0]
+        # Rearward along +y = decrease both y bounds by the same amount.
+        sh = float(along_shift_m)
+        extent[2] -= sh
+        extent[3] -= sh
         target_aspect_wh = float(width) / float(length)
     else:
         if anchor == "front":
@@ -276,6 +299,9 @@ def _draw_ego_car(ax, icon_path="", yaw=0.0, zorder=10, anchor="center", forward
         else:
             ax0, ay0 = 0.0, 0.0
         extent = [-0.5 * length - ax0, 0.5 * length - ax0, -0.5 * width - ay0, 0.5 * width - ay0]
+        sh = float(along_shift_m)
+        extent[0] -= sh
+        extent[1] -= sh
         target_aspect_wh = float(length) / float(width)
 
     icon_path = str(icon_path or "")
@@ -319,6 +345,14 @@ def _draw_ego_car(ax, icon_path="", yaw=0.0, zorder=10, anchor="center", forward
 
     body_xy = body @ rot.T - np.array([ax0, ay0], dtype=float)
     tri_xy = tri @ rot.T - np.array([ax0, ay0], dtype=float)
+    sh = float(along_shift_m)
+    if sh != 0.0:
+        if forward_axis == "y":
+            body_xy[:, 1] -= sh
+            tri_xy[:, 1] -= sh
+        else:
+            body_xy[:, 0] -= sh
+            tri_xy[:, 0] -= sh
 
     body_patch = mpatches.Polygon(body_xy, closed=True, facecolor="#111111", edgecolor="#111111", linewidth=1.2, zorder=int(zorder))
     nose_patch = mpatches.Polygon(tri_xy, closed=True, facecolor="#111111", edgecolor="#111111", linewidth=1.2, zorder=int(zorder))
@@ -451,17 +485,23 @@ def _load_infos_pkl(pkl_path):
 
 def _build_info_index(infos):
     """
-    Build index for quick lookup: (folder, frame_idx) -> info dict
+    Build index for quick lookup: (token, frame_idx) -> info dict.
+    Keys include ``folder`` and ``scene_token`` (when present) so baseline JSON can match either field.
     """
     idx = {}
     for it in infos:
         if not isinstance(it, dict):
             continue
-        folder = it.get("folder", None)
         frame_idx = it.get("frame_idx", None)
-        if folder is None or frame_idx is None:
+        if frame_idx is None:
             continue
-        idx[(str(folder), int(frame_idx))] = it
+        fi = int(frame_idx)
+        folder = it.get("folder", None)
+        if folder is not None:
+            idx[(str(folder), fi)] = it
+        st = it.get("scene_token", None)
+        if st is not None:
+            idx[(str(st), fi)] = it
     return idx
 
 
@@ -556,7 +596,7 @@ def _draw_map_polylines_bev(
         return 0
     n = 0
 
-    # In pretty mode, prefer *sampled* polylines (MomAD-like clean look).
+    # When pretty=True, prefer sampled polylines only (sparser map).
     keys = [("lane_sample_points", "#7a7a7a", 2.4 if pretty else 0.9)]
     if not pretty:
         keys = [
@@ -617,83 +657,12 @@ def _draw_map_polylines_bev(
                     )
     return n
 
-def compute_global_limits(
-    frames,
-    only_valid=False,
-    pad_ratio=0.08,
-    min_range=5.0,
-    info_index=None,
-    include_boxes=False,
-):
-    """Compute global x/y limits across all frames so every saved figure shares the same scale."""
-    xs = []
-    ys = []
-
-    for frame in frames:
-        if only_valid and not frame.get("fut_valid_flag", False):
-            continue
-
-        preds = frame.get("predictions", []) or []
-        gt = frame.get("ground_truth", []) or []
-
-        for cmd_idx in range(6):
-            traj = preds[cmd_idx] if cmd_idx < len(preds) else []
-            if not traj:
-                continue
-            arr = np.asarray(traj, dtype=float)
-            xs.append(arr[:, 0])
-            ys.append(arr[:, 1])
-
-        if gt:
-            gt_arr = np.asarray(gt, dtype=float)
-            xs.append(gt_arr[:, 0])
-            ys.append(gt_arr[:, 1])
-
-        if include_boxes and info_index is not None:
-            token = frame.get("folder", None) or frame.get("scene_token", None)
-            frame_idx = frame.get("frame_idx", None)
-            if token is not None and frame_idx is not None:
-                info = info_index.get((str(token), int(frame_idx)), None)
-                if isinstance(info, dict) and info.get("gt_boxes", None) is not None:
-                    b = np.asarray(info["gt_boxes"], dtype=float)
-                    if b.ndim == 2 and b.shape[0] > 0 and b.shape[1] >= 2:
-                        xs.append(b[:, 0])
-                        ys.append(b[:, 1])
-
-    # Fallback: if nothing valid, keep a default symmetric window around origin
-    if not xs or not ys:
-        half = min_range
-        return (-half, half), (-half, half)
-
-    x = np.concatenate(xs, axis=0)
-    y = np.concatenate(ys, axis=0)
-    xmin = float(np.min(x))
-    xmax = float(np.max(x))
-    ymin = float(np.min(y))
-    ymax = float(np.max(y))
-
-    # Add padding; also ensure a minimum visible range
-    xr = max(xmax - xmin, min_range)
-    yr = max(ymax - ymin, min_range)
-    pad_x = xr * pad_ratio
-    pad_y = yr * pad_ratio
-
-    xmid = 0.5 * (xmin + xmax)
-    ymid = 0.5 * (ymin + ymax)
-
-    half_x = 0.5 * xr + pad_x
-    half_y = 0.5 * yr + pad_y
-
-    return (xmid - half_x, xmid + half_x), (ymid - half_y, ymid + half_y)
-
 
 def visualize_one_frame(
     frame_data,
     frame_global_idx,
     output_dir,
     draw_title=True,
-    xlim=None,
-    ylim=None,
     info_index=None,
     draw_boxes=False,
     occ_root="",
@@ -701,12 +670,8 @@ def visualize_one_frame(
     occ_reduce="max",
     map_infos=None,
     draw_map=False,
-    style="default",
-    pretty_range=40.0,
-    map_draw_trigger_volumes=False,
+    view_m=40.0,
     compare_frame_data=None,
-    primary_name="Base",
-    compare_name="Repaired",
     ego_icon="",
     ego_anchor="center",
     ego_forward_axis="y",
@@ -717,15 +682,21 @@ def visualize_one_frame(
     predictions_b = (compare_frame_data or {}).get("predictions", []) if compare_frame_data else []
     ego_fut_cmd_idx_b = (compare_frame_data or {}).get("ego_fut_cmd_idx", -1) if compare_frame_data else -1
 
-    is_pretty = str(style).lower() in ["momad", "pretty", "clean"]
-    fig_size = (20, 20) if is_pretty else (10, 10)
+    view_half = float(view_m) if view_m else 40.0
     fig, ax = plt.subplots(figsize=fig_size)
 
-    # Current pose origin: LiDAR BEV frame (same as VAD gt_boxes / ego_fut in b2d_infos & collect JSON)
-    _draw_ego_car(ax, icon_path=ego_icon, yaw=0.0, zorder=10, anchor=ego_anchor, forward_axis=ego_forward_axis)
-    if not is_pretty:
-        # Keep legend entry for ego in non-pretty mode (pretty mode uses custom legend items)
-        ax.plot([], [], "ko", markersize=10, label="Ego (Current)")
+    # Current pose origin: LiDAR BEV frame (same as VAD gt_boxes / ego_fut in b2d_infos & collect JSON).
+    # zorder below pred lines so traj near origin is drawn on top; slight rear shift keeps the icon off the first segment.
+    _draw_ego_car(
+        ax,
+        icon_path=ego_icon,
+        yaw=0.0,
+        zorder=3,
+        anchor=ego_anchor,
+        forward_axis=ego_forward_axis,
+        along_shift_m=_EGO_SHIFT_BACK_M,
+    )
+    ax.plot([], [], "ko", markersize=10, label="Ego (Current)")
 
     # Optional: draw occupancy background from VAD occ cache (not roads; dynamic obstacles/ped)
     if draw_occ:
@@ -747,16 +718,15 @@ def visualize_one_frame(
                 if not town_name:
                     town_name = info.get("town_name", "") or ""
         if town_name and town_name in map_infos and world2lidar is not None:
-            # Make map visually stronger in pretty mode
             _draw_map_polylines_bev(
                 ax,
                 map_infos[town_name],
                 world2lidar,
-                xlim=(-50, 50),
-                ylim=(-50, 50),
-                alpha=0.75 if is_pretty else 0.55,
-                pretty=is_pretty,
-                draw_trigger_volumes=(map_draw_trigger_volumes if is_pretty else True),
+                xlim=(-view_half, view_half),
+                ylim=(-view_half, view_half),
+                alpha=0.55,
+                pretty=False,
+                draw_trigger_volumes=True,
             )
 
     # Optional: draw surrounding agents' GT boxes
@@ -769,9 +739,6 @@ def visualize_one_frame(
             _draw_gt_boxes(ax, info)
 
     # Predictions (6 commands)
-    legend_items = []
-    any_pred_drawn = False
-    any_selected_drawn = False
     for cmd_idx in range(6):
         pred_traj = predictions[cmd_idx] if cmd_idx < len(predictions) else []
         if not pred_traj:
@@ -780,55 +747,35 @@ def visualize_one_frame(
         pred = _prepend_origin_if_missing(pred_traj)
         is_selected = cmd_idx == ego_fut_cmd_idx
         lw = 3.2 if is_selected else 2.0
-        alpha = 1.0 if is_selected else (0.75 if is_pretty else 0.55)
-        ls = "-" if is_selected else ("-" if is_pretty else "--")
+        alpha = 1.0 if is_selected else 0.55
+        ls = "-" if is_selected else "--"
 
         label = CMD_LABELS[cmd_idx] if cmd_idx < len(CMD_LABELS) else "Cmd {}".format(cmd_idx)
         if is_selected:
             label = "{} (Selected)".format(label)
 
         c = CMD_COLORS[cmd_idx % len(CMD_COLORS)]
-        if is_pretty:
-            # Render as a point band; selected command more saturated & slightly larger
-            score = 1.0 if is_selected else 0.85
-            _scatter_traj_band(
-                ax,
-                pred[:, :2],
-                color=c,
-                score=score,
-                dot_size=18 if is_selected else 12,
-                points_per_step=18,
-                zorder=7 if is_selected else 6,
-                alpha=1.0 if is_selected else 0.95,
-            )
-            any_pred_drawn = True
-            cmd_name = CMD_LABELS[cmd_idx] if cmd_idx < len(CMD_LABELS) else "Cmd {}".format(cmd_idx)
-            if is_selected:
-                cmd_name = "{} (Selected)".format(cmd_name)
-                any_selected_drawn = True
-            legend_items.append((f"{primary_name}: {cmd_name}", c))
-        else:
-            ax.plot(
-                pred[:, 0],
-                pred[:, 1],
-                color=c,
-                linewidth=lw,
-                alpha=alpha,
-                linestyle=ls,
-                marker="o",
-                markersize=4,
-                label=label,
-                zorder=5,
-            )
-            ax.plot(
-                pred[-1, 0],
-                pred[-1, 1],
-                color=c,
-                marker="s",
-                markersize=8,
-                alpha=alpha,
-                zorder=6,
-            )
+        ax.plot(
+            pred[:, 0],
+            pred[:, 1],
+            color=c,
+            linewidth=lw,
+            alpha=alpha,
+            linestyle=ls,
+            marker="o",
+            markersize=4,
+            label=label,
+            zorder=5,
+        )
+        ax.plot(
+            pred[-1, 0],
+            pred[-1, 1],
+            color=c,
+            marker="s",
+            markersize=8,
+            alpha=alpha,
+            zorder=6,
+        )
 
     # Compare predictions (2nd JSON) overlay
     if compare_frame_data is not None:
@@ -839,51 +786,31 @@ def visualize_one_frame(
             pred_b = _prepend_origin_if_missing(pred_traj_b)
             is_selected_b = cmd_idx == ego_fut_cmd_idx_b
             c = CMD_COLORS[cmd_idx % len(CMD_COLORS)]
-            if is_pretty:
-                _scatter_traj_band(
-                    ax,
-                    pred_b[:, :2],
-                    color=c,
-                    score=1.0 if is_selected_b else 0.80,
-                    dot_size=14 if is_selected_b else 9,
-                    points_per_step=18,
-                    zorder=9 if is_selected_b else 8,
-                    alpha=0.90 if is_selected_b else 0.70,
-                )
-                cmd_name = CMD_LABELS[cmd_idx] if cmd_idx < len(CMD_LABELS) else "Cmd {}".format(cmd_idx)
-                if is_selected_b:
-                    cmd_name = "{} (Selected)".format(cmd_name)
-                legend_items.append((f"{compare_name}: {cmd_name}", c))
-            else:
-                ax.plot(
-                    pred_b[:, 0],
-                    pred_b[:, 1],
-                    color=c,
-                    linewidth=2.2 if is_selected_b else 1.6,
-                    alpha=0.85 if is_selected_b else 0.45,
-                    linestyle=":" if is_selected_b else "--",
-                    zorder=4,
-                )
+            ax.plot(
+                pred_b[:, 0],
+                pred_b[:, 1],
+                color=c,
+                linewidth=2.2 if is_selected_b else 1.6,
+                alpha=0.85 if is_selected_b else 0.45,
+                linestyle=":" if is_selected_b else "--",
+                zorder=4,
+            )
 
     # Ground truth (single)
     if ground_truth:
         gt = _prepend_origin_if_missing(ground_truth)
-        if is_pretty:
-            _scatter_traj_band(ax, gt[:, :2], color="#111111", score=1.0, dot_size=18, points_per_step=18, zorder=9, alpha=1.0)
-            legend_items.append(("GT", "#111111"))
-        else:
-            ax.plot(
-                gt[:, 0],
-                gt[:, 1],
-                color="black",
-                linewidth=3,
-                linestyle="-",
-                marker="x",
-                markersize=6,
-                label="Ground Truth",
-                zorder=9,
-            )
-            ax.plot(gt[-1, 0], gt[-1, 1], color="black", marker="D", markersize=8, zorder=9)
+        ax.plot(
+            gt[:, 0],
+            gt[:, 1],
+            color="black",
+            linewidth=3,
+            linestyle="-",
+            marker="x",
+            markersize=6,
+            label="Ground Truth",
+            zorder=9,
+        )
+        ax.plot(gt[-1, 0], gt[-1, 1], color="black", marker="D", markersize=8, zorder=9)
 
     # Metrics text (optional)
     metrics = []
@@ -897,112 +824,95 @@ def visualize_one_frame(
             metrics.append("{}: {}".format(name, frame_data[k]))
     if metrics:
         ax.text(
-            0.02 if not is_pretty else 0.02,
-            0.98 if not is_pretty else 0.98,
+            0.02,
+            0.98,
             "\n".join(metrics),
             transform=ax.transAxes,
-            fontsize=11 if not is_pretty else 32,
+            fontsize=_CORNER_FONT_PT,
             verticalalignment="top",
             bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.8),
         )
 
-    if not is_pretty:
-        ax.set_aspect("equal", "box")
-        ax.grid(True, alpha=0.25)
-        ax.axhline(y=0, color="gray", linestyle="--", linewidth=0.6, alpha=0.4)
-        ax.axvline(x=0, color="gray", linestyle="--", linewidth=0.6, alpha=0.4)
-        ax.set_xlabel("X (m)")
-        ax.set_ylabel("Y (m)")
+    ax.set_aspect("equal", "box")
+    ax.grid(True, alpha=0.25)
+    ax.axhline(y=0, color="gray", linestyle="--", linewidth=0.6, alpha=0.4)
+    ax.axvline(x=0, color="gray", linestyle="--", linewidth=0.6, alpha=0.4)
+    ax.set_xlabel("X (m)", fontsize=_VIZ_FONT_PT)
+    ax.set_ylabel("Y (m)", fontsize=_VIZ_FONT_PT)
+    ax.tick_params(axis="both", labelsize=_VIZ_FONT_PT)
 
-    if draw_title and (not is_pretty):
+    if draw_title:
         scene_token = frame_data.get("scene_token", "")
         frame_idx = frame_data.get("frame_idx", frame_global_idx)
         title = "Frame {} | ego_fut_cmd_idx={} | {}".format(frame_idx, ego_fut_cmd_idx, scene_token)
-        ax.set_title(title, fontsize=11)
+        ax.set_title(title, fontsize=_VIZ_FONT_PT)
 
-    # Legend is mandatory.
-    if not is_pretty:
-        ax.legend(loc="upper right", fontsize=9, framealpha=0.9)
-    else:
-        # Build a small, clean legend for pretty mode
-        from matplotlib.lines import Line2D
+    ax.legend(loc="upper right", fontsize=_CORNER_FONT_PT, framealpha=0.9)
 
-        handles = []
-        labels = []
-        seen = set()
-        for name, col in legend_items:
-            if name in seen:
-                continue
-            seen.add(name)
-            handles.append(Line2D([0], [0], color=col, linewidth=6))
-            labels.append(name)
-        if handles:
-            ax.legend(handles, labels, loc="upper right", fontsize=32, framealpha=0.88)
-
-    # Fixed scale across frames
-    if is_pretty:
-        # MomAD uses a fixed local window; using global limits makes the road look tiny.
-        pr = float(pretty_range) if pretty_range else 40.0
-        _apply_pretty_axes(ax, (-pr, pr), (-pr, pr))
-    else:
-        if xlim is not None:
-            ax.set_xlim(xlim[0], xlim[1])
-        if ylim is not None:
-            ax.set_ylim(ylim[0], ylim[1])
+    ax.set_xlim(-view_half, view_half)
+    ax.set_ylim(-view_half, view_half)
 
     # Save
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     scene_token = _safe_name(frame_data.get("scene_token", "scene"))
     frame_idx = int(frame_data.get("frame_idx", frame_global_idx))
-    out_ext = "jpg" if is_pretty else "png"
-    out_path = os.path.join(output_dir, "{}_frame_{:05d}.{}".format(scene_token, frame_idx, out_ext))
-    if is_pretty:
-        plt.subplots_adjust(top=1, bottom=0, right=1, left=0, hspace=0, wspace=0)
-        plt.margins(0, 0)
-        plt.savefig(out_path, dpi=150)
-    else:
-        plt.tight_layout()
-        plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    out_path = os.path.join(output_dir, "{}_frame_{:05d}.png".format(scene_token, frame_idx))
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
 
 
+def infer_default_output_dir(frames, repo_root: Path) -> Path:
+    """Pick ``trajectory_visualizations_*`` under repo root from the first non-empty predictions list."""
+    n = 0
+    for fr in frames:
+        if not isinstance(fr, dict):
+            continue
+        preds = fr.get("predictions")
+        if isinstance(preds, list) and len(preds) > 0:
+            n = len(preds)
+            break
+    if n == 6:
+        tag = "vad_6traj"
+    elif n == 1:
+        tag = "uniad_1traj"
+    elif n > 0:
+        tag = f"preds_{n}"
+    else:
+        tag = "openloop"
+    return repo_root / f"trajectory_visualizations_{tag}"
+
+
 def main():
-    repo_root = Path(__file__).resolve().parent
+    script_dir = Path(__file__).resolve().parent
+    repo_root = script_dir.parent
     b2d_root = repo_root / "Bench2DriveZoo"
 
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--input",
         default=str(b2d_root / "data/infos/b2d_repair_collect_tiny_traj.json"),
+        help="Open-loop JSON (list of frames): predictions + ground_truth per frame.",
     )
     parser.add_argument(
         "--output_dir",
-        default=str(repo_root / "trajectory_visualizations_6cmd"),
-    )
-    parser.add_argument(
-        "--style",
-        default="momad",
-        choices=["default", "momad", "pretty", "clean"],
-        help="Visualization style. Default momad: large canvas, axis-off, point-band trajectories (简洁). "
-        "Use default for legacy matplotlib axes/grid style.",
+        default="",
+        help="Output directory. If omitted or empty, auto: <repo>/trajectory_visualizations_vad_6traj "
+        "(len(predictions)==6), ..._uniad_1traj (len==1), or ..._preds_<N>. "
+        "Relative paths are resolved under the repository root (parent of mytools/); absolute paths unchanged.",
     )
     parser.add_argument(
         "--compare_input",
         default="",
         help="Optional: 2nd open-loop JSON to overlay (e.g. repaired model). Matched by (scene_token, frame_idx).",
     )
-    parser.add_argument("--primary_name", default="Base", help="Legend prefix for primary input (default: Base).")
-    parser.add_argument("--compare_name", default="Repaired", help="Legend prefix for compare_input (default: Repaired).")
     parser.add_argument(
-        "--pretty_range",
+        "--view-m",
         type=float,
-        default=40.0,
-        help="When --style momad/pretty/clean: use fixed BEV window [-R,R] meters (default 40).",
-    )
-    parser.add_argument(
-        "--map_draw_trigger_volumes",
-        action="store_true",
-        help="When --style momad/pretty/clean and --draw_map: also draw trigger volume polylines (default off).",
+        default=20.0,
+        metavar="R",
+        help="Symmetric BEV: x and y axis limits [-R, R] meters (default R=40). "
+        "Also used to clip map polylines when --draw_map.",
     )
     parser.add_argument(
         "--occ_root",
@@ -1021,29 +931,37 @@ def main():
         help="How to reduce occ over time dimension: max (default) or t0.",
     )
     parser.add_argument(
+        "--scene",
+        action="store_true",
+        help="Draw lane map + surrounding agent GT boxes. Uses --b2d_infos_pkl / --map_infos_pkl when set; "
+        "otherwise tries Bench2DriveZoo/data/infos/ defaults if those files exist.",
+    )
+    parser.add_argument(
         "--b2d_infos_pkl",
         default="",
-        help="Optional: path to b2d_infos_*.pkl to draw gt_boxes/gt_names by matching (scene_token, frame_idx).",
+        help="b2d_infos_*.pkl: GT boxes, world2lidar for map. Relative paths are under repo root. "
+        "If empty and --scene (or --draw_map / --draw_gt_boxes), a default partB/partA pkl is used when present.",
     )
     parser.add_argument(
         "--draw_gt_boxes",
         action="store_true",
-        help="Draw GT boxes from b2d_infos_pkl (matches scene_token+frame_idx).",
+        help="Draw GT boxes from b2d_infos_pkl (matches scene_token or folder + frame_idx).",
     )
     parser.add_argument(
         "--map_infos_pkl",
         default="",
-        help="Optional: path to b2d_map_infos.pkl for map polylines (world coords).",
+        help="b2d_map_infos.pkl (world lane / trigger polylines). Relative paths are under repo root. "
+        "If empty with --scene/--draw_map, uses Bench2DriveZoo/data/infos/b2d_map_infos.pkl when present.",
     )
     parser.add_argument(
         "--draw_map",
         action="store_true",
-        help="Draw map polylines in LiDAR BEV using world2lidar (LIDAR_TOP) from b2d_infos_pkl, same as B2D_vad_dataset.",
+        help="Draw map polylines in LiDAR BEV (needs b2d_infos_pkl for world2lidar). Implied by --scene.",
     )
     parser.add_argument(
         "--ego_icon",
         default="",
-        help="Optional: path to an ego car icon image (png/jpg). If empty, draw a vector car silhouette.",
+        help="Ego car icon (png/jpg). Relative paths are under repo root. If empty, uses mytools/ego.png or mytools/ego.jpg when present; else vector silhouette.",
     )
     parser.add_argument(
         "--ego_anchor",
@@ -1069,6 +987,29 @@ def main():
         help="Optional: only visualize frames with this frame_idx (use with --only_scene_token for a single frame).",
     )
     args = parser.parse_args()
+
+    draw_map = bool(args.draw_map or args.scene)
+    draw_gt_boxes = bool(args.draw_gt_boxes or args.scene)
+
+    b2d_infos_pkl = _resolve_repo_path(repo_root, args.b2d_infos_pkl) if (args.b2d_infos_pkl or "").strip() else ""
+    if (draw_map or draw_gt_boxes) and not b2d_infos_pkl:
+        b2d_infos_pkl = _default_b2d_infos_pkl_path(repo_root)
+        if b2d_infos_pkl:
+            print("Using default b2d_infos_pkl: {}".format(b2d_infos_pkl))
+
+    map_infos_pkl = _resolve_repo_path(repo_root, args.map_infos_pkl) if (args.map_infos_pkl or "").strip() else ""
+    if draw_map and not map_infos_pkl:
+        map_infos_pkl = _default_map_infos_pkl_path(repo_root)
+        if map_infos_pkl:
+            print("Using default map_infos_pkl: {}".format(map_infos_pkl))
+
+    ego_raw = (args.ego_icon or "").strip()
+    if ego_raw:
+        ego_icon_final = _resolve_repo_path(repo_root, ego_raw)
+    else:
+        ego_icon_final = _default_ego_icon_path()
+        if ego_icon_final:
+            print("Using default ego icon: {}".format(ego_icon_final))
 
     print("Loading: {}".format(args.input))
     with open(args.input, "r") as f:
@@ -1117,37 +1058,36 @@ def main():
 
     n = len(data)
     print("Loaded {} frames".format(n))
-    print("Saving to: {}".format(args.output_dir))
+    out_raw = (args.output_dir or "").strip()
+    if out_raw:
+        p = Path(out_raw).expanduser()
+        output_dir = p if p.is_absolute() else (repo_root / p)
+    else:
+        output_dir = infer_default_output_dir(data, repo_root)
+        print("Auto output_dir from len(predictions): {}".format(output_dir))
+    print("Saving to: {}".format(output_dir))
 
     info_index = None
-    if args.draw_gt_boxes:
-        if not args.b2d_infos_pkl:
-            print("WARNING: --draw_gt_boxes set but --b2d_infos_pkl is empty; skip.")
-        else:
-            print("Loading b2d infos pkl for gt_boxes: {}".format(args.b2d_infos_pkl))
-            infos = _load_infos_pkl(args.b2d_infos_pkl)
-            info_index = _build_info_index(infos)
-            print("Built info index (gt_boxes): {} entries".format(len(info_index)))
+    if b2d_infos_pkl and (draw_map or draw_gt_boxes):
+        print("Loading b2d infos pkl: {}".format(b2d_infos_pkl))
+        infos = _load_infos_pkl(b2d_infos_pkl)
+        info_index = _build_info_index(infos)
+        print("Built info index: {} keys".format(len(info_index)))
+    elif draw_map or draw_gt_boxes:
+        print(
+            "WARNING: map / GT boxes requested but no b2d_infos_*.pkl found (--b2d_infos_pkl or default under Bench2DriveZoo/data/infos/)."
+        )
 
     map_infos = None
-    if args.draw_map:
-        if not args.map_infos_pkl:
-            print("WARNING: --draw_map set but --map_infos_pkl is empty; skip map polylines.")
+    if draw_map:
+        if not map_infos_pkl:
+            print("WARNING: --draw_map / --scene but no b2d_map_infos.pkl; skip map polylines.")
         else:
-            print("Loading map infos pkl: {}".format(args.map_infos_pkl))
-            map_infos = _load_map_infos_pkl(args.map_infos_pkl)
+            print("Loading map infos pkl: {}".format(map_infos_pkl))
+            map_infos = _load_map_infos_pkl(map_infos_pkl)
             print("Loaded map infos: {} towns".format(len(map_infos)))
 
-    # Compute global limits once so all frames share the same scale/view.
-    # If we draw GT boxes, include them in view limits too (otherwise boxes may fall outside).
-    limit_frames = [fr for _, fr in filtered] if filtered else data
-    xlim, ylim = compute_global_limits(
-        limit_frames,
-        info_index=info_index,
-        include_boxes=bool(args.draw_gt_boxes),
-        min_range=20.0,
-    )
-    print("Using fixed limits: xlim={} ylim={}".format(xlim, ylim))
+    print("Symmetric BEV: ±{:.1f} m (--view-m)".format(float(args.view_m)))
 
     count = 0
     loop_items = filtered if filtered else [(i, data[i]) for i in range(n)]
@@ -1163,23 +1103,17 @@ def main():
         visualize_one_frame(
             frame,
             i,
-            args.output_dir,
-            xlim=xlim,
-            ylim=ylim,
+            output_dir,
             info_index=info_index,
-            draw_boxes=bool(args.draw_gt_boxes),
+            draw_boxes=draw_gt_boxes,
             occ_root=args.occ_root,
             draw_occ=args.draw_occ,
             occ_reduce=args.occ_reduce,
             map_infos=map_infos,
-            draw_map=args.draw_map,
-            style=args.style,
-            pretty_range=args.pretty_range,
-            map_draw_trigger_volumes=args.map_draw_trigger_volumes,
+            draw_map=draw_map,
+            view_m=args.view_m,
             compare_frame_data=frame_b,
-            primary_name=args.primary_name,
-            compare_name=args.compare_name,
-            ego_icon=args.ego_icon,
+            ego_icon=ego_icon_final,
             ego_anchor=args.ego_anchor,
             ego_forward_axis=args.ego_forward_axis,
         )
