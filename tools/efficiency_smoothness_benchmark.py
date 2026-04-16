@@ -297,5 +297,8 @@ if __name__=='__main__':
     comfort_res = []
     for record in all_data:
         comfort_res.append(seg_compute_comfort_metric(**record))
-    print(f'Driving Efficiency={sum(driving_efficiency_list) / len(driving_efficiency_list)}')
-    print(f'Driving Smoothness={sum(comfort_res)/len(comfort_res)}')
+    eff_mean = sum(driving_efficiency_list) / len(driving_efficiency_list)
+    smooth_mean = sum(comfort_res) / len(comfort_res)
+    # Efficiency values are already parsed as 0–100 from "%" strings; smoothness is a 0–1 ratio.
+    print(f'Driving Efficiency={eff_mean:.2f}%')
+    print(f'Driving Smoothness={100.0 * smooth_mean:.2f}%')
