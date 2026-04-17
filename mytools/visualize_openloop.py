@@ -10,9 +10,55 @@ Input JSON format (list of frames) is expected to contain:
   - ground_truth: (T,2) trajectory
   - ego_fut_cmd_idx: int in [0..5] indicating the selected motion command when there are six per-command trajectories (optional)
 
-Example (minimal — omit ``--output_dir`` to auto-name under repo root from ``len(predictions)``):
+Example (minimal — ``--model`` is required; omit ``--output_dir`` to auto-name under repo root from ``len(predictions)``):
 
-  conda run -n b2d_zoo python mytools/visualize_openloop.py --input Bench2DriveZoo/data/infos/b2d_repair_collect_tiny_traj.json
+  conda run -n b2d_zoo python mytools/visualize_openloop.py --input Bench2DriveZoo/data/infos/b2d_repair_collect_tiny_traj.json --model vad --vad-pred-draw all
+
+Example (VAD baseline + ``--compare_input`` UniAD JSON, ``--vad-pred-draw selected``, one frame; run from repository root).
+Below, ``\\`` at line end is one backslash in this file (bash line continuation)::
+
+  python mytools/visualize_openloop.py \\
+    --input baseline/VAD/vad_base_baseline_b2d_infos_val_partB_25clips.json \\
+    --compare_input /home/deyun/git/B2DRepair/B2DRepair_Data/vad_base_Arachne_v2_DE_results/middle/VAD_base_REP_VAL_t3s_Arachne_v2_DE_w52_p104_i50_es5_CONT2_9/open_loop_eval/vad_base_rep_val.json \\
+    --model vad \\
+    --vad-pred-draw selected \\
+    --scene \\
+    --output_dir vad_base_cmp_ori_rep \\
+    --view-forward-center-offset-m 10 \\
+    --only_scene_token 'v1/OppositeVehicleTakingPriority_Town04_Route214_Weather6' \\
+    --only_frame_idx 20
+  
+  python mytools/visualize_openloop.py \\
+    --input baseline/UniAD/uniad_base_baseline_b2d_infos_val_partB_25clips.json \\
+    --compare_input /home/deyun/git/B2DRepair/B2DRepair_Data/uniad_base_Arachne_v2_DE_results/large/UniAD_base_REP_VAL_t3s_Arachne_v2_DE_w26_p52_i50_es5_CONT2_7/open_loop_eval/uniad_base_rep_val.json \\
+    --model uniad \\
+    --scene \\
+    --output_dir uniad_base_cmp_ori_rep \\
+    --view-forward-center-offset-m 10 \\
+    --only_scene_token 'v1/OppositeVehicleTakingPriority_Town04_Route214_Weather6' \\
+    --only_frame_idx 20
+
+Example (UniAD only, no ``--compare_input``; no ``--vad-pred-draw``). Replace ``--input`` with your UniAD open-loop JSON path::
+
+  python mytools/visualize_openloop.py \\
+    --input B2DRepair_Data/uniad_base_Arachne_v2_DE_results/large/UniAD_base_REP_VAL_t3s_Arachne_v2_DE_w26_p52_i50_es5_CONT2_7/open_loop_eval/uniad_base_rep_val.json \\
+    --model uniad \\
+    --scene \\
+    --output_dir viz_openloop_smoke \\
+    --only_scene_token 'v1/OppositeVehicleTakingPriority_Town04_Route214_Weather6' \\
+    --only_frame_idx 0
+
+Example (VAD only, no ``--compare_input``; ``--vad-pred-draw`` is still required for ``--model vad``)::
+
+  python mytools/visualize_openloop.py \\
+    --input baseline/VAD/vad_base_baseline_b2d_infos_val_partB_25clips.json \\
+    --model vad \\
+    --vad-pred-draw all \\
+    --scene \\
+    --output_dir viz_openloop_smoke \\
+    --view-forward-center-offset-m 10 \\
+    --only_scene_token 'v1/OppositeVehicleTakingPriority_Town04_Route214_Weather6' \\
+    --only_frame_idx 0
 
 With lane map, other agents (GT boxes), and ``mytools/ego.png`` when data exists, add ``--scene`` (and optional ``--output_dir``).
 
@@ -34,6 +80,7 @@ matplotlib.use("Agg")  # headless
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib import patches as mpatches
+from matplotlib.lines import Line2D
 
 try:
     import pickle  # stdlib
@@ -65,12 +112,36 @@ CMD_COLORS = [
     "#8c564b",  # brown
 ]
 
-fig_size = (16.0, 16.0)
-_VIZ_FONT_PT = 20.0
-# Upper-left metrics box and upper-right legend (axes/ticks stay _VIZ_FONT_PT).
-_CORNER_FONT_PT = 30.0
+# With --compare_input and a matched frame: primary preds vs compare preds (fixed colors, uniform width).
+COMPARE_TRAJ_LW = 3.0
+COMPARE_TRAJ_ORIG_COLOR = "#d62728"  # red
+COMPARE_TRAJ_REP_COLOR = "#2ca02c"  # green
+
+
+def _rgb_hex_blended_on_white(hex_color, alpha):
+    """
+    Opaque RGB that matches how ``ax.plot(..., color=hex, alpha=a)`` looks on a white axes background.
+    Legend handles often draw fully opaque strokes; without this, swatches look darker than the plot line.
+    """
+    h = str(hex_color or "").strip().lstrip("#")
+    if len(h) != 6 or not all(c in "0123456789abcdefABCDEF" for c in h):
+        return str(hex_color)
+    a = max(0.0, min(1.0, float(alpha)))
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    r2 = int(round(r * a + 255.0 * (1.0 - a)))
+    g2 = int(round(g * a + 255.0 * (1.0 - a)))
+    b2 = int(round(b * a + 255.0 * (1.0 - a)))
+    return "#{:02x}{:02x}{:02x}".format(r2, g2, b2)
+
+
+FIG_SIZE = (16.0, 16.0)
+VIZ_FONT_PT = 30.0
+# Upper-left metrics box and upper-right legend (axes/ticks stay VIZ_FONT_PT).
+CORNER_FONT_PT = 30.0
+# Extra space above axes between title and plot (points); avoids overlap with top y tick labels.
+TITLE_PAD_PT = 22.0
 # Shift ego icon/silhouette toward -forward (m) so the nose does not cover the first pred segment; tune if needed.
-_EGO_SHIFT_BACK_M = 0.35
+EGO_SHIFT_BACK_M = 2.0
 
 
 def _prepend_origin_if_missing(xy, eps=1e-3):
@@ -121,10 +192,105 @@ def _default_ego_icon_path() -> str:
     return ""
 
 
+def _bev_axis_limits(view_half, forward_axis, forward_center_offset_m=0.0):
+    """
+    Build (xlim, ylim) for BEV. Lateral and forward each span ``2 * view_half`` (same scale).
+
+    ``forward_center_offset_m`` slides the forward-axis limits along +forward while ego stays at 0:
+    forward range is ``[-view_half + offset, view_half + offset]``.
+    Example: ``view_half=40``, ``offset=+30`` → 70 m ahead, 10 m behind on that axis.
+    ``offset=0`` → symmetric ±view_half (same as the old balance=0.5 behavior).
+    """
+    vh = float(view_half)
+    off = float(forward_center_offset_m)
+    fa = str(forward_axis or "y").lower()
+    lo = -vh + off
+    hi = vh + off
+    if fa == "x":
+        return (lo, hi), (-vh, vh)
+    return (-vh, vh), (lo, hi)
+
+
 def _safe_name(s):
     s = str(s)
     s = re.sub(r"[^A-Za-z0-9._-]+", "_", s)
     return s[:180]
+
+
+def _strip_scene_version_prefix_for_display(s):
+    """Remove leading ``v1/``, ``v2/``, … from scene_token for titles only (paths / keys unchanged)."""
+    return re.sub(r"^[vV][0-9]+/", "", str(s or ""))
+
+
+MODEL_CHOICES = frozenset(("uniad", "vad"))
+
+
+def _normalize_model(s):
+    m = str(s or "").strip().lower()
+    if m not in MODEL_CHOICES:
+        raise ValueError(
+            "model must be one of {{{}}} (pass --model)".format(", ".join(sorted(MODEL_CHOICES)))
+        )
+    return m
+
+
+def _recompute_vad_l2_metrics(frame, model_norm):
+    """与 ``baseline/convert_uniad_to_vad_metrics.py::compute_vad_l2`` 相同；VAD 多分支用 ``ego_fut_cmd_idx``。"""
+    if not isinstance(frame, dict):
+        return None
+    preds = frame.get("predictions") or []
+    gt = frame.get("ground_truth")
+    mask = frame.get("ego_fut_masks")
+    if not preds or gt is None or mask is None:
+        return None
+    if model_norm == "vad" and len(preds) > 1:
+        try:
+            ei = int(frame.get("ego_fut_cmd_idx", -1))
+        except (TypeError, ValueError):
+            ei = -1
+        pred_src = preds[ei] if 0 <= ei < len(preds) else preds[0]
+    else:
+        pred_src = preds[0]
+
+    pred_traj = np.asarray(pred_src, dtype=np.float32)[:6, :2]
+    gt_traj = np.asarray(gt, dtype=np.float32)
+    if gt_traj.ndim == 3:
+        gt_traj = gt_traj[0, :6, :2]
+    else:
+        gt_traj = gt_traj[:6, :2]
+    gt_mask = np.asarray(mask, dtype=np.float32)
+    if gt_mask.ndim == 3:
+        gt_mask = gt_mask[0, :6, :2]
+    elif gt_mask.ndim == 2:
+        gt_mask = gt_mask[:6, :2] if gt_mask.shape[1] >= 2 else gt_mask[:6, None]
+    elif gt_mask.ndim == 1:
+        gt_mask = gt_mask[:6, None]
+    else:
+        return None
+
+    pred_traj[:, 0] = -pred_traj[:, 0]
+    gt_traj[:, 0] = -gt_traj[:, 0]
+    l2 = np.sqrt((((pred_traj - gt_traj) ** 2) * gt_mask).sum(axis=-1))
+    return {
+        "plan_L2_1s": float(np.mean(l2[:2])),
+        "plan_L2_2s": float(np.mean(l2[:4])),
+        "plan_L2_3s": float(np.mean(l2[:6])),
+    }
+
+
+def _pred_cmd_indices(model_norm, vad_pred_draw, predictions, ego_fut_cmd_idx):
+    """
+    Which ``predictions[k]`` indices to plot. UniAD: always try 0..5 (only non-empty are drawn).
+    VAD: ``vad_pred_draw`` is ``all`` or ``selected`` (``ego_fut_cmd_idx`` for the latter).
+    """
+    ei = int(ego_fut_cmd_idx) if ego_fut_cmd_idx is not None else -1
+    if model_norm == "uniad":
+        return list(range(6))
+    if vad_pred_draw == "all":
+        return list(range(6))
+    if vad_pred_draw == "selected" and 0 <= ei < 6 and ei < len(predictions):
+        return [ei]
+    return list(range(6))
 
 
 def _box_corners_xy(cx, cy, length, width, yaw):
@@ -261,7 +427,7 @@ def _draw_ego_car(
     Draw the ego car at origin in LiDAR BEV frame (x forward, y left).
     - If icon_path is provided, render it via imshow with a fixed meter extent.
     - Otherwise, draw a simple car silhouette (rectangle + nose).
-    ``along_shift_m`` (m): move the drawn car toward -forward so traj near (0,0) stays visible (see ``_EGO_SHIFT_BACK_M``).
+    ``along_shift_m`` (m): move the drawn car toward -forward so traj near (0,0) stays visible (see ``EGO_SHIFT_BACK_M``).
     """
     # Typical passenger car footprint (meters)
     length = 4.6
@@ -671,11 +837,17 @@ def visualize_one_frame(
     map_infos=None,
     draw_map=False,
     view_m=40.0,
+    forward_center_offset_m=0.0,
     compare_frame_data=None,
+    compare_legend=False,
     ego_icon="",
     ego_anchor="center",
     ego_forward_axis="y",
+    model=None,
+    vad_pred_draw=None,
 ):
+    mnorm = _normalize_model(model)
+    use_compact_compare_legend = bool(compare_legend) and compare_frame_data is not None
     predictions = frame_data.get("predictions", [])
     ground_truth = frame_data.get("ground_truth", [])
     ego_fut_cmd_idx = frame_data.get("ego_fut_cmd_idx", -1)
@@ -683,7 +855,8 @@ def visualize_one_frame(
     ego_fut_cmd_idx_b = (compare_frame_data or {}).get("ego_fut_cmd_idx", -1) if compare_frame_data else -1
 
     view_half = float(view_m) if view_m else 40.0
-    fig, ax = plt.subplots(figsize=fig_size)
+    xlim, ylim = _bev_axis_limits(view_half, ego_forward_axis, forward_center_offset_m)
+    fig, ax = plt.subplots(figsize=FIG_SIZE)
 
     # Current pose origin: LiDAR BEV frame (same as VAD gt_boxes / ego_fut in b2d_infos & collect JSON).
     # zorder below pred lines so traj near origin is drawn on top; slight rear shift keeps the icon off the first segment.
@@ -694,10 +867,8 @@ def visualize_one_frame(
         zorder=3,
         anchor=ego_anchor,
         forward_axis=ego_forward_axis,
-        along_shift_m=_EGO_SHIFT_BACK_M,
+        along_shift_m=EGO_SHIFT_BACK_M,
     )
-    ax.plot([], [], "ko", markersize=10, label="Ego (Current)")
-
     # Optional: draw occupancy background from VAD occ cache (not roads; dynamic obstacles/ped)
     if draw_occ:
         scene_token = frame_data.get("scene_token", "")
@@ -722,8 +893,8 @@ def visualize_one_frame(
                 ax,
                 map_infos[town_name],
                 world2lidar,
-                xlim=(-view_half, view_half),
-                ylim=(-view_half, view_half),
+                xlim=xlim,
+                ylim=ylim,
                 alpha=0.55,
                 pretty=False,
                 draw_trigger_volumes=True,
@@ -738,23 +909,33 @@ def visualize_one_frame(
             info = info_index.get((str(token), int(frame_idx)), None)
             _draw_gt_boxes(ax, info)
 
-    # Predictions (6 commands)
-    for cmd_idx in range(6):
+    pred_cmd_indices = _pred_cmd_indices(mnorm, vad_pred_draw, predictions, ego_fut_cmd_idx)
+    hide_selected_suffix = mnorm == "vad" and vad_pred_draw == "selected" and len(pred_cmd_indices) == 1
+
+    # Predictions (VAD: six or one per --vad-pred-draw; UniAD: slots 0..5, typically only 0 filled)
+    for cmd_idx in pred_cmd_indices:
         pred_traj = predictions[cmd_idx] if cmd_idx < len(predictions) else []
         if not pred_traj:
             continue
 
         pred = _prepend_origin_if_missing(pred_traj)
         is_selected = cmd_idx == ego_fut_cmd_idx
-        lw = 3.2 if is_selected else 2.0
-        alpha = 1.0 if is_selected else 0.55
-        ls = "-" if is_selected else "--"
+        if use_compact_compare_legend:
+            lw = COMPARE_TRAJ_LW
+            alpha = 1.0 if is_selected else 0.55
+            ls = "-" if is_selected else "--"
+            c = COMPARE_TRAJ_ORIG_COLOR
+        else:
+            lw = 3.2 if is_selected else 2.0
+            alpha = 1.0 if is_selected else 0.55
+            ls = "-" if is_selected else "--"
+            c = CMD_COLORS[cmd_idx % len(CMD_COLORS)]
 
         label = CMD_LABELS[cmd_idx] if cmd_idx < len(CMD_LABELS) else "Cmd {}".format(cmd_idx)
-        if is_selected:
+        if is_selected and not hide_selected_suffix:
             label = "{} (Selected)".format(label)
-
-        c = CMD_COLORS[cmd_idx % len(CMD_COLORS)]
+        if use_compact_compare_legend:
+            label = "_nolegend_"
         ax.plot(
             pred[:, 0],
             pred[:, 1],
@@ -779,13 +960,19 @@ def visualize_one_frame(
 
     # Compare predictions (2nd JSON) overlay
     if compare_frame_data is not None:
-        for cmd_idx in range(6):
+        compare_cmd_indices = _pred_cmd_indices(mnorm, vad_pred_draw, predictions_b, ego_fut_cmd_idx_b)
+        for cmd_idx in compare_cmd_indices:
             pred_traj_b = predictions_b[cmd_idx] if cmd_idx < len(predictions_b) else []
             if not pred_traj_b:
                 continue
             pred_b = _prepend_origin_if_missing(pred_traj_b)
             is_selected_b = cmd_idx == ego_fut_cmd_idx_b
-            c = CMD_COLORS[cmd_idx % len(CMD_COLORS)]
+            if use_compact_compare_legend:
+                c = COMPARE_TRAJ_REP_COLOR
+                lw_b = COMPARE_TRAJ_LW
+            else:
+                c = CMD_COLORS[cmd_idx % len(CMD_COLORS)]
+                lw_b = 2.2 if is_selected_b else 1.6
             ax.plot(
                 pred_b[:, 0],
                 pred_b[:, 1],
@@ -796,39 +983,86 @@ def visualize_one_frame(
                 zorder=4,
             )
 
-    # Ground truth (single)
-    if ground_truth:
+    # Ground truth (single): only draw when fut_valid_flag is true (per-frame validity in B2D collect / baseline JSON).
+    if ground_truth and bool(frame_data.get("fut_valid_flag", False)):
         gt = _prepend_origin_if_missing(ground_truth)
         ax.plot(
             gt[:, 0],
             gt[:, 1],
             color="black",
-            linewidth=3,
+            linewidth=COMPARE_TRAJ_LW if use_compact_compare_legend else 3,
             linestyle="-",
             marker="x",
             markersize=6,
-            label="Ground Truth",
+            label=("_nolegend_" if use_compact_compare_legend else "Ground Truth"),
             zorder=9,
         )
         ax.plot(gt[-1, 0], gt[-1, 1], color="black", marker="D", markersize=8, zorder=9)
 
-    # Metrics text (optional)
+    # Metrics：``--model uniad`` 且本帧 ``fut_valid_flag`` 为 True 时，用 VAD 口径从轨迹重算 L2（与 convert_uniad_to_vad_metrics 一致）；
+    # ``--model vad`` 始终 VAD 口径；UniAD 且 valid=False 时只读 JSON。
     metrics = []
-    for k, name in [
-        ("plan_L2_1s", "L2 (1s)"),
-        ("plan_L2_2s", "L2 (2s)"),
-        ("plan_L2_3s", "L2 (3s)"),
-        ("fut_valid_flag", "Valid"),
-    ]:
-        if k in frame_data:
-            metrics.append("{}: {}".format(name, frame_data[k]))
+
+    def _l2_dict_for_corner(fr):
+        if not isinstance(fr, dict):
+            return None, "none"
+        if mnorm == "uniad" and not bool(fr.get("fut_valid_flag", False)):
+            return None, "uniad_file"
+        if mnorm == "uniad":
+            v = _recompute_vad_l2_metrics(fr, "uniad")
+            if v is not None:
+                return v, "vad_rule"
+            return None, "uniad_recalc_fail"
+        v = _recompute_vad_l2_metrics(fr, mnorm)
+        if v is not None:
+            return v, "vad_rule"
+        return None, "vad_file"
+
+    def _fmt_l2_val(v):
+        if v is None:
+            return "n/a"
+        try:
+            return "{:.4f}".format(float(v))
+        except (TypeError, ValueError):
+            return str(v)
+
+    def _l2_error_3s_line(title, fr):
+        if not isinstance(fr, dict):
+            return "{}: n/a".format(title)
+        d, tag = _l2_dict_for_corner(fr)
+        j = fr.get("plan_L2_3s")
+        if tag == "vad_rule" and d is not None:
+            return "{}: {}".format(title, _fmt_l2_val(d["plan_L2_3s"]))
+        if j is not None:
+            return "{}: {}".format(title, _fmt_l2_val(j))
+        return "{}: n/a".format(title)
+
+    if use_compact_compare_legend:
+        metrics.append(_l2_error_3s_line("L2 error (3s) original", frame_data))
+        metrics.append(_l2_error_3s_line("L2 error (3s) repaired", compare_frame_data))
+    else:
+        d, tag = _l2_dict_for_corner(frame_data)
+        for k, label in (
+            ("plan_L2_1s", "L2 (1s)"),
+            ("plan_L2_2s", "L2 (2s)"),
+            ("plan_L2_3s", "L2 (3s)"),
+        ):
+            j = frame_data.get(k)
+            if tag == "vad_rule" and d is not None:
+                metrics.append("{}: {}".format(label, _fmt_l2_val(d[k])))
+            elif j is not None:
+                metrics.append("{}: {}".format(label, _fmt_l2_val(j)))
+            else:
+                metrics.append("{}: n/a".format(label))
+        if "fut_valid_flag" in frame_data:
+            metrics.append("Valid: {}".format(frame_data["fut_valid_flag"]))
     if metrics:
         ax.text(
             0.02,
             0.98,
             "\n".join(metrics),
             transform=ax.transAxes,
-            fontsize=_CORNER_FONT_PT,
+            fontsize=CORNER_FONT_PT,
             verticalalignment="top",
             bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.8),
         )
@@ -837,20 +1071,81 @@ def visualize_one_frame(
     ax.grid(True, alpha=0.25)
     ax.axhline(y=0, color="gray", linestyle="--", linewidth=0.6, alpha=0.4)
     ax.axvline(x=0, color="gray", linestyle="--", linewidth=0.6, alpha=0.4)
-    ax.set_xlabel("X (m)", fontsize=_VIZ_FONT_PT)
-    ax.set_ylabel("Y (m)", fontsize=_VIZ_FONT_PT)
-    ax.tick_params(axis="both", labelsize=_VIZ_FONT_PT)
+    ax.set_xlabel("X (m)", fontsize=VIZ_FONT_PT)
+    ax.set_ylabel("Y (m)", fontsize=VIZ_FONT_PT)
+    ax.tick_params(axis="both", labelsize=VIZ_FONT_PT)
 
     if draw_title:
-        scene_token = frame_data.get("scene_token", "")
+        scene_token = _strip_scene_version_prefix_for_display(frame_data.get("scene_token", ""))
         frame_idx = frame_data.get("frame_idx", frame_global_idx)
-        title = "Frame {} | ego_fut_cmd_idx={} | {}".format(frame_idx, ego_fut_cmd_idx, scene_token)
-        ax.set_title(title, fontsize=_VIZ_FONT_PT)
+        title = "Frame {} | {}".format(frame_idx, scene_token)
+        ax.set_title(title, fontsize=VIZ_FONT_PT, pad=TITLE_PAD_PT)
 
-    ax.legend(loc="upper right", fontsize=_CORNER_FONT_PT, framealpha=0.9)
+    if use_compact_compare_legend:
+        eib = int(ego_fut_cmd_idx_b) if ego_fut_cmd_idx_b is not None else -1
+        orig_c = COMPARE_TRAJ_ORIG_COLOR
+        orig_ls = "-"
+        orig_lw = COMPARE_TRAJ_LW
+        orig_a = 1.0
+        rep_c, rep_ls, rep_lw, rep_a = "#555555", "--", COMPARE_TRAJ_LW, 1.0
+        if compare_frame_data is not None:
+            for cmd_idx in _pred_cmd_indices(mnorm, vad_pred_draw, predictions_b, ego_fut_cmd_idx_b):
+                pred_traj_b = predictions_b[cmd_idx] if cmd_idx < len(predictions_b) else []
+                if not pred_traj_b:
+                    continue
+                sel_b = cmd_idx == eib
+                rep_c = COMPARE_TRAJ_REP_COLOR
+                rep_ls = ":" if sel_b else "--"
+                rep_lw = COMPARE_TRAJ_LW
+                rep_a = 0.85 if sel_b else 0.45
+                break
+        orig_leg_color = _rgb_hex_blended_on_white(orig_c, orig_a)
+        rep_leg_color = _rgb_hex_blended_on_white(rep_c, rep_a)
+        leg_handles = []
+        if ground_truth and bool(frame_data.get("fut_valid_flag", False)):
+            leg_handles.append(
+                Line2D(
+                    [0],
+                    [0],
+                    color="black",
+                    linestyle="-",
+                    linewidth=COMPARE_TRAJ_LW,
+                    marker="x",
+                    markersize=9,
+                    label="Ground Truth",
+                )
+            )
+        leg_handles.append(
+            Line2D(
+                [0],
+                [0],
+                color=orig_leg_color,
+                linestyle=orig_ls,
+                linewidth=orig_lw,
+                label="Original",
+            ),
+        )
+        leg_handles.append(
+            Line2D(
+                [0],
+                [0],
+                color=rep_leg_color,
+                linestyle=rep_ls,
+                linewidth=rep_lw,
+                label="Repaired",
+            ),
+        )
+        ax.legend(
+            handles=leg_handles,
+            loc="upper right",
+            fontsize=CORNER_FONT_PT,
+            framealpha=0.9,
+        )
+    else:
+        ax.legend(loc="upper right", fontsize=CORNER_FONT_PT, framealpha=0.9)
 
-    ax.set_xlim(-view_half, view_half)
-    ax.set_ylim(-view_half, view_half)
+    ax.set_xlim(xlim[0], xlim[1])
+    ax.set_ylim(ylim[0], ylim[1])
 
     # Save
     Path(output_dir).mkdir(parents=True, exist_ok=True)
@@ -904,15 +1199,26 @@ def main():
     parser.add_argument(
         "--compare_input",
         default="",
-        help="Optional: 2nd open-loop JSON to overlay (e.g. repaired model). Matched by (scene_token, frame_idx).",
+        help="Optional: 2nd open-loop JSON to overlay (e.g. repaired model). Matched by (scene_token, frame_idx). "
+        "When set and a frame matches: primary preds are drawn red, compare preds green (same linewidth as GT); "
+        "legend shows Original / Ground Truth (if fut_valid_flag) / Repaired.",
     )
     parser.add_argument(
         "--view-m",
         type=float,
-        default=20.0,
+        default=15.0,
         metavar="R",
-        help="Symmetric BEV: x and y axis limits [-R, R] meters (default R=40). "
-        "Also used to clip map polylines when --draw_map.",
+        help="BEV half-span (m): lateral axis is always [-R,R]; forward axis is [-R,+R] plus "
+        "--view-forward-center-offset-m (total length still 2R). Used to clip map polylines when --draw_map.",
+    )
+    parser.add_argument(
+        "--view-forward-center-offset-m",
+        type=float,
+        default=0.0,
+        metavar="D",
+        help="Slide the forward-axis window (see --ego-forward-axis) by D meters toward +forward: limits become "
+        "[-R+D, R+D] so ego at 0 still sees more ahead and less behind when D>0. Example: R=40 and D=+30 → "
+        "70 m ahead, 10 m behind. D=0 centers the window on the ego.",
     )
     parser.add_argument(
         "--occ_root",
@@ -976,6 +1282,20 @@ def main():
         help="Which plot axis is considered 'forward' for ego icon placement. Default y (up).",
     )
     parser.add_argument(
+        "--model",
+        required=True,
+        choices=["uniad", "vad"],
+        help="Required. uniad: single-trajectory JSON. vad: six-way JSON; use --vad-pred-draw to plot all six or only the selected command.",
+    )
+    parser.add_argument(
+        "--vad-pred-draw",
+        default=None,
+        choices=["all", "selected"],
+        metavar="MODE",
+        help="Only for --model vad: draw all six motion priors (all) or only predictions[ego_fut_cmd_idx] (selected). "
+        "Required with --model vad; must be omitted with --model uniad. Invalid ego_fut_cmd_idx falls back to all six.",
+    )
+    parser.add_argument(
         "--only_scene_token",
         default="",
         help="Optional: only visualize frames with this exact scene_token (or folder), e.g. v1/SignalizedJunctionLeftTurn_Town04_Route173_Weather26.",
@@ -987,6 +1307,12 @@ def main():
         help="Optional: only visualize frames with this frame_idx (use with --only_scene_token for a single frame).",
     )
     args = parser.parse_args()
+
+    if args.model == "vad":
+        if args.vad_pred_draw is None:
+            parser.error("--vad-pred-draw is required when --model vad (all or selected)")
+    elif args.vad_pred_draw is not None:
+        parser.error("--vad-pred-draw is only valid with --model vad")
 
     draw_map = bool(args.draw_map or args.scene)
     draw_gt_boxes = bool(args.draw_gt_boxes or args.scene)
@@ -1087,10 +1413,24 @@ def main():
             map_infos = _load_map_infos_pkl(map_infos_pkl)
             print("Loaded map infos: {} towns".format(len(map_infos)))
 
-    print("Symmetric BEV: ±{:.1f} m (--view-m)".format(float(args.view_m)))
+    vh = float(args.view_m)
+    d = float(args.view_forward_center_offset_m)
+    print(
+        "BEV: lateral ±{:.1f} m; forward axis [{:.1f}, {:.1f}] m (--view-forward-center-offset-m={:+.1f})".format(
+            vh,
+            -vh + d,
+            vh + d,
+            d,
+        )
+    )
+    mnorm = _normalize_model(args.model)
+    print("Open-loop JSON: --model {}".format(mnorm))
+    if mnorm == "vad":
+        print("VAD: --vad-pred-draw {}".format(args.vad_pred_draw))
 
     count = 0
     loop_items = filtered if filtered else [(i, data[i]) for i in range(n)]
+    compare_legend = bool((args.compare_input or "").strip())
     for i, frame in loop_items:
 
         frame_b = None
@@ -1112,10 +1452,14 @@ def main():
             map_infos=map_infos,
             draw_map=draw_map,
             view_m=args.view_m,
+            forward_center_offset_m=args.view_forward_center_offset_m,
             compare_frame_data=frame_b,
+            compare_legend=compare_legend,
             ego_icon=ego_icon_final,
             ego_anchor=args.ego_anchor,
             ego_forward_axis=args.ego_forward_axis,
+            model=mnorm,
+            vad_pred_draw=args.vad_pred_draw,
         )
         count += 1
         if count == 1 or count % 50 == 0:
