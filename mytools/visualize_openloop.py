@@ -116,6 +116,9 @@ CMD_COLORS = [
 COMPARE_TRAJ_LW = 3.0
 COMPARE_TRAJ_ORIG_COLOR = "#d62728"  # red
 COMPARE_TRAJ_REP_COLOR = "#2ca02c"  # green
+# ``--compare_input`` 紧凑图例：Original 红虚线，Repaired 绿实线
+COMPARE_ORIG_LINESTYLE = "--"
+COMPARE_REPAIR_LINESTYLE = "-"
 
 
 def _rgb_hex_blended_on_white(hex_color, alpha):
@@ -910,6 +913,9 @@ def visualize_one_frame(
             _draw_gt_boxes(ax, info)
 
     pred_cmd_indices = _pred_cmd_indices(mnorm, vad_pred_draw, predictions, ego_fut_cmd_idx)
+    # Compare + UniAD: 只画 ``predictions[0]``，避免 ``ego_fut_cmd_idx`` 非 0 时把唯一轨迹画成虚线且与图例不符
+    if use_compact_compare_legend and mnorm == "uniad" and predictions:
+        pred_cmd_indices = [0] if predictions[0] else []
     hide_selected_suffix = mnorm == "vad" and vad_pred_draw == "selected" and len(pred_cmd_indices) == 1
 
     # Predictions (VAD: six or one per --vad-pred-draw; UniAD: slots 0..5, typically only 0 filled)
@@ -920,10 +926,12 @@ def visualize_one_frame(
 
         pred = _prepend_origin_if_missing(pred_traj)
         is_selected = cmd_idx == ego_fut_cmd_idx
+        if use_compact_compare_legend and mnorm == "uniad":
+            is_selected = True
         if use_compact_compare_legend:
             lw = COMPARE_TRAJ_LW
             alpha = 1.0 if is_selected else 0.55
-            ls = "-" if is_selected else "--"
+            ls = COMPARE_ORIG_LINESTYLE
             c = COMPARE_TRAJ_ORIG_COLOR
         else:
             lw = 3.2 if is_selected else 2.0
@@ -961,26 +969,49 @@ def visualize_one_frame(
     # Compare predictions (2nd JSON) overlay
     if compare_frame_data is not None:
         compare_cmd_indices = _pred_cmd_indices(mnorm, vad_pred_draw, predictions_b, ego_fut_cmd_idx_b)
+        if use_compact_compare_legend and mnorm == "uniad" and predictions_b:
+            compare_cmd_indices = [0] if predictions_b[0] else []
         for cmd_idx in compare_cmd_indices:
             pred_traj_b = predictions_b[cmd_idx] if cmd_idx < len(predictions_b) else []
             if not pred_traj_b:
                 continue
             pred_b = _prepend_origin_if_missing(pred_traj_b)
             is_selected_b = cmd_idx == ego_fut_cmd_idx_b
+            if use_compact_compare_legend and mnorm == "uniad":
+                is_selected_b = True
             if use_compact_compare_legend:
                 c = COMPARE_TRAJ_REP_COLOR
                 lw_b = COMPARE_TRAJ_LW
+                ls_rep = COMPARE_REPAIR_LINESTYLE
+                alpha_b = 0.85 if is_selected_b else 0.45
             else:
                 c = CMD_COLORS[cmd_idx % len(CMD_COLORS)]
                 lw_b = 2.2 if is_selected_b else 1.6
+                ls_rep = ":" if is_selected_b else "--"
+                alpha_b = 0.85 if is_selected_b else 0.45
+            _me_b = True
+            if pred_b.shape[0] > 1 and float(np.hypot(pred_b[0, 0], pred_b[0, 1])) <= 1e-3:
+                _me_b = slice(1, None)
             ax.plot(
                 pred_b[:, 0],
                 pred_b[:, 1],
                 color=c,
-                linewidth=2.2 if is_selected_b else 1.6,
-                alpha=0.85 if is_selected_b else 0.45,
-                linestyle=":" if is_selected_b else "--",
+                linewidth=lw_b,
+                alpha=alpha_b,
+                linestyle=ls_rep,
+                marker="o",
+                markersize=4,
+                markevery=_me_b,
                 zorder=4,
+            )
+            ax.plot(
+                pred_b[-1, 0],
+                pred_b[-1, 1],
+                color=c,
+                marker="s",
+                markersize=8,
+                alpha=alpha_b,
+                zorder=5,
             )
 
     # Ground truth (single): only draw when fut_valid_flag is true (per-frame validity in B2D collect / baseline JSON).
@@ -1082,23 +1113,14 @@ def visualize_one_frame(
         ax.set_title(title, fontsize=VIZ_FONT_PT, pad=TITLE_PAD_PT)
 
     if use_compact_compare_legend:
-        eib = int(ego_fut_cmd_idx_b) if ego_fut_cmd_idx_b is not None else -1
         orig_c = COMPARE_TRAJ_ORIG_COLOR
-        orig_ls = "-"
+        orig_ls = COMPARE_ORIG_LINESTYLE
         orig_lw = COMPARE_TRAJ_LW
         orig_a = 1.0
-        rep_c, rep_ls, rep_lw, rep_a = "#555555", "--", COMPARE_TRAJ_LW, 1.0
-        if compare_frame_data is not None:
-            for cmd_idx in _pred_cmd_indices(mnorm, vad_pred_draw, predictions_b, ego_fut_cmd_idx_b):
-                pred_traj_b = predictions_b[cmd_idx] if cmd_idx < len(predictions_b) else []
-                if not pred_traj_b:
-                    continue
-                sel_b = cmd_idx == eib
-                rep_c = COMPARE_TRAJ_REP_COLOR
-                rep_ls = ":" if sel_b else "--"
-                rep_lw = COMPARE_TRAJ_LW
-                rep_a = 0.85 if sel_b else 0.45
-                break
+        rep_c = COMPARE_TRAJ_REP_COLOR
+        rep_lw = COMPARE_TRAJ_LW
+        rep_ls = COMPARE_REPAIR_LINESTYLE
+        rep_a = 0.85
         orig_leg_color = _rgb_hex_blended_on_white(orig_c, orig_a)
         rep_leg_color = _rgb_hex_blended_on_white(rep_c, rep_a)
         leg_handles = []
@@ -1122,6 +1144,8 @@ def visualize_one_frame(
                 color=orig_leg_color,
                 linestyle=orig_ls,
                 linewidth=orig_lw,
+                marker="o",
+                markersize=7,
                 label="Original",
             ),
         )
@@ -1132,6 +1156,8 @@ def visualize_one_frame(
                 color=rep_leg_color,
                 linestyle=rep_ls,
                 linewidth=rep_lw,
+                marker="o",
+                markersize=7,
                 label="Repaired",
             ),
         )
