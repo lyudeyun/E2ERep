@@ -106,6 +106,36 @@ def count_collision_frames_vad_rule(json_path):
     except Exception as e:
         return None
 
+def count_vad_collision_from_json(json_path):
+    """
+    VAD open-loop JSON 直接统计碰撞（不做均值换算）。
+
+    Returns:
+      (valid_frames, collision_frames, collision_events)
+        - valid_frames: fut_valid_flag == True 的帧数
+        - collision_frames: 有效帧且 plan_obj_box_col_3s > 0 的帧数（每帧至多算 1 次）
+        - collision_events: sum(plan_obj_box_col_3s * 6)（6-step 碰撞事件次数）
+    """
+    try:
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        valid = 0
+        cframes = 0
+        events = 0.0
+        for item in data:
+            if not item.get("fut_valid_flag"):
+                continue
+            valid += 1
+            v = item.get("plan_obj_box_col_3s")
+            if not isinstance(v, (int, float)) or v < 0:
+                continue
+            if v > 0:
+                cframes += 1
+            events += float(v) * 6.0
+        return valid, cframes, events
+    except Exception:
+        return None, None, None
+
 
 def parse_experiment_name(folder_name):
     """解析实验文件夹名称，提取配置信息"""
@@ -217,27 +247,26 @@ def interpret_cohens_d(d):
 def main():
     # 解析命令行参数
     parser = argparse.ArgumentParser(description='计算Cohen\'s d统计量')
-    parser.add_argument('--time_horizon', type=str, choices=['1s', '2s', '3s'], default=None,
-                        help='指定time horizon，只读取该目录下的数据（默认：读取所有）')
-    parser.add_argument('--compare_horizons', action='store_true',
-                        help='进行time horizon之间的比较（1s vs 2s vs 3s）')
+    # NOTE: 当前只保留 3s 指标，移除 1s/2s/3s time horizon 相关参数
     parser.add_argument('--model-type', type=str, choices=['vad', 'uniad'], default='vad',
                         help='模型类型：vad 或 uniad（默认 vad）')
     args = parser.parse_args()
     
     # 实验根目录（按模型类型）
+    # NOTE: 数据根目录写死为 /data1/deyun/B2DRepair_Data（你的机器实际落盘位置）
+    data_root = "/data1/deyun/B2DRepair_Data"
     if args.model_type == 'vad':
         base_dirs = [
-            '/data1/vad_base_Arachne_v2_DE_results',
-            '/data1/vad_base_semSegRep_DE_results'
+            str(Path(data_root) / "vad_base_Arachne_v2_DE_results"),
+            str(Path(data_root) / "vad_base_semSegRep_DE_results"),
         ]
         folder_patterns = ['VAD_base_REP_VAL_*']
         def get_log_name(folder_name):
             return 'vad_base_rep_val.log'
     else:
         base_dirs = [
-            '/data1/uniad_base_Arachne_v2_DE_results',
-            '/data1/uniad_base_semSegRep_DE_results'
+            str(Path(data_root) / "uniad_base_Arachne_v2_DE_results"),
+            str(Path(data_root) / "uniad_base_semSegRep_DE_results"),
         ]
         folder_patterns = ['UniAD_base_REP_VAL_*', 'UniAD_tiny_REP_VAL_*']
         def get_log_name(folder_name):
@@ -247,8 +276,6 @@ def main():
     
     # 存储所有数据
     all_data = []
-    # 存储time horizon数据：config -> repetition -> time_horizon -> metric -> value
-    time_horizon_data = {}
     missing_log = []  # 缺少log文件的实验
     parse_failed = []  # 无法解析配置的实验
     extract_failed = []  # 无法提取指标的实验
@@ -256,38 +283,25 @@ def main():
     
     print("=" * 80)
     print("Step 1: 提取所有实验的指标数据")
-    if args.time_horizon:
-        print(f"只读取 time_horizon={args.time_horizon} 的数据")
     print("=" * 80)
-    
+
     for base_dir in base_dirs:
         if not os.path.exists(base_dir):
             print(f"Warning: {base_dir} not found")
             continue
-        
+
         print(f"\n处理目录: {base_dir}")
         base_path = Path(base_dir)
-        
-        # 如果指定了time_horizon，只在该目录下查找
-        if args.time_horizon:
-            search_path = base_path / args.time_horizon
-            if not search_path.exists():
-                print(f"  Warning: {search_path} not found")
-                continue
-            exp_folders = []
-            for pat in folder_patterns:
-                for exp_folder in search_path.rglob(pat):
-                    if exp_folder.is_dir():
-                        exp_folders.append(exp_folder)
-        else:
-            exp_folders = []
-            for pat in folder_patterns:
-                for exp_folder in base_path.rglob(pat):
-                    if exp_folder.is_dir():
-                        exp_folders.append(exp_folder)
+
+        # 现在目录结构为: <base_path>/(small|middle|large)/<EXP>/open_loop_eval/...
+        exp_folders = []
+        for pat in folder_patterns:
+            for exp_folder in base_path.rglob(pat):
+                if exp_folder.is_dir():
+                    exp_folders.append(exp_folder)
         exp_folders = sorted(set(exp_folders))
         print(f"  找到 {len(exp_folders)} 个实验文件夹")
-        
+
         # UniAD 时用 convert_uniad_to_vad_metrics.py 把 JSON 转成 VAD 格式的 summary 再解析
         converter_script = Path(__file__).resolve().parent.parent / 'baseline' / 'convert_uniad_to_vad_metrics.py'
 
@@ -302,12 +316,22 @@ def main():
                     missing_log.append(str(exp_folder.relative_to(base_path)))
                     continue
                 metrics = extract_metrics_from_log(log_file)
+                # VAD: 直接从 open_loop_eval/*.json 统计碰撞帧数/次数（不使用均值换算）
+                open_loop_dir = exp_folder / 'open_loop_eval'
+                vad_json = json_file
+                if not vad_json.exists() and open_loop_dir.exists():
+                    all_json_candidates = sorted(open_loop_dir.glob("*.json"))
+                    if len(all_json_candidates) == 1:
+                        vad_json = all_json_candidates[0]
+                if vad_json.exists() and metrics is not None:
+                    _valid, _cframes, _events = count_vad_collision_from_json(vad_json)
+                    if _cframes is not None:
+                        metrics['collision_frame_count'] = _cframes
+                    if _events is not None:
+                        metrics['collision_event_count'] = float(_events)
             else:
                 # UniAD: 需要 JSON，用 converter 转成 VAD 格式的 summary 再解析
                 if not json_file.exists():
-                    # 兜底：有些实验的 json 文件名不严格等于 <log_stem>.json
-                    # - 优先匹配 *rep_val*.json（且只有一个时才采用）
-                    # - 否则如果 open_loop_eval 下只有一个 json，也采用
                     open_loop_dir = exp_folder / 'open_loop_eval'
                     rep_val_candidates = []
                     all_json_candidates = []
@@ -347,7 +371,6 @@ def main():
                         extract_failed.append(str(exp_folder.relative_to(base_path)))
                         continue
                     metrics = extract_metrics_from_log(summary_path)
-                    # 从 converter 输出的 JSON 统计 VAD 规则下发生碰撞的帧数（与 baseline 588 口径一致）
                     collision_count = count_collision_frames_vad_rule(out_json)
                     if metrics is not None and collision_count is not None:
                         metrics['collision_frame_count'] = collision_count
@@ -361,37 +384,15 @@ def main():
                     extract_failed.append(str(exp_folder.relative_to(base_path)))
                     continue
 
-            # 从路径中提取time horizon
-            time_horizon = None
-            folder_path_str = str(exp_folder)
-            horizon_match = re.search(r'/([123])s/', folder_path_str)
-            if horizon_match:
-                time_horizon = f"{horizon_match.group(1)}s"
-            
-            # 如果指定了time_horizon，只处理匹配的
-            if args.time_horizon and time_horizon != args.time_horizon:
-                continue
-            
             # 解析实验配置
             method, weight_count, fitness_type, repetition = parse_experiment_name(exp_folder.name)
-            
             if not all([method, weight_count, fitness_type, repetition]):
                 parse_failed.append(str(exp_folder.relative_to(base_path)))
                 continue
-            
             if metrics is None:
                 extract_failed.append(str(exp_folder.relative_to(base_path)))
                 continue
-            
-            # 存储time horizon数据（用于time horizon比较）
-            if time_horizon:
-                config_key = f"{method}_w{weight_count}_{fitness_type}"
-                if config_key not in time_horizon_data:
-                    time_horizon_data[config_key] = {}
-                if repetition not in time_horizon_data[config_key]:
-                    time_horizon_data[config_key][repetition] = {}
-                time_horizon_data[config_key][repetition][time_horizon] = metrics
-            
+
             # 存储数据
             data_entry = {
                 'method': method,
@@ -399,11 +400,11 @@ def main():
                 'fitness_type': fitness_type,
                 'repetition': repetition,
                 'folder': exp_folder.name,
-                **metrics
+                **metrics,
             }
             all_data.append(data_entry)
             success_count += 1
-    
+
     # 详细报告数据提取情况
     print(f"\n" + "=" * 80)
     print("数据提取汇总")
@@ -413,21 +414,21 @@ def main():
     print(f"✗ 无法解析配置: {len(parse_failed)} 个实验")
     print(f"✗ 无法提取指标: {len(extract_failed)} 个实验")
     print(f"总计: {success_count + len(missing_log) + len(parse_failed) + len(extract_failed)} 个实验文件夹")
-    
+
     if missing_log:
         print(f"\n缺少log文件的实验 ({len(missing_log)} 个):")
         for folder in missing_log[:20]:  # 只显示前20个
             print(f"  - {folder}")
         if len(missing_log) > 20:
             print(f"  ... 还有 {len(missing_log) - 20} 个")
-    
+
     if parse_failed:
         print(f"\n无法解析配置的实验 ({len(parse_failed)} 个):")
         for folder in parse_failed[:20]:  # 只显示前20个
             print(f"  - {folder}")
         if len(parse_failed) > 20:
             print(f"  ... 还有 {len(parse_failed) - 20} 个")
-    
+
     if extract_failed:
         print(f"\n无法提取指标的实验 ({len(extract_failed)} 个):")
         for folder in extract_failed[:20]:  # 只显示前20个
@@ -436,7 +437,7 @@ def main():
             print(f"  ... 还有 {len(extract_failed) - 20} 个")
     
     print(f"\n总共提取了 {len(all_data)} 个实验的数据")
-    
+
     if len(all_data) == 0:
         print("\n" + "=" * 80)
         print("错误: 没有提取到任何实验数据！")
@@ -449,7 +450,7 @@ def main():
         print("4. 实验文件夹名称格式不正确，无法解析配置")
         print("\n脚本已停止执行。")
         sys.exit(1)
-    
+
     # 转换为DataFrame便于分析
     df = pd.DataFrame(all_data)
     # 从数据中读取权重与 fitness 列表，支持 VAD (w26/52/105) 与 UniAD (w7/13/14 等)
@@ -458,28 +459,28 @@ def main():
     methods = ['Arachne_v2', 'semSegRep']
     weight_labels = [f"w{w}" for w in weight_counts]
     
-    # 定义要分析的指标（总是6个metric，不管time_horizon是什么）
+    # 仅保留 3s 指标（不再显示/比较 1s、2s）
     metrics_to_analyze = [
-        'plan_L2_1s', 'plan_L2_2s', 'plan_L2_3s',
-        'plan_obj_box_col_1s', 'plan_obj_box_col_2s', 'plan_obj_box_col_3s'
+        'plan_L2_3s',
+        'plan_obj_box_col_3s',
     ]
     
-    # 各配置下 L2 / 碰撞 均值统计
+    # 各配置下均值统计（仅 3s）
     print("\n" + "=" * 80)
-    print("各配置下指标均值（L2 error 1s/2s/3s，碰撞率 1s/2s/3s）")
+    print("各配置下指标均值（仅 3s）")
     print("=" * 80)
     config_cols = ['method', 'weight_count', 'fitness_type']
-    mean_cols = ['plan_L2_1s', 'plan_L2_2s', 'plan_L2_3s',
-                 'plan_obj_box_col_1s', 'plan_obj_box_col_2s', 'plan_obj_box_col_3s']
+    mean_cols = ['plan_L2_3s', 'plan_obj_box_col_3s']
     config_means = df.groupby(config_cols)[mean_cols].mean().round(6)
     print("\n【各配置均值】 (method, weight_count, fitness_type) -> 各指标均值")
     for idx in config_means.index:
         method, weight_count, fitness_type = idx
         row = config_means.loc[idx]
         n = int(df[(df['method'] == method) & (df['weight_count'] == weight_count) & (df['fitness_type'] == fitness_type)].shape[0])
-        print(f"  {method}, w{weight_count}, {fitness_type} (n={n}): "
-              f"L2_1s={row['plan_L2_1s']:.6f}, L2_2s={row['plan_L2_2s']:.6f}, L2_3s={row['plan_L2_3s']:.6f}, "
-              f"col_1s={row['plan_obj_box_col_1s']:.6f}, col_2s={row['plan_obj_box_col_2s']:.6f}, col_3s={row['plan_obj_box_col_3s']:.6f}")
+        print(
+            f"  {method}, w{weight_count}, {fitness_type} (n={n}): "
+            f"L2_3s={row['plan_L2_3s']:.6f}, col_3s={row['plan_obj_box_col_3s']:.6f}"
+        )
     # L2 3s 各配置平均值（单独列出）
     print("\n【L2 error 3s 各配置平均值】")
     l2_3s = df.groupby(config_cols)['plan_L2_3s'].agg(['mean', 'std', 'count']).round(6)
@@ -492,7 +493,7 @@ def main():
         print(f"  {method}, w{weight_count}, {fitness_type}: mean={mean_val:.6f}, std={std_str}, n={count_val}")
     # Collision 3s 各配置平均值（单独列出）；UniAD 为发生碰撞的帧数，VAD 为碰撞率
     print("\n【Collision 3s 各配置平均值】")
-    collision_col = 'collision_frame_count' if args.model_type == 'uniad' else 'plan_obj_box_col_3s'
+    collision_col = 'collision_frame_count' if args.model_type in ('uniad', 'vad') else 'plan_obj_box_col_3s'
     col_3s = df.groupby(config_cols)[collision_col].agg(['mean', 'std', 'count']).round(6)
     for idx in col_3s.index:
         method, weight_count, fitness_type = idx
@@ -508,9 +509,14 @@ def main():
     # VAD 与 UniAD 使用不同的 baseline（均按有效帧统计）
     if args.model_type == 'vad':
         # VAD baseline（来自原始 VAD open-loop 评估结果）
-        # 有效帧 6121，碰撞次数 ≈ BASELINE_COLLISION_3S × 6121 × 6 ≈ 85
+        # 说明：旧版用 plan_obj_box_col_3s(均值) * 6121 * 6 近似换算 #colls，
+        # 但这无法反映“发生碰撞的有效帧数”。现在改为直接从 baseline JSON 统计。
         BASELINE_L2_3S = 1.4262655224607823
-        BASELINE_COLLISION_3S = 0.002314436707869014
+        # baseline/VAD/vad_base_baseline_b2d_infos_val_partB_25clips.json:
+        # - collision_frames（有效帧且 plan_obj_box_col_3s>0）= 80
+        # - collision_events（sum plan_obj_box_col_3s*6）≈ 85
+        BASELINE_COLLISION_FRAME_COUNT = 80
+        BASELINE_COLLISION_EVENT_COUNT = 85
     else:
         # UniAD baseline：来自 uniad_base_baseline_b2d_infos_val_partB_25clips.json 经
         # baseline/convert_uniad_to_vad_metrics.py 转成 VAD 规则后的 summary：
@@ -536,9 +542,16 @@ def main():
                     key = (method, weight_count, fitness_type)
                     if key in config_means.index:
                         config_order.append(key)
-        short_labels = []
-        # 将 (method, fitness_type, weight_count) 映射到 LaTeX/mathtext 友好的标签：
-        #  形如 "$FL_{adv}-fit_{disc}-Low$"（无括号、无逗号，用短横线连接）
+        # x 轴标签优化（分层展示 2 * 3 * 3）：
+        # - 组内 box：x 轴 tick 仅显示权重等级（Low/Med/High）
+        # - 中组：每 3 个 box（同 method + 同 fitness）用上方括号/横线标一次 fit
+        # - 大组：每 9 个 box（同 method）用更上方括号/横线标一次 approach（loss）
+        #
+        # 这样每个 box 不再写完整组合名，信息密度更低、重复更少。
+        box_level_labels = []
+        mid_group_specs = []  # (start, end, mid_label_mathtext)  e.g. "$fit_{ER}$"
+        big_group_specs = []  # (start, end, big_label_mathtext)  e.g. "$FL_{naive}$"
+        # 将 (method, fitness_type, weight_count) 映射到 LaTeX/mathtext 友好的标签
         loss_map = {
             "Arachne_v2": r"FL_{adv}",
             "semSegRep": r"FL_{naive}",
@@ -564,67 +577,173 @@ def main():
                 105: "High",
             }
 
-        for (method, weight_count, fitness_type) in config_order:
+        prev_mid_key = None
+        cur_mid_start = None
+        cur_mid_label = None
+        prev_big_key = None
+        cur_big_start = None
+        cur_big_label = None
+
+        for idx, (method, weight_count, fitness_type) in enumerate(config_order):
             loss_str = loss_map.get(method, method)
             fit_str = fit_map.get(fitness_type, fitness_type)
+            mid_key = (loss_str, fit_str)  # (big, mid)
+            big_key = loss_str
             try:
                 w_int = int(weight_count)
             except Exception:
                 w_int = None
             level_str = level_map.get(w_int, f"w{weight_count}")
-            # 使用 mathtext 语法渲染 LaTeX 风格标签，三部分用短横线连接
-            label = rf"${loss_str}-{fit_str}-{level_str}$"
-            short_labels.append(label)
+            box_level_labels.append(level_str)
+
+            # mid group: (loss, fit)
+            if prev_mid_key is None:
+                prev_mid_key = mid_key
+                cur_mid_start = idx
+                cur_mid_label = rf"${fit_str}$"
+            elif mid_key != prev_mid_key:
+                mid_group_specs.append((cur_mid_start, idx - 1, cur_mid_label))
+                prev_mid_key = mid_key
+                cur_mid_start = idx
+                cur_mid_label = rf"${fit_str}$"
+
+            # big group: loss only
+            if prev_big_key is None:
+                prev_big_key = big_key
+                cur_big_start = idx
+                cur_big_label = rf"${loss_str}$"
+            elif big_key != prev_big_key:
+                big_group_specs.append((cur_big_start, idx - 1, cur_big_label))
+                prev_big_key = big_key
+                cur_big_start = idx
+                cur_big_label = rf"${loss_str}$"
+
+        # flush last groups
+        if cur_mid_start is not None:
+            mid_group_specs.append((cur_mid_start, len(config_order) - 1, cur_mid_label))
+        if cur_big_start is not None:
+            big_group_specs.append((cur_big_start, len(config_order) - 1, cur_big_label))
         l2_data = [df[(df['method'] == m) & (df['weight_count'] == w) & (df['fitness_type'] == f)]['plan_L2_3s'].dropna().values
                    for (m, w, f) in config_order]
-        # VAD：collision 为 plan_obj_box_col_3s (率) × 有效帧×6 → 碰撞次数；UniAD：每实验 JSON 统计的发生碰撞的帧数
-        VAD_VALID_FRAMES = 6121
-        VAD_COLLISION_SCALE = VAD_VALID_FRAMES * 6
+        # Collision plot:
+        # - VAD：用 JSON 直接统计 collision_frames（每帧至多算 1 次）
+        # - UniAD：用 converter 输出的 JSON 统计 collision_frame_count（口径一致）
         if args.model_type == 'vad':
-            col_data = [df[(df['method'] == m) & (df['weight_count'] == w) & (df['fitness_type'] == f)]['plan_obj_box_col_3s'].dropna().values * VAD_COLLISION_SCALE
+            col_data = [df[(df['method'] == m) & (df['weight_count'] == w) & (df['fitness_type'] == f)]['collision_frame_count'].dropna().values
                        for (m, w, f) in config_order]
-            baseline_collision_plot = BASELINE_COLLISION_3S * VAD_COLLISION_SCALE
+            baseline_collision_plot = BASELINE_COLLISION_FRAME_COUNT
         else:
             col_data = [df[(df['method'] == m) & (df['weight_count'] == w) & (df['fitness_type'] == f)]['collision_frame_count'].dropna().values
                        for (m, w, f) in config_order]
             baseline_collision_plot = BASELINE_COLLISION_FRAME_COUNT
         out_dir = Path(__file__).parent
+        def _draw_bracket(ax, x0, x1, y_axes, text, text_y_offset=0.02, color="#555555", lw=1.2):
+            # x0/x1: data coord (boxplot positions), y in axes coord
+            trans = ax.get_xaxis_transform()
+            ax.plot([x0, x0, x1, x1], [y_axes - 0.02, y_axes, y_axes, y_axes - 0.02],
+                    transform=trans, color=color, linewidth=lw, clip_on=False)
+            ax.text((x0 + x1) / 2.0, y_axes + text_y_offset, text,
+                    transform=trans, ha="center", va="bottom", color=color, clip_on=False)
+
+        def add_hierarchical_labels(ax):
+            # 在上方绘制中组（fit）与大组（loss）括号标注
+            # 中组：每 3 个 box 一组（同 method+fit）
+            for s, e, label in mid_group_specs:
+                x0 = s + 1.0
+                x1 = e + 1.0
+                # y_axes 稍高一点，避免贴着轴边被“吞掉”
+                _draw_bracket(ax, x0, x1, y_axes=1.03, text=label, text_y_offset=0.01, color="#666666", lw=1.1)
+            # 大组：每 9 个 box 一组（同 method）
+            for s, e, label in big_group_specs:
+                x0 = s + 1.0
+                x1 = e + 1.0
+                _draw_bracket(ax, x0, x1, y_axes=1.14, text=label, text_y_offset=0.01, color="#333333", lw=1.4)
+            # 轻微竖线分隔“大组”
+            for s, e, _ in big_group_specs[:-1]:
+                x_sep = (e + 1) + 0.5
+                ax.axvline(x=x_sep, color="#dddddd", linewidth=1.0, zorder=0)
+
         # 两图统一尺寸和边距，便于上下对齐；高度适中便于放论文
         FIG_SIZE = (14, 5)
         SUBPLOT_LEFT, SUBPLOT_RIGHT = 0.06, 0.98
-        SUBPLOT_BOTTOM, SUBPLOT_TOP = 0.22, 0.90
+        # 上方留空间放括号标签（mid/big）+ 图例（legend 放到图外）
+        SUBPLOT_BOTTOM, SUBPLOT_TOP = 0.20, 0.74
+        # 固定 axes 区域：left, bottom, width, height（两张图共用同一套参数）
+        # 这样即使 bbox_inches="tight" 动态裁剪外边界，两张图的数据区域也保持一致。
+        # 同时给顶部留更大空间，避免 legend 与上方括号重叠。
+        AX_POS = [0.06, 0.18, 0.92, 0.54]
+        SAVE_PAD_INCHES = 0.02
+        LEGEND_ANCHOR_Y = 1.00
         # 全局字体大小（轴标签、刻度、图例等），便于论文排版
-        plt.rcParams['font.size'] = 18
+        plt.rcParams['font.size'] = 20
         # L2 error 3s 一张图（18 个配置）+ 初始值水平线
         fig1, ax1 = plt.subplots(figsize=FIG_SIZE)
         fig1.subplots_adjust(left=SUBPLOT_LEFT, right=SUBPLOT_RIGHT, bottom=SUBPLOT_BOTTOM, top=SUBPLOT_TOP)
-        bp1 = ax1.boxplot(l2_data, labels=short_labels, patch_artist=True, showfliers=False)
+        ax1.set_position(AX_POS)
+        # x 轴不再重复写 Low/Med/High（已由颜色+图例表达），因此 tick label 置空
+        bp1 = ax1.boxplot(l2_data, labels=[""] * len(box_level_labels), patch_artist=True, showfliers=False)
         ax1.axhline(
             y=BASELINE_L2_3S,
             color='red',
             linestyle='--',
             linewidth=1.5,
             # L2_Err(M_{orig}, D_{test})
-            label=rf"$\mu_{{L2\_Err}}(M_{{orig}}, D_{{test}})$ = {BASELINE_L2_3S:.4f}",
+            label=rf"$\mu_{{\mathrm{{L2\_Err}}}}(M_{{\mathrm{{orig}}}}, D_{{\mathrm{{test}}}})$ = {BASELINE_L2_3S:.4f}",
         )
-        ax1.set_ylabel('L2 error')
-        ax1.tick_params(axis='x', rotation=45)
-        # 让每个 x 轴标签的右端点对齐刻度，避免长标签视觉错位
-        for label in ax1.get_xticklabels():
-            label.set_ha('right')
-        ax1.legend(loc='upper right')
-        # 更柔和的配色（类似 seaborn 风格），并用深色中位数线避免被盖住
-        for patch in bp1['boxes']:
-            patch.set_facecolor('#8da0cb')  # 柔和蓝紫
+        # 这里的纵轴展示的是“均值指标”的分布，因此用 μ_{L2_Err} 更准确
+        ax1.set_ylabel(r"$\mu_{\mathrm{L2\_Err}}$")
+        ax1.tick_params(axis='x', rotation=0, length=0)
+        add_hierarchical_labels(ax1)
+        # 配色策略（最终版）：
+        # - 面填充颜色：仅表示组内 box（Low/Med/High）
+        # - 大组/中组：由上方括号与竖线分隔来表达（不再用颜色区分大组）
+        level_colors = {
+            "Low": "#66c2a5",   # green
+            "Med": "#fc8d62",   # orange
+            "High": "#8da0cb",  # purple/blue
+        }
+        for i, patch in enumerate(bp1['boxes']):
+            lvl = box_level_labels[i]
+            patch.set_facecolor(level_colors.get(lvl, "#cccccc"))
+            patch.set_alpha(0.85)
+            patch.set_edgecolor("#333333")
+            patch.set_linewidth(1.2)
         for median in bp1['medians']:
             median.set_color('#333333')
             median.set_linewidth(1.5)
-        fig1.savefig(out_dir / 'l2_3s_boxplot.pdf', bbox_inches='tight')
+        # Legend：放到图外顶部，避免遮挡括号/数据
+        try:
+            from matplotlib.patches import Patch
+            handles, _labels = ax1.get_legend_handles_labels()
+            handles += [
+                Patch(facecolor=level_colors["Low"], edgecolor="#333333", label="Low"),
+                Patch(facecolor=level_colors["Med"], edgecolor="#333333", label="Med"),
+                Patch(facecolor=level_colors["High"], edgecolor="#333333", label="High"),
+            ]
+            fig1.legend(
+                handles=handles,
+                loc="upper center",
+                bbox_to_anchor=(0.5, LEGEND_ANCHOR_Y),
+                bbox_transform=fig1.transFigure,
+                ncol=4,
+                frameon=True,
+            )
+        except Exception:
+            fig1.legend(
+                loc="upper center",
+                bbox_to_anchor=(0.5, LEGEND_ANCHOR_Y),
+                bbox_transform=fig1.transFigure,
+                ncol=4,
+                frameon=True,
+            )
+        l2_pdf = out_dir / f"l2_3s_boxplot_{args.model_type}.pdf"
+        fig1.savefig(l2_pdf, bbox_inches='tight', pad_inches=SAVE_PAD_INCHES)
         plt.close(fig1)
         # Collision 3s 一张图（18 个配置）+ 初始值水平线（VAD 为碰撞次数，UniAD 为发生碰撞的帧数）
         fig2, ax2 = plt.subplots(figsize=FIG_SIZE)
         fig2.subplots_adjust(left=SUBPLOT_LEFT, right=SUBPLOT_RIGHT, bottom=SUBPLOT_BOTTOM, top=SUBPLOT_TOP)
-        bp2 = ax2.boxplot(col_data, labels=short_labels, patch_artist=True, showfliers=False)
+        ax2.set_position(AX_POS)
+        bp2 = ax2.boxplot(col_data, labels=[""] * len(box_level_labels), patch_artist=True, showfliers=False)
         ax2.axhline(
             y=baseline_collision_plot,
             color='red',
@@ -634,18 +753,45 @@ def main():
             label="#" + rf"$\mathrm{{colls}}(M_{{orig}}, D_{{test}})$ = {baseline_collision_plot:.0f}",
         )
         ax2.set_ylabel('#colls')
-        ax2.tick_params(axis='x', rotation=45)
-        for label in ax2.get_xticklabels():
-            label.set_ha('right')
-        ax2.legend(loc='upper right')
-        for patch in bp2['boxes']:
-            patch.set_facecolor('#fc8d62')  # 柔和橙色
+        ax2.tick_params(axis='x', rotation=0, length=0)
+        add_hierarchical_labels(ax2)
+        for i, patch in enumerate(bp2['boxes']):
+            lvl = box_level_labels[i]
+            patch.set_facecolor(level_colors.get(lvl, "#cccccc"))
+            patch.set_alpha(0.85)
+            patch.set_edgecolor("#333333")
+            patch.set_linewidth(1.2)
         for median in bp2['medians']:
             median.set_color('#333333')
             median.set_linewidth(1.5)
-        fig2.savefig(out_dir / 'collision_3s_boxplot.pdf', bbox_inches='tight')
+        try:
+            from matplotlib.patches import Patch
+            handles, labels = ax2.get_legend_handles_labels()
+            handles += [
+                Patch(facecolor=level_colors["Low"], edgecolor="#333333", label="Low"),
+                Patch(facecolor=level_colors["Med"], edgecolor="#333333", label="Med"),
+                Patch(facecolor=level_colors["High"], edgecolor="#333333", label="High"),
+            ]
+            fig2.legend(
+                handles=handles,
+                loc="upper center",
+                bbox_to_anchor=(0.5, LEGEND_ANCHOR_Y),
+                bbox_transform=fig2.transFigure,
+                ncol=4,
+                frameon=True,
+            )
+        except Exception:
+            fig2.legend(
+                loc="upper center",
+                bbox_to_anchor=(0.5, LEGEND_ANCHOR_Y),
+                bbox_transform=fig2.transFigure,
+                ncol=4,
+                frameon=True,
+            )
+        col_pdf = out_dir / f"collision_3s_boxplot_{args.model_type}.pdf"
+        fig2.savefig(col_pdf, bbox_inches='tight', pad_inches=SAVE_PAD_INCHES)
         plt.close(fig2)
-        print(f"\n箱线图已保存: {out_dir / 'l2_3s_boxplot.pdf'}, {out_dir / 'collision_3s_boxplot.pdf'}")
+        print(f"\n箱线图已保存: {l2_pdf}, {col_pdf}")
     else:
         print("\n(未安装 matplotlib，跳过箱线图)")
 
@@ -926,151 +1072,7 @@ def main():
                             
                             print(f"指标：{metric}；{row['group1']} vs {row['group2']}：{effect_size}")
     
-    # Time Horizon比较
-    if args.compare_horizons:
-        print("\n" + "=" * 80)
-        print("Step 4: 计算Time Horizon比较（1s vs 2s vs 3s）")
-        print("=" * 80)
-        print("比较不同time horizon目录下的实验结果")
-        print("每个time horizon都会产生6个metric，所以需要进行6次比较")
-        
-        # 定义所有6个metric（每个time horizon都会产生这6个metric）
-        metrics_to_compare = [
-            'plan_L2_1s', 'plan_L2_2s', 'plan_L2_3s',
-            'plan_obj_box_col_1s', 'plan_obj_box_col_2s', 'plan_obj_box_col_3s'
-        ]
-        time_horizons = ['1s', '2s', '3s']
-        
-        # 生成所有配置的列表（按固定顺序：方法 -> 权重 -> fitness），权重来自实际数据
-        configs = []
-        for method in methods:
-            for weight_count in weight_counts:
-                for fitness_type in fitness_types:
-                    configs.append(f"{method}_w{weight_count}_{fitness_type}")
-        
-        # 对每个metric进行比较
-        for metric_name in metrics_to_compare:
-            print(f"\n指标: {metric_name}")
-            print("=" * 80)
-            
-            # 为每个time horizon构建 N 维向量（每个维度是一个配置的均值）
-            horizon_vectors = {th: [] for th in time_horizons}
-            
-            # 对每个配置，计算该time horizon下所有重复实验的均值
-            # 统计信息：记录每个time horizon下每个配置的重复实验数量
-            repetition_counts = {th: [] for th in time_horizons}
-            
-            # 记录每个配置在每个time horizon下有哪些重复实验
-            config_repetition_details = {config_name: {th: [] for th in time_horizons} for config_name in configs}
-            
-            for config_name in configs:
-                for th in time_horizons:
-                    config_values = []
-                    found_repetitions = []
-                    if config_name in time_horizon_data:
-                        for repetition in time_horizon_data[config_name]:
-                            rep_data = time_horizon_data[config_name][repetition]
-                            if th in rep_data:
-                                # 从该time horizon的数据中提取对应的metric
-                                if metric_name in rep_data[th] and rep_data[th][metric_name] is not None:
-                                    config_values.append(rep_data[th][metric_name])
-                                    found_repetitions.append(repetition)
-                    
-                    # 记录该配置在该time horizon下找到的重复实验
-                    config_repetition_details[config_name][th] = sorted(found_repetitions)
-                    
-                    # 记录该配置在该time horizon下的重复实验数量
-                    repetition_counts[th].append(len(config_values))
-                    
-                    # 计算该配置在该time horizon下的均值
-                    if len(config_values) > 0:
-                        horizon_vectors[th].append(np.mean(config_values))
-                    else:
-                        horizon_vectors[th].append(np.nan)
-            
-            # 显示统计信息：确认每个time horizon的重复实验数量
-            print(f"\n  重复实验数量统计（每个配置）：")
-            for th in time_horizons:
-                counts = repetition_counts[th]
-                if len(counts) > 0:
-                    unique_counts = np.unique(counts)
-                    # 统计每个数量出现的次数
-                    count_freq = {}
-                    for c in counts:
-                        count_freq[c] = count_freq.get(c, 0) + 1
-                    freq_str = ", ".join([f"{v}个配置有{k}次" for k, v in sorted(count_freq.items())])
-                    exp_hint = ""
-                    max_count = int(np.max(counts)) if len(counts) > 0 else 0
-                    if max_count > 0:
-                        exp_hint = f"（该目录下最大重复数={max_count}）"
-                    print(f"    {th}: 唯一值={unique_counts}, 分布: {freq_str} {exp_hint}")
-                    
-                    # 显示缺少数据的配置
-                    missing_configs = []
-                    for i, count in enumerate(counts):
-                        expected = max_count
-                        if expected > 0 and count < expected:
-                            missing_configs.append((configs[i], count, expected))
-                    
-                    if missing_configs:
-                        print(f"    缺少数据的配置（{th}目录下，metric={metric_name}）:")
-                        for config, actual, expected in missing_configs:
-                            found_reps = config_repetition_details[config][th]
-                            expected_reps = list(range(1, expected + 1))
-                            missing_reps = [r for r in expected_reps if r not in found_reps]
-                            if missing_reps and expected > 0:
-                                print(f"      - {config}: 只有{actual}个（找到: {found_reps}），缺少: {missing_reps}，参考最大重复数={expected}个")
-                            else:
-                                print(f"      - {config}: 只有{actual}个（找到: {found_reps}），参考最大重复数={expected}个")
-            
-            # 转换为numpy数组（18维向量）
-            for th in time_horizons:
-                horizon_vectors[th] = np.array(horizon_vectors[th])
-            
-            # 计算配对Cohen's d（18维向量之间的比较）
-            print(f"\n  {metric_name}:")
-            print(f"    1s向量 (18×1): {horizon_vectors['1s']}")
-            print(f"    2s向量 (18×1): {horizon_vectors['2s']}")
-            print(f"    3s向量 (18×1): {horizon_vectors['3s']}")
-            print(f"\n  注意：使用配对Cohen's d比较{len(configs)}维向量（每个维度对应一个配置的均值）")
-            
-            # 构建3×3矩阵
-            matrix = {}
-            for i, th1 in enumerate(time_horizons):
-                for j, th2 in enumerate(time_horizons):
-                    if i != j:
-                        vec1 = horizon_vectors[th1]
-                        vec2 = horizon_vectors[th2]
-                        # 移除NaN值（如果有配置缺少数据）
-                        valid_mask = ~(np.isnan(vec1) | np.isnan(vec2))
-                        vec1_valid = vec1[valid_mask]
-                        vec2_valid = vec2[valid_mask]
-                        
-                        if len(vec1_valid) > 0 and len(vec2_valid) > 0 and len(vec1_valid) == len(vec2_valid):
-                            # 使用配对Cohen's d（paired=True），因为这是18维向量之间的比较
-                            d = cohens_d(vec1_valid, vec2_valid, paired=True)
-                            if d is not None:
-                                matrix[(th1, th2)] = d
-                                effect_size = interpret_cohens_d(d)
-                                print(f"    {th1} vs {th2}: Cohen's d = {d:.4f}, {effect_size} (有效维度: {len(vec1_valid)}/{len(configs)})")
-            
-            # 显示3×3矩阵
-            print(f"\n  {metric_name} Time Horizon比较矩阵:")
-            print("    " + " " * 12 + "1s" + " " * 12 + "2s" + " " * 12 + "3s")
-            for i, th1 in enumerate(time_horizons):
-                row_str = f"    {th1:12s}"
-                for j, th2 in enumerate(time_horizons):
-                    if i == j:
-                        row_str += "equivalent".center(16)
-                    else:
-                        key = (th1, th2)
-                        if key in matrix:
-                            effect_size = interpret_cohens_d(matrix[key])
-                            row_str += effect_size.center(16)
-                        else:
-                            row_str += "N/A".center(16)
-                print(row_str)
-    
+    # NOTE: 目录/指标现在只保留 3s，移除 time horizon（1s/2s/3s）之间的比较逻辑。
     print("\n" + "=" * 80)
     print("分析完成！")
     print("=" * 80)
