@@ -14,6 +14,23 @@ DEFAULT_ROUTE_IDS = [2086, 2129]
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
+def _indent_compat(elem, level=0, space="   "):
+    """Indent XML for pretty printing.
+
+    Python 3.9+ provides ``xml.etree.ElementTree.indent``; older versions do not.
+    """
+    i = "\n" + level * space
+    if len(elem):
+        if not (elem.text and elem.text.strip()):
+            elem.text = i + space
+        for child in elem:
+            _indent_compat(child, level + 1, space=space)
+        if not (elem.tail and elem.tail.strip()):
+            elem.tail = i
+    else:
+        if level and not (elem.tail and elem.tail.strip()):
+            elem.tail = i
+
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
@@ -58,7 +75,11 @@ def main():
         out.append(copy.deepcopy(by_id[rid]))
 
     new_tree = ET.ElementTree(out)
-    ET.indent(new_tree, space="   ")
+    # Pretty print: ET.indent exists only in Python 3.9+
+    if hasattr(ET, "indent"):
+        ET.indent(new_tree, space="   ")
+    else:
+        _indent_compat(out, space="   ")
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as f:
