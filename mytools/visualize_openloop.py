@@ -8,6 +8,8 @@ Run from the repository root (the directory that contains ``mytools/`` and ``Ben
 Input JSON format (list of frames) is expected to contain:
   - predictions: list of trajectories; length 6 (VAD-style) or 1 (UniAD-style), each (T,2)
   - ground_truth: (T,2) trajectory
+  - ego_fut_masks: optional; when set, GT polyline is clipped to the leading valid prefix (e.g. 4/6 steps near scene end).
+  - plan_obj_box_col_3s: optional internal field; corner labels only say ``isCollision`` (true/false), not the key name.
   - ego_fut_cmd_idx: int in [0..5] indicating the selected motion command when there are six per-command trajectories (optional)
 
 Example (minimal — ``--model`` is required; omit ``--output_dir`` to auto-name under repo root from ``len(predictions)``):
@@ -155,6 +157,89 @@ def _prepend_origin_if_missing(xy, eps=1e-3):
         return arr
     zero = np.zeros((1, 2), dtype=float)
     return np.concatenate([zero, arr[:, :2]], axis=0)
+
+
+def _ego_fut_valid_prefix_len(mask, max_steps=6, eps=1e-3):
+    """
+    Number of leading future steps with positive mask (same layout rules as ``_recompute_vad_l2_metrics``).
+    Stops at the first all-zero step — partial futures near clip end only contribute a prefix.
+    """
+    if mask is None:
+        return max_steps
+    m = np.asarray(mask, dtype=float)
+    if m.ndim == 3:
+        m = m[0, :max_steps]
+    elif m.ndim == 2:
+        m = m[:max_steps]
+    elif m.ndim == 1:
+        m = m[:max_steps, np.newaxis]
+    else:
+        return 0
+    n = min(int(m.shape[0]), max_steps)
+    k = 0
+    for i in range(n):
+        if float(np.max(m[i])) <= float(eps):
+            break
+        k += 1
+    return k
+
+
+def _trim_ground_truth_xy_for_plot(ground_truth, ego_fut_masks, max_steps=6):
+    """
+    Return future GT waypoints (k, 2) with k <= max_steps.
+    If ``ego_fut_masks`` is set, keep only the leading valid prefix (e.g. k=4 when the last two steps are invalid).
+    If mask is absent, return up to ``max_steps`` rows (caller gates drawing with ``fut_valid_flag``).
+    Returns None if there is no usable row.
+    """
+    if ground_truth is None:
+        return None
+    gt = np.asarray(ground_truth, dtype=float)
+    if gt.ndim == 3:
+        gt = gt[0, :max_steps, :2].copy()
+    else:
+        gt = np.asarray(ground_truth, dtype=float)[:max_steps, :2].copy()
+    if gt.shape[0] == 0:
+        return None
+    if ego_fut_masks is None:
+        return gt
+    k = _ego_fut_valid_prefix_len(ego_fut_masks, max_steps=max_steps)
+    if k <= 0:
+        return None
+    return gt[:k, :2]
+
+
+def _should_draw_gt_line(frame_data, gt_xy_trimmed):
+    """Whether to draw the GT polyline after optional mask-based trimming."""
+    if gt_xy_trimmed is None or gt_xy_trimmed.shape[0] < 1:
+        return False
+    if frame_data.get("ego_fut_masks") is not None:
+        return True
+    return bool(frame_data.get("fut_valid_flag", False))
+
+
+def _collision_yes_no_from_plan_obj_box_col_3s(fr):
+    """
+    Binary label from ``plan_obj_box_col_3s`` (open-loop eval).
+    ``> 0`` → ``true``, else ``false``; missing or negative → ``n/a``.
+    """
+    if not isinstance(fr, dict):
+        return "n/a"
+    v = fr.get("plan_obj_box_col_3s")
+    if v is None:
+        return "n/a"
+    try:
+        fv = float(v)
+    except (TypeError, ValueError):
+        return "n/a"
+    if fv < 0:
+        return "n/a"
+    return "true" if fv > 0 else "false"
+
+
+def _frame_has_plan_obj_box_col_3s(fr):
+    if not isinstance(fr, dict):
+        return False
+    return fr.get("plan_obj_box_col_3s") is not None
 
 
 def _resolve_repo_path(repo_root: Path, path_str: str) -> str:
@@ -850,12 +935,17 @@ def visualize_one_frame(
     vad_pred_draw=None,
 ):
     mnorm = _normalize_model(model)
-    use_compact_compare_legend = bool(compare_legend) and compare_frame_data is not None
+    # Compare overlay only when a matched second-frame dict exists (truthy); not just ``--compare_input`` set globally.
+    use_compact_compare_legend = bool(compare_legend) and bool(compare_frame_data)
     predictions = frame_data.get("predictions", [])
     ground_truth = frame_data.get("ground_truth", [])
     ego_fut_cmd_idx = frame_data.get("ego_fut_cmd_idx", -1)
     predictions_b = (compare_frame_data or {}).get("predictions", []) if compare_frame_data else []
     ego_fut_cmd_idx_b = (compare_frame_data or {}).get("ego_fut_cmd_idx", -1) if compare_frame_data else -1
+    gt_xy_trimmed = _trim_ground_truth_xy_for_plot(
+        frame_data.get("ground_truth"),
+        frame_data.get("ego_fut_masks"),
+    )
 
     view_half = float(view_m) if view_m else 40.0
     xlim, ylim = _bev_axis_limits(view_half, ego_forward_axis, forward_center_offset_m)
@@ -1014,9 +1104,9 @@ def visualize_one_frame(
                 zorder=5,
             )
 
-    # Ground truth (single): only draw when fut_valid_flag is true (per-frame validity in B2D collect / baseline JSON).
-    if ground_truth and bool(frame_data.get("fut_valid_flag", False)):
-        gt = _prepend_origin_if_missing(ground_truth)
+    # Ground truth: optional prefix trim via ego_fut_masks so partial futures (e.g. 4/6 steps) do not plot padded zeros.
+    if _should_draw_gt_line(frame_data, gt_xy_trimmed):
+        gt = _prepend_origin_if_missing(gt_xy_trimmed)
         ax.plot(
             gt[:, 0],
             gt[:, 1],
@@ -1057,20 +1147,41 @@ def visualize_one_frame(
         except (TypeError, ValueError):
             return str(v)
 
-    def _l2_error_3s_line(title, fr):
+    def _l2_compare_corner_line(title, fr):
+        """Compare-mode L2; value is still ``plan_L2_3s`` (3s horizon) but the label omits ``3s``."""
+        # title 可能含 LaTeX（如 ``\mathrm{orig}`` 里的 ``{...}``），不能用 ``str.format``，否则触发 KeyError。
         if not isinstance(fr, dict):
-            return "{}: n/a".format(title)
+            return title + ": n/a"
         d, tag = _l2_dict_for_corner(fr)
         j = fr.get("plan_L2_3s")
         if tag == "vad_rule" and d is not None:
-            return "{}: {}".format(title, _fmt_l2_val(d["plan_L2_3s"]))
+            return title + ": " + _fmt_l2_val(d["plan_L2_3s"])
         if j is not None:
-            return "{}: {}".format(title, _fmt_l2_val(j))
-        return "{}: n/a".format(title)
+            return title + ": " + _fmt_l2_val(j)
+        return title + ": n/a"
 
     if use_compact_compare_legend:
-        metrics.append(_l2_error_3s_line("L2 error (3s) original", frame_data))
-        metrics.append(_l2_error_3s_line("L2 error (3s) repaired", compare_frame_data))
+        metrics.append(
+            _l2_compare_corner_line(
+                r"$\mu_{\mathrm{L2\_Err}}\left(\mathcal{M}_{\mathrm{orig}},\,\mathrm{d}\right)$",
+                frame_data,
+            )
+        )
+        metrics.append(
+            _l2_compare_corner_line(
+                r"$\mu_{\mathrm{L2\_Err}}\left(\mathcal{M}_{\mathrm{fin}},\,\mathrm{d}\right)$",
+                compare_frame_data,
+            )
+        )
+        if _frame_has_plan_obj_box_col_3s(frame_data) or _frame_has_plan_obj_box_col_3s(compare_frame_data or {}):
+            metrics.append(
+                r"isCollision $\left(\mathcal{M}_{\mathrm{orig}},\,\mathrm{d}\right)$: "
+                + str(_collision_yes_no_from_plan_obj_box_col_3s(frame_data))
+            )
+            metrics.append(
+                r"isCollision $\left(\mathcal{M}_{\mathrm{fin}},\,\mathrm{d}\right)$: "
+                + str(_collision_yes_no_from_plan_obj_box_col_3s(compare_frame_data or {}))
+            )
     else:
         d, tag = _l2_dict_for_corner(frame_data)
         for k, label in (
@@ -1085,6 +1196,10 @@ def visualize_one_frame(
                 metrics.append("{}: {}".format(label, _fmt_l2_val(j)))
             else:
                 metrics.append("{}: n/a".format(label))
+        if _frame_has_plan_obj_box_col_3s(frame_data):
+            metrics.append(
+                "isCollision: {}".format(_collision_yes_no_from_plan_obj_box_col_3s(frame_data))
+            )
         if "fut_valid_flag" in frame_data:
             metrics.append("Valid: {}".format(frame_data["fut_valid_flag"]))
     if metrics:
@@ -1124,7 +1239,7 @@ def visualize_one_frame(
         orig_leg_color = _rgb_hex_blended_on_white(orig_c, orig_a)
         rep_leg_color = _rgb_hex_blended_on_white(rep_c, rep_a)
         leg_handles = []
-        if ground_truth and bool(frame_data.get("fut_valid_flag", False)):
+        if _should_draw_gt_line(frame_data, gt_xy_trimmed):
             leg_handles.append(
                 Line2D(
                     [0],
@@ -1173,13 +1288,13 @@ def visualize_one_frame(
     ax.set_xlim(xlim[0], xlim[1])
     ax.set_ylim(ylim[0], ylim[1])
 
-    # Save
+    # Save as PDF (vector-friendly for LaTeX \\includegraphics)
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     scene_token = _safe_name(frame_data.get("scene_token", "scene"))
     frame_idx = int(frame_data.get("frame_idx", frame_global_idx))
-    out_path = os.path.join(output_dir, "{}_frame_{:05d}.png".format(scene_token, frame_idx))
+    out_path = os.path.join(output_dir, "{}_frame_{:05d}.pdf".format(scene_token, frame_idx))
     plt.tight_layout()
-    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.savefig(out_path, format="pdf", dpi=300, bbox_inches="tight")
     plt.close(fig)
 
 
