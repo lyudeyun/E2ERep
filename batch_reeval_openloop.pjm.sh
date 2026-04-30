@@ -8,7 +8,8 @@
 #PJM -j
 #PJM -o batch_reeval_openloop_job_%j.log
 #PJM -m e
-#PJM --mail-list lyudeyun@gmail.com
+# Replace with your address for job-end mail from the scheduler:
+#PJM --mail-list recipient@example.com
 
 set -euo pipefail
 

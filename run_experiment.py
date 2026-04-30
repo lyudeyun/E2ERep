@@ -75,17 +75,16 @@ def get_vad_paths(vad_name, repo_root):
 
 def send_email_notification(subject: str, body: str) -> None:
     """
-    Send an email notification if SMTP environment variables are configured.
-    
-    This version uses fixed Gmail settings instead of environment variables.
+    Send an email notification using the SMTP settings below.
+
+    Replace the placeholders with your real sender/recipient and app password before use.
     """
-    # Fixed credentials (do not commit secrets to Git)
     host = "smtp.gmail.com"
     port = 587
-    user = "deyunlyu@gmail.com"
-    password = "ctmktibfuxcanswd"  # Prefer moving to env vars later
-    sender = "deyunlyu@gmail.com"
-    recipient = "lyudeyun@gmail.com"
+    user = "sender@example.com"
+    password = "your_app_password"
+    sender = "sender@example.com"
+    recipient = "recipient@example.com"
 
     try:
         msg = EmailMessage()
