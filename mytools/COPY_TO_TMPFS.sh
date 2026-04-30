@@ -1,6 +1,6 @@
 #!/bin/bash
-# 将数据从NFS复制到tmpfs（内存），以获得最快的数据加载速度
-# 需要root权限
+# Copy Bench2Drive data from NFS/disk into tmpfs for faster I/O
+# Requires root
 
 set -e
 
@@ -8,24 +8,24 @@ echo "=========================================="
 echo "将Bench2Drive数据加载到内存（tmpfs）"
 echo "=========================================="
 
-# 检查root权限
+# Require root
 if [ "$EUID" -ne 0 ]; then 
     echo "❌ 此脚本需要root权限"
     echo "   请使用: sudo bash $0"
     exit 1
 fi
 
-# 检查内存
+# Memory stats
 TOTAL_MEM=$(free -g | awk '/^Mem:/{print $2}')
 AVAILABLE_MEM=$(free -g | awk '/^Mem:/{print $7}')
 echo "✅ 总内存: ${TOTAL_MEM}GB"
 echo "✅ 可用内存: ${AVAILABLE_MEM}GB"
 
-# 数据大小（包括地图文件）
-DATA_SIZE_GB=27  # 约27GB（16GB图像数据 + 10.8GB地图文件）
+# Expected dataset size (images + maps)
+DATA_SIZE_GB=27  # ~27GB (16GB images + ~10.8GB maps)
 echo "📊 数据大小: ${DATA_SIZE_GB}GB (包括地图文件)"
 
-# 检查内存是否足够（30GB tmpfs + 5GB缓冲）
+# Need ~30GB tmpfs plus 5GB headroom
 REQUIRED_MEM=35
 if [ "$AVAILABLE_MEM" -lt "$REQUIRED_MEM" ]; then
     echo "⚠️  警告: 可用内存(${AVAILABLE_MEM}GB) < 所需内存(${REQUIRED_MEM}GB)"
@@ -37,12 +37,12 @@ if [ "$AVAILABLE_MEM" -lt "$REQUIRED_MEM" ]; then
     fi
 fi
 
-# tmpfs挂载点
+# Tmpfs mount point
 TMPFS_MOUNT="/mnt/bench2drive_ram"
-# 总数据大小：16GB图像 + 6.3GB infos + 4.9GB地图 = 约27GB，加上缓冲设为40GB
+# Budget ~27GB payload + margin → 40G tmpfs
 TMPFS_SIZE="40G"
 
-# 检查是否已经挂载
+# Already mounted?
 if mountpoint -q "$TMPFS_MOUNT" 2>/dev/null; then
     echo "⚠️  $TMPFS_MOUNT 已经挂载"
     read -p "是否卸载并重新挂载? (y/n) " -n 1 -r
@@ -54,10 +54,10 @@ if mountpoint -q "$TMPFS_MOUNT" 2>/dev/null; then
     fi
 fi
 
-# 创建挂载点
+# Prepare mount point
 mkdir -p "$TMPFS_MOUNT"
 
-# 挂载tmpfs
+# Mount tmpfs
 if ! mountpoint -q "$TMPFS_MOUNT" 2>/dev/null; then
     echo ""
     echo "📁 挂载tmpfs到 $TMPFS_MOUNT (大小: ${TMPFS_SIZE})..."
@@ -67,16 +67,16 @@ else
     echo "✅ tmpfs已挂载"
 fi
 
-# 数据源（从已复制的本地数据，或直接从NFS）
+# Source: staged copy under /tmp or repo data tree
 if [ -d "/tmp/bench2drive_local" ]; then
-    # 本地缓存版本，同样使用 bench2drive 而不是 bench2drive_preprocessed
+    # Local staging still uses bench2drive (not bench2drive_preprocessed)
     SOURCE_DATA="/tmp/bench2drive_local/bench2drive"
     SOURCE_INFOS="/tmp/bench2drive_local/infos"
     SOURCE_MAPS="/home/deyun/git/B2DRepair/Bench2DriveZoo/data/bench2drive/maps"
     SOURCE_MAP_FILE="/home/deyun/git/B2DRepair/Bench2DriveZoo/data/infos/b2d_map_infos.pkl"
     echo "✅ 使用已复制的本地数据作为源（更快）"
 else
-    # 注意：这里的目录名是 bench2drive（而不是 bench2drive_preprocessed）
+    # Directory name is bench2drive (not bench2drive_preprocessed)
     SOURCE_DATA="/home/deyun/git/B2DRepair/Bench2DriveZoo/data/bench2drive"
     SOURCE_INFOS="/home/deyun/git/B2DRepair/Bench2DriveZoo/data/infos"
     SOURCE_MAPS="/home/deyun/git/B2DRepair/Bench2DriveZoo/data/bench2drive/maps"
@@ -89,14 +89,14 @@ TARGET_INFOS="$TMPFS_MOUNT/infos"
 TARGET_MAPS="$TMPFS_MOUNT/maps"
 TARGET_MAP_FILE="$TMPFS_MOUNT/b2d_map_infos.pkl"
 
-# 创建目标目录
+# Destination folders on tmpfs
 echo ""
 echo "📁 创建目标目录..."
 mkdir -p "$TARGET_DATA"
 mkdir -p "$TARGET_INFOS"
 mkdir -p "$TARGET_MAPS"
 
-# 复制数据到tmpfs（从本地SSD复制会很快）
+# Rsync images into tmpfs (fast if source is local SSD)
 echo ""
 echo "📦 开始复制数据到内存（这应该很快，因为从本地SSD复制）..."
 echo "   源: $SOURCE_DATA"
@@ -116,11 +116,10 @@ rsync -av --progress \
 
 echo ""
 echo "📦 复制地图信息文件（map_infos.pkl）..."
-# 注意：地图 npz 文件已经包含在 bench2drive 目录中，这里不再单独复制 maps 目录，
-# 避免在 tmpfs 中保存两份地图数据。
+# Map npz already lives under bench2drive; skip duplicating maps/ on tmpfs.
 cp "$SOURCE_MAP_FILE" "$TARGET_MAP_FILE"
 
-# 验证
+# Sanity check
 echo ""
 echo "✅ 验证复制结果..."
 if [ -d "$TARGET_DATA" ] && [ "$(ls -A $TARGET_DATA)" ]; then
@@ -140,7 +139,7 @@ else
     exit 1
 fi
 
-# 显示下一步
+# Post-copy instructions
 echo ""
 echo "=========================================="
 echo "✅ 数据已加载到内存！"

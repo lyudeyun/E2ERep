@@ -1,37 +1,35 @@
 #!/bin/bash
-# 批量闭环评估脚本（VAD）- 基于最佳开环配置
-# 用于评估指定配置的多个重复实验的修复后 VAD 模型的闭环性能
-# 通常用于评估开环评估中表现最好的配置的所有重复实验
+# Batch closed-loop evaluation (VAD) using the best open-loop setting
+# Evaluates repaired VAD checkpoints for every repetition of a chosen configuration
+# Commonly used after picking the top open-loop setup
 #
-# 使用方法:
+# Usage:
 #   bash leaderboard/scripts/batch_closed_loop_eval_vad_based_on_best_open_loop_setting.sh \
 #     <EXPERIMENT_PATH> \
 #     [--version VERSION] [--gpu-rank GPU] [--port-base PORT] [--routes ROUTES] [--email]
-#     兼容旧写法: --fast / --super-fast（二者互斥，勿同时出现）
 #
-# 示例:
-#   # 方式1: 指定一个特定的实验文件夹
+# Examples:
+#   # Mode 1: single experiment directory
 #   bash leaderboard/scripts/batch_closed_loop_eval_vad_based_on_best_open_loop_setting.sh \
 #     vad_base_Arachne_v2_DE_results/VAD_base_REP_VAL_t3s_Arachne_v2_DE_w26_p52_i50_es5_CONT_1 \
 #     --version fast
 #
-#   # 方式2: 指定一个父目录，自动查找所有包含 VAD_repaired_both_layers.pth 的子目录
+#   # Mode 2: parent directory; discover children with VAD_repaired_both_layers.pth
 #   bash leaderboard/scripts/batch_closed_loop_eval_vad_based_on_best_open_loop_setting.sh \
 #     vad_base_Arachne_v2_DE_results \
 #     --version fast
 #
-#   # 方式3: 使用通配符模式（向后兼容）
+#   # Mode 3: glob pattern (legacy compatibility)
 #   bash leaderboard/scripts/batch_closed_loop_eval_vad_based_on_best_open_loop_setting.sh \
 #     "vad_base_Arachne_v2_DE_results/VAD_base_REP_VAL_t3s_Arachne_v2_DE_w26_p52_i50_es5_CONT_*" \
 #     --version fast
 #
-# 说明：
-#   - 本脚本假设修复是通过 run_experiment.py (model_type=VAD) 跑出来的，
-#     即每个实验目录下存在：
+# Notes:
+#   - Expects repairs produced by run_experiment.py (model_type=VAD), i.e. each run contains:
 #       repair/repair_output/VAD_repaired_both_layers.pth
-#   - 闭环评估使用 Bench2DriveZoo 的 VAD agent:
+#   - Closed-loop stack uses the Bench2DriveZoo VAD agent:
 #       Bench2DriveZoo/team_code/vad_b2d_agent.py
-#     和配置：
+#     plus config:
 #       Bench2DriveZoo/adzoo/vad/configs/VAD/VAD_base_e2e_b2d.py
 
 set -euo pipefail
@@ -52,8 +50,6 @@ Arguments:
 
 Options:
   --version VERSION  使用的模型版本 (normal, fast, super-fast) (默认: normal)
-  --fast             （兼容旧参数）等价于 --version fast
-  --super-fast       （兼容旧参数）等价于 --version super-fast
   --gpu-rank GPU   GPU 设备ID（默认: 0）
   --port-base PORT 端口起始值（默认: 30000，每个任务递增150）
   --routes ROUTES  routes XML 文件路径（默认: leaderboard/data/bench2drive220.xml）
@@ -63,18 +59,17 @@ Options:
   --email=false      显式关闭邮件通知
 
 Examples:
-  # 方式1: 指定单个实验文件夹
+  # Mode 1: single experiment folder
   bash leaderboard/scripts/batch_closed_loop_eval_vad_based_on_best_open_loop_setting.sh \
     vad_base_Arachne_v2_DE_results/VAD_base_REP_VAL_t3s_Arachne_v2_DE_w26_p52_i50_es5_CONT_1 \
     --version fast
 
-  # 方式2: 指定父目录，自动查找所有实验（串行运行）
+  # Mode 2: parent directory (serial discovery)
   bash leaderboard/scripts/batch_closed_loop_eval_vad_based_on_best_open_loop_setting.sh \
     vad_base_Arachne_v2_DE_results \
     --version fast
 
-  # 方式3: 并行运行（N个实例，每个实例处理一部分实验）
-  # 示例：3个实例并行（在3个不同的终端/tmux会话中分别运行）
+  # Mode 3: shard work across N instances (e.g. 3 terminals / tmux panes)
   bash leaderboard/scripts/batch_closed_loop_eval_vad_based_on_best_open_loop_setting.sh \
     vad_base_Arachne_v2_DE_results \
     --version fast --instance-id 0 --total-instances 3
@@ -87,13 +82,11 @@ Examples:
     vad_base_Arachne_v2_DE_results \
     --version fast --instance-id 2 --total-instances 3
 
-  # 超算环境示例：10 个实例并行（SLURM 作业数组）；与旧脚本一致可用 --fast
+  # HPC example: 10-way SLURM array
   # sbatch --array=0-9 eval_job.sh
-  # 其中 eval_job.sh 包含：
+  # eval_job.sh should call this script with:
   #   bash leaderboard/scripts/batch_closed_loop_eval_vad_based_on_best_open_loop_setting.sh \
   #     vad_base_Arachne_v2_DE_results \
-  #     --fast --instance-id $SLURM_ARRAY_TASK_ID --total-instances 10
-  # 推荐等价写法：
   #     --version fast --instance-id $SLURM_ARRAY_TASK_ID --total-instances 10
 EOF
 }
@@ -112,7 +105,7 @@ fi
 EXPERIMENT_PATH="$1"
 shift 1
 
-# 默认参数
+# Defaults
 MODEL_VERSION="normal"
 GPU_RANK=0
 PORT_BASE=30000
@@ -122,22 +115,10 @@ PLANNER_TYPE="only_traj"
 INSTANCE_ID=0
 TOTAL_INSTANCES=1
 NOTIFY_EMAIL=False
-LEGACY_FAST=0
-LEGACY_SUPER_FAST=0
 
-# 解析可选参数
+# Optional flags
 while [[ $# -gt 0 ]]; do
   case $1 in
-    --fast)
-      LEGACY_FAST=1
-      MODEL_VERSION="fast"
-      shift
-      ;;
-    --super-fast)
-      LEGACY_SUPER_FAST=1
-      MODEL_VERSION="super-fast"
-      shift
-      ;;
     --version)
       MODEL_VERSION="$2"
       shift 2
@@ -178,7 +159,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# 验证并行参数
+# Validate sharding args
 if [ "${INSTANCE_ID}" -lt 0 ] || [ "${INSTANCE_ID}" -ge "${TOTAL_INSTANCES}" ]; then
   echo "ERROR: instance-id must be in range [0, total-instances-1]" 1>&2
   echo "  instance-id: ${INSTANCE_ID}" 1>&2
@@ -186,15 +167,10 @@ if [ "${INSTANCE_ID}" -lt 0 ] || [ "${INSTANCE_ID}" -ge "${TOTAL_INSTANCES}" ]; 
   exit 2
 fi
 
-if [ "${LEGACY_FAST}" = "1" ] && [ "${LEGACY_SUPER_FAST}" = "1" ]; then
-  echo "ERROR: --fast and --super-fast are mutually exclusive" 1>&2
-  exit 2
-fi
-
-# 确定 REPO_ROOT（需要在检查 CARLA_ROOT 之前定义）
+# Repo root (needed before CARLA_ROOT checks)
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
-# 可选：--email 时在本脚本内发信（不修改 run_closed_loop_eval.sh）
+# Optional: send mail from this wrapper when --email is set
 send_vad_batch_closed_loop_email() {
   local exit_code="$1"
   local checkpoint="$2"
@@ -228,9 +204,9 @@ send_email_notification(f'[closed-loop] {status}', body)
   unset _NOTIFY_REPO_ROOT _NOTIFY_EXIT _NOTIFY_CHECKPOINT _NOTIFY_SAVE _NOTIFY_ROUTES _NOTIFY_PORT
 }
 
-# 检查 CARLA_ROOT，如果未设置，尝试使用默认路径
+# CARLA_ROOT fallback to bundled Bench2Drive path
 if [ -z "${CARLA_ROOT:-}" ]; then
-  # 尝试使用默认路径：Bench2DriveZoo/carla
+  # Default: REPO_ROOT/Bench2DriveZoo/carla
   DEFAULT_CARLA_ROOT="${REPO_ROOT}/Bench2DriveZoo/carla"
   if [ -f "${DEFAULT_CARLA_ROOT}/CarlaUE4.sh" ] && [ -d "${DEFAULT_CARLA_ROOT}/PythonAPI/carla/agents" ]; then
     export CARLA_ROOT="${DEFAULT_CARLA_ROOT}"
@@ -246,7 +222,7 @@ if [ -z "${CARLA_ROOT:-}" ]; then
   fi
 fi
 
-# 设置环境变量
+# Export runtime env
 export CARLA_SERVER="${CARLA_ROOT}/CarlaUE4.sh"
 # Remove inherited CARLA PythonAPI / egg entries first.
 # This avoids loading an ABI-incompatible egg such as py3.7 inside a Python 3.10 env.
@@ -293,7 +269,7 @@ else
     fi
   fi
 fi
-export PYTHONPATH=$PYTHONPATH:"${REPO_ROOT}"  # 添加 REPO_ROOT 以支持 Bench2DriveZoo 模块导入
+export PYTHONPATH=$PYTHONPATH:"${REPO_ROOT}"  # Allow importing Bench2DriveZoo packages
 export PYTHONPATH=$PYTHONPATH:leaderboard
 export PYTHONPATH=$PYTHONPATH:leaderboard/team_code
 export PYTHONPATH=$PYTHONPATH:scenario_runner
@@ -301,7 +277,7 @@ export SCENARIO_RUNNER_ROOT=scenario_runner
 export LEADERBOARD_ROOT=leaderboard
 export CHALLENGE_TRACK_CODENAME=SENSORS
 
-# 确定使用的 agent 和 config（REPO_ROOT 已在前面定义）
+# Pick agent + config for the requested speed tier
 if [ "${MODEL_VERSION}" = "super-fast" ] || [ "${MODEL_VERSION}" = "super_fast" ]; then
   VERSION_NAME="super_fast"
   TEAM_AGENT="${REPO_ROOT}/Bench2DriveZoo/team_code/vad_b2d_agent_super_fast.py"
@@ -319,7 +295,7 @@ else
   exit 1
 fi
 
-# 检查文件是否存在
+# Sanity-check paths
 if [ ! -f "${TEAM_AGENT}" ]; then
   echo "ERROR: Team agent not found: ${TEAM_AGENT}" 1>&2
   exit 1
@@ -329,9 +305,9 @@ if [ ! -f "${BASE_CONFIG}" ]; then
   exit 1
 fi
 
-# 输出目录会在每个实验目录下创建 closed_loop_eval_<routes_tag>/ 文件夹
+# Each experiment dir gets closed_loop_eval_<routes_tag>/
 
-# 解析实验路径并查找所有匹配的实验目录
+# Resolve EXPERIMENT_PATH into concrete experiment directories
 echo "================================================================================"
 echo "查找匹配的实验目录..."
 echo "输入路径: ${EXPERIMENT_PATH}"
@@ -339,16 +315,16 @@ echo "==========================================================================
 
 MATCHED_EXPERIMENTS=()
 
-# 处理绝对路径或相对路径
+# Absolute vs repo-relative input
 if [[ "${EXPERIMENT_PATH}" = /* ]]; then
-  # 绝对路径
+  # Absolute
   input_path="${EXPERIMENT_PATH}"
 else
-  # 相对路径，基于 REPO_ROOT
+  # Relative to REPO_ROOT
   input_path="${REPO_ROOT}/${EXPERIMENT_PATH}"
 fi
 
-# 情况1: 如果输入路径是一个文件（.pth文件），直接使用其所在目录
+# Case 1: user passed a .pth file → climb to experiment root
 if [ -f "${input_path}" ] && [[ "${input_path}" == *.pth ]]; then
   exp_dir=$(dirname "$(dirname "$(dirname "${input_path}")")")
   pth_file="${input_path}"
@@ -356,19 +332,19 @@ if [ -f "${input_path}" ] && [[ "${input_path}" == *.pth ]]; then
     MATCHED_EXPERIMENTS+=("${exp_dir}")
     echo "找到单个实验: ${exp_dir}"
   fi
-# 情况2: 如果输入路径是一个目录，检查是否是单个实验目录
+# Case 2: directory path — single experiment vs parent of many
 elif [ -d "${input_path}" ]; then
-  # 检查是否是单个实验目录（包含 repair/repair_output/VAD_repaired_both_layers.pth，与 run_experiment 一致）
+  # Single experiment if repair/repair_output/VAD_repaired_both_layers.pth exists (run_experiment layout)
   pth_file="${input_path}/repair/repair_output/VAD_repaired_both_layers.pth"
   if [ ! -f "${pth_file}" ]; then
     pth_file="${input_path}/repair_vad/repair_output/VAD_repaired_both_layers.pth"
   fi
   if [ -f "${pth_file}" ]; then
-    # 单个实验目录
+    # Single experiment
     MATCHED_EXPERIMENTS+=("${input_path}")
     echo "找到单个实验目录: ${input_path}"
   else
-    # 父目录，查找所有包含.pth文件的子目录
+    # Parent directory: search child experiments
     echo "在父目录中查找所有包含.pth文件的实验..."
     while IFS= read -r -d '' exp_dir; do
       pth_file="${exp_dir}/repair/repair_output/VAD_repaired_both_layers.pth"
@@ -382,11 +358,11 @@ elif [ -d "${input_path}" ]; then
       echo "在 ${input_path} 中未找到任何包含.pth文件的实验目录"
     fi
   fi
-# 情况3: 如果输入路径包含通配符，使用 find 查找
+# Case 3: glob pattern → find
 elif [[ "${EXPERIMENT_PATH}" == *"*"* ]]; then
-  # 提取目录部分和模式部分
+  # Split directory prefix and basename pattern
   if [[ "${EXPERIMENT_PATH}" == *"/"* ]]; then
-    # 包含路径分隔符
+    # Pattern includes a path prefix
     dir_part=$(dirname "${EXPERIMENT_PATH}")
     pattern_part=$(basename "${EXPERIMENT_PATH}")
     
@@ -396,7 +372,7 @@ elif [[ "${EXPERIMENT_PATH}" == *"*"* ]]; then
       search_base="${REPO_ROOT}/${dir_part}"
     fi
   else
-    # 只有模式，在默认搜索目录中查找
+    # Pattern only — search from repo root
     pattern_part="${EXPERIMENT_PATH}"
     search_base="${REPO_ROOT}"
   fi
@@ -431,21 +407,20 @@ if [ ${#MATCHED_EXPERIMENTS[@]} -eq 0 ]; then
   exit 1
 fi
 
-# 按名称排序
+# Deterministic order
 IFS=$'\n' MATCHED_EXPERIMENTS=($(sort <<<"${MATCHED_EXPERIMENTS[*]}"))
 unset IFS
 
 TOTAL_EXPERIMENTS=${#MATCHED_EXPERIMENTS[@]}
 echo "找到 ${TOTAL_EXPERIMENTS} 个匹配的实验"
 
-# 并行分配：根据 instance-id 和 total-instances 分配实验
+# Shard experiments when running multiple instances
 if [ "${TOTAL_INSTANCES}" -gt 1 ]; then
   echo "并行模式: 实例 ${INSTANCE_ID}/${TOTAL_INSTANCES}"
   
-  # 计算每个实例应该处理的实验索引
+  # Round-robin assignment: experiment i → instance (i % total_instances)
   ASSIGNED_EXPERIMENTS=()
   for i in "${!MATCHED_EXPERIMENTS[@]}"; do
-    # 使用模运算分配：实验 i 分配给实例 (i % total_instances)
     assigned_instance=$((i % TOTAL_INSTANCES))
     if [ "${assigned_instance}" -eq "${INSTANCE_ID}" ]; then
       ASSIGNED_EXPERIMENTS+=("${MATCHED_EXPERIMENTS[$i]}")
@@ -465,26 +440,18 @@ for exp_dir in "${MATCHED_EXPERIMENTS[@]}"; do
 done
 echo ""
 
-# 准备评估任务
+# Task bookkeeping
 TOTAL_TASKS=${#MATCHED_EXPERIMENTS[@]}
-# 每个实例使用不同的端口范围，避免冲突
-# 端口分配策略：
-#   - 每个实例内的任务之间间隔150
-#   - 不同实例的起始端口间隔100（确保不重叠）
-#   - 实例0: 30000, 30150, 30300, 30450, ...
-#   - 实例1: 30100, 30250, 30400, 30550, ...
-#   - 实例2: 30200, 30350, 30500, 30650, ...
-#   - 实例N: (30000 + N*100), (30000 + N*100 + 150), ...
-# 注意：理论上支持任意数量的并行实例，但受限于：
-#   - 可用端口范围（通常65535是上限）
-#   - GPU内存（如果多个实例共享GPU）
-#   - 系统资源（CPU、内存等）
-INSTANCE_PORT_OFFSET=$((INSTANCE_ID * 100))  # 每个实例偏移100，避免重叠
+# Port planning: +150 between tasks inside an instance, +100 between instances
+# Instance 0: 30000, 30150, ...
+# Instance 1: 30100, 30250, ...
+# Beware OS port limits, GPU memory, and CPU load when scaling out.
+INSTANCE_PORT_OFFSET=$((INSTANCE_ID * 100))  # Stagger instances by 100
 CURRENT_PORT=$((PORT_BASE + INSTANCE_PORT_OFFSET))
 CURRENT_TM_PORT=$((PORT_BASE + 20000 + INSTANCE_PORT_OFFSET))
-PORT_INCREMENT=150  # 每个任务递增150
+PORT_INCREMENT=150  # Step between tasks inside an instance
 
-# 检查端口是否超出合理范围（警告，但不阻止）
+# Warn if ports look huge (non-fatal)
 MAX_REASONABLE_PORT=$((PORT_BASE + INSTANCE_PORT_OFFSET + (TOTAL_TASKS - 1) * PORT_INCREMENT))
 if [ "${MAX_REASONABLE_PORT}" -gt 60000 ]; then
   echo "WARNING: 端口范围可能过大 (最大端口: ${MAX_REASONABLE_PORT})" 1>&2
@@ -520,12 +487,11 @@ for i in "${!MATCHED_EXPERIMENTS[@]}"; do
   echo "[${task_num}/${TOTAL_TASKS}] 评估 VAD: ${exp_name}"
   echo "  PTH文件: ${pth_file}"
   
-  # 构建输出路径：避免不同 routes XML 的结果互相覆盖
-  # 规则：在每个实验目录下创建 closed_loop_eval_<ROUTES_BASENAME>/ 文件夹（与 open_loop_eval/ 并列）
-  # 例：ROUTES=leaderboard/data/bench2drive220.xml -> closed_loop_eval_bench2drive220/
+  # Tag output folder by routes file so different XMLs do not clobber each other
+  # e.g. bench2drive220.xml → closed_loop_eval_bench2drive220/
   routes_base="$(basename "${ROUTES}")"
   routes_stem="${routes_base%.xml}"
-  # 兜底：把奇怪字符替换成下划线，保证目录名安全
+  # Sanitize folder names
   routes_tag="$(echo "${routes_stem}" | sed 's/[^A-Za-z0-9._-]/_/g')"
   cl_dir="${exp_dir}/closed_loop_eval_${routes_tag}"
   checkpoint_json="${cl_dir}/closed_loop_eval.json"
@@ -534,17 +500,17 @@ for i in "${!MATCHED_EXPERIMENTS[@]}"; do
   
   mkdir -p "${cl_dir}"
   
-  # 构建 team_config (config_path+model_path)
+  # Leaderboard expects config_path+checkpoint_path
   team_config="${BASE_CONFIG}+${pth_file}"
   
-  # 设置端口
+  # Ports for this task
   port=${CURRENT_PORT}
   tm_port=${CURRENT_TM_PORT}
   
   echo "  端口: ${port}, TM端口: ${tm_port}"
   echo "  输出: ${checkpoint_json}"
   
-  # 调用评估脚本
+  # Launch closed-loop driver
   set +e
   bash "${REPO_ROOT}/leaderboard/scripts/run_closed_loop_eval.sh" \
     "${port}" \
@@ -572,14 +538,14 @@ for i in "${!MATCHED_EXPERIMENTS[@]}"; do
     FAILED_EXPERIMENTS+=("${exp_name}")
   fi
   
-  # 递增端口
+  # Advance ports for next task
   CURRENT_PORT=$((CURRENT_PORT + PORT_INCREMENT))
   CURRENT_TM_PORT=$((CURRENT_TM_PORT + PORT_INCREMENT))
   
   echo ""
 done
 
-# 输出总结
+# Final summary
 echo "================================================================================"
 echo "VAD 闭环评估完成"
 echo "================================================================================"

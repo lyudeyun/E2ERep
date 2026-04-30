@@ -5,14 +5,14 @@
 #PJM -j
 #PJM -o vad_train_%j.log
 #PJM -m e
-#PJM --mail-list lyudeyun@gmail.com
+#PJM --mail-list you@example.com
 
-# 切换到工作目录
+# Change to working directory
 cd /home/pj25001076/ku50002427/git/B2DRepair/Bench2DriveZoo || exit 1
 
-# 激活 conda 环境（按需修改）
+# Activate conda env (edit as needed)
 source ~/.bashrc
 conda activate b2d_zoo
 
-# 训练命令（2 张卡）
+# Training (2 GPUs)
 ./adzoo/vad/dist_train.sh ./adzoo/vad/configs/VAD/VAD_tiny_e2e_b2d.py 2

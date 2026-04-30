@@ -98,7 +98,7 @@ class ArachnePyTorch:
         self.velocity_phi = 0.7  # Inertia weight (standard PSO: 0.4-0.9, commonly 0.7)
         self.min_iteration_range = 10
         self.target_layer = None
-        self.num_weights_to_repair = None  # 新增：指定修复的权重数量
+        self.num_weights_to_repair = None  # Optional cap on how many weights to repair
         self.early_stop_patience = None  # Early stopping patience (None = disabled, int = number of iterations without improvement)
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.eval_batch_size = None  # Batch size for fitness evaluation (None = auto-detect based on GPU memory)
@@ -142,7 +142,7 @@ class ArachnePyTorch:
             # Alternative parameter name
             self.target_layer = list(kwargs['target_layers'])
         if 'num_weights_to_repair' in kwargs:
-            # 新增：指定要修复的权重数量
+            # Optional: limit number of weights targeted for repair
             self.num_weights_to_repair = kwargs['num_weights_to_repair']
         if 'eval_batch_size' in kwargs:
             # Batch size for fitness evaluation (None = auto-detect, int = fixed batch size)
@@ -1740,7 +1740,7 @@ class ArachnePyTorch:
         batch_size = pred_traj.shape[0]
         # B2D fixed planning horizon: 6 future steps (full trajectory)
         # But we only use the specified time_horizon for L2 calculation
-        timesteps_for_horizon = {1: 2, 2: 4, 3: 6}  # {1秒: 2步, 2秒: 4步, 3秒: 6步}
+        timesteps_for_horizon = {1: 2, 2: 4, 3: 6}  # {1s: 2 steps, 2s: 4, 3s: 6}
         timesteps = timesteps_for_horizon.get(time_horizon, 6)
         
         # Accept B2D flattened output: (batch, 72) -> (batch, 6, 6, 2) -> select cmd -> (batch, 6, 2)
@@ -2155,7 +2155,7 @@ def build_frame_data_dict(json_file, frame_identifiers=None):
             'plan_L2_1s': frame.get('plan_L2_1s', frame.get('plan_L2_3s', 0.0)),  # Fallback to 3s if 1s not available
             'plan_L2_2s': frame.get('plan_L2_2s', frame.get('plan_L2_3s', 0.0)),  # Fallback to 3s if 2s not available
             'plan_L2_3s': frame.get('plan_L2_3s', 0.0),
-            'ego_fut_cmd_idx': frame.get('ego_fut_cmd_idx', 0),  # 保存指令索引
+            'ego_fut_cmd_idx': frame.get('ego_fut_cmd_idx', 0),  # Command index for multi-branch
         }
         
         # Add collision information if available (save all time horizons)

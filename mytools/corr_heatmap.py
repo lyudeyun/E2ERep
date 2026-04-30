@@ -52,8 +52,8 @@ except ModuleNotFoundError as e:
 
 # ============================================================================
 # Embedded config (optional)
-# - 如果你不想用外部文件，可以把数据直接写在这里，然后用 `--use-embedded` 运行。
-# - 推荐优先用 `EMBEDDED_VECTORS`（每个 metric 一个向量），更符合“6个metric各自一串数”的用法。
+# - To skip external files, paste vectors here and pass `--use-embedded`.
+# - Prefer `EMBEDDED_VECTORS` (one list per metric) for the six-metric workflow.
 # ============================================================================
 EMBEDDED_METRICS: List[str] = [
     "Avg. L2 Error",

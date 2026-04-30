@@ -165,10 +165,10 @@ class PlanningMetric():
     def evaluate_single_coll(self, traj, segmentation, input_gt):
         '''
         traj: torch.Tensor (n_future, 2)
-            自车lidar系为轨迹参考系
+            Ego LiDAR frame is the trajectory reference:
                 ^ y
                 |
-                | 
+                |
                 0------->
                         x
         segmentation: torch.Tensor (n_future, 200, 200)
@@ -186,10 +186,10 @@ class PlanningMetric():
 
         n_future, _ = traj.shape
         trajs = traj.view(n_future, 1, 2)
-        # 轨迹坐标系转换为:
+        # Trajectory coords rotated to:
         #  ^ x
         #  |
-        #  | 
+        #  |
         #  0-------> y
         trajs_ = copy.deepcopy(trajs)
         trajs_[:,:,[0,1]] = trajs_[:,:,[1,0]] # can also change original tensor
@@ -246,10 +246,10 @@ class PlanningMetric():
         ):
         '''
         trajs: torch.Tensor (B, n_future, 2)
-            自车lidar系为轨迹参考系
+            Ego LiDAR frame as trajectory reference:
             ^ y
             |
-            | 
+            |
             0------->
                     x
         gt_trajs: torch.Tensor (B, n_future, 2)
@@ -268,7 +268,7 @@ class PlanningMetric():
             gt_box_coll = self.evaluate_single_coll(gt_trajs[i], segmentation[i], input_gt=True)
 
             xx, yy = trajs[i,:,0], trajs[i, :, 1]
-            # lidar系下的轨迹转换到图片坐标系下
+            # Map LiDAR-frame traj to image / BEV pixel indices
             xi = ((-self.bx[0]/2 - yy) / self.dx[0]).long()
             yi = ((-self.bx[1]/2 + xx) / self.dx[1]).long()
 

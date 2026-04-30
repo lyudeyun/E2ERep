@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-批量重新运行开环评估，针对修复成功但评估失败的实验。
+Re-run open-loop evaluation for experiments where repair succeeded but eval failed.
 
-用法:
-    # 批量：--exp-dir 指向实验根目录（其子目录为多个实验）
+Usage:
+    # Batch: --exp-dir is a parent folder containing many experiment subdirs
     python3 batch_reeval_openloop.py \
         --exp-dir /data1/uniad_tiny_Arachne_v2_DE_results \
         --eval-dataset Bench2DriveZoo/data/infos/b2d_infos_val_partB_25clips.pkl \
@@ -13,7 +13,7 @@
         [--occ-output-dir baseline/UniAD/uniad_occ_cache] \
         [--dry-run]
 
-    # 单个实验：--exp-dir 直接指向一个实验目录（含 repair/repair_output 的目录）
+    # Single experiment: --exp-dir points to one folder with repair/repair_output
     python3 batch_reeval_openloop.py \
         --exp-dir /data1/uniad_tiny_semSegRep_DE_results/UniAD_tiny_REP_VAL_t3s_semSegRep_DE_w7_p14_i50_es5_DISC_1 \
         --eval-dataset Bench2DriveZoo/data/infos/b2d_infos_val_partB_25clips.pkl \
@@ -33,15 +33,15 @@ from run_experiment import run_evaluation
 
 def parse_exp_dir_name(exp_dir_name):
     """
-    从实验目录名解析信息。
-    
-    格式: {model_name}_REP_VAL_{time_horizon_str}_{rep_method}_{search_algo}_{search_params}_{fitness_str}_{run_idx}
-    例如: UniAD_tiny_REP_VAL_t3s_Arachne_v2_DE_w13_p26_i50_es5_DISC_1
-    
+    Parse metadata from an experiment directory name.
+
+    Pattern: {model_name}_REP_VAL_{time_horizon_str}_{rep_method}_{search_algo}_{search_params}_{fitness_str}_{run_idx}
+    Example: UniAD_tiny_REP_VAL_t3s_Arachne_v2_DE_w13_p26_i50_es5_DISC_1
+
     Returns:
         dict with keys: model_name, model_type, or None if cannot parse
     """
-    # 匹配 model_name (VAD_base, UniAD_tiny, etc.)
+    # Match model_name (VAD_base, UniAD_tiny, etc.)
     match = re.match(r'^(VAD_|UniAD_)(base|tiny)', exp_dir_name)
     if not match:
         return None
@@ -56,7 +56,7 @@ def parse_exp_dir_name(exp_dir_name):
 
 
 def find_repaired_model(exp_dir, model_type):
-    """查找修复后的模型文件路径。每个实验的 pth 在 repair/repair_output/ 下。"""
+    """Return path to repaired weights under repair/repair_output/."""
     repair_dir = exp_dir / "repair" / "repair_output"
     
     if model_type == "VAD":
@@ -72,7 +72,7 @@ def find_repaired_model(exp_dir, model_type):
 
 
 def check_eval_complete(exp_dir, model_name):
-    """检查开环评估是否已完成（有 .json 和 .log）。"""
+    """True if open-loop eval artifacts (.json and .log) already exist."""
     eval_dir = exp_dir / "open_loop_eval"
     model_lower = model_name.lower()
     
@@ -84,42 +84,42 @@ def check_eval_complete(exp_dir, model_name):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="批量重新运行开环评估"
+        description="Batch re-run open-loop evaluation"
     )
     parser.add_argument(
         '--exp-dir',
         type=str,
         required=True,
-        help='实验根目录（批量）或单个实验目录（含 repair/repair_output 的路径）'
+        help='Experiment root (batch) or single experiment dir with repair/repair_output'
     )
     parser.add_argument(
         '--eval-dataset',
         type=str,
         required=True,
-        help='评估数据集 PKL 文件路径（例如: Bench2DriveZoo/data/infos/b2d_infos_val_partB_25clips.pkl）'
+        help='Eval dataset PKL (e.g. Bench2DriveZoo/data/infos/b2d_infos_val_partB_25clips.pkl)'
     )
     parser.add_argument(
         '--eval-cuda-device',
         type=str,
         default='0',
-        help='CUDA 设备 ID（默认: 0）'
+        help='CUDA device id (default: 0)'
     )
     parser.add_argument(
         '--occ-output-dir',
         type=str,
         default=None,
-        help='可选的 occupancy 输出目录（用于评估时的碰撞计算）'
+        help='Optional occupancy cache dir for collision scoring during eval'
     )
     parser.add_argument(
         '--jobs',
         type=int,
         default=1,
-        help='并行评估数（单 GPU 下同时跑几个，默认 1 为串行）'
+        help='Parallel eval workers on one GPU (default 1 = serial)'
     )
     parser.add_argument(
         '--dry-run',
         action='store_true',
-        help='仅打印将要重跑的实验，不实际执行'
+        help='Print which experiments would run without executing'
     )
 
     args = parser.parse_args()
@@ -140,24 +140,24 @@ def main():
         print(f"ERROR: 评估数据集不存在: {eval_dataset}")
         return 1
     
-    # 扫描实验目录：若当前路径本身是单个实验目录则只评估它，否则扫描其子目录
+    # Scan experiments: if path itself is one experiment, only that; else scan children
     print(f"扫描实验目录: {exp_base_dir}")
     print("=" * 80)
     
     exp_dirs_to_reeval = []
     info_self = parse_exp_dir_name(exp_base_dir.name)
     if info_self is not None and (exp_base_dir / "repair" / "repair_output").is_dir():
-        # --exp-dir 指向的是单个实验目录，只评估这一个
+        # --exp-dir is a single experiment directory
         candidates = [exp_base_dir]
         print("  (检测到单个实验目录，仅评估该目录)")
     else:
-        # --exp-dir 是实验根目录，扫描其下所有子目录
+        # --exp-dir is a parent; scan immediate subdirectories
         candidates = [item for item in exp_base_dir.iterdir() if item.is_dir()]
     
     for item in candidates:
         exp_dir_name = item.name
         
-        # 解析实验信息
+        # Parse folder metadata
         info = parse_exp_dir_name(exp_dir_name)
         if info is None:
             print(f"  [跳过] {exp_dir_name} (无法解析目录名)")
@@ -166,18 +166,18 @@ def main():
         model_name = info['model_name']
         model_type = info['model_type']
         
-        # 检查是否有修复后的模型
+        # Require repaired checkpoint
         repaired_model = find_repaired_model(item, model_type)
         if repaired_model is None:
             print(f"  [跳过] {exp_dir_name} (没有修复后的模型)")
             continue
         
-        # 检查评估是否已完成
+        # Skip if eval already finished
         if check_eval_complete(item, model_name):
             print(f"  [跳过] {exp_dir_name} (评估已完成)")
             continue
         
-        # 需要重跑
+        # Needs re-eval
         print(f"  [需要重跑] {exp_dir_name}")
         exp_dirs_to_reeval.append({
             'exp_dir': item,
@@ -199,7 +199,7 @@ def main():
             print(f"  {i}. {exp_info['exp_dir'].name}")
         return 0
     
-    # 批量重跑（支持单 GPU 并行）
+    # Fan out evaluations (optional parallelism on one GPU)
     njobs = max(1, int(args.jobs))
     print(f"\n开始批量重跑 (jobs={njobs}, 单 GPU: {args.eval_cuda_device})...")
     print("=" * 80)
@@ -259,7 +259,7 @@ def main():
                     if err:
                         print(err)
 
-    # 总结
+    # Summary
     print("\n" + "=" * 80)
     print(f"批量重跑完成:")
     print(f"  成功: {success_count}/{len(exp_dirs_to_reeval)}")

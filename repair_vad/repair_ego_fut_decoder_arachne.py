@@ -246,7 +246,7 @@ def extract_features(model, data_infos, threshold_good, threshold_bad,
             # 2s = 4 timesteps (4 trajectory points)
             # 3s = 6 timesteps (6 trajectory points, full trajectory)
             # Dictionary mapping: {time_horizon_in_seconds: number_of_timesteps}
-            timesteps_for_horizon = {1: 2, 2: 4, 3: 6}  # {1秒: 2步, 2秒: 4步, 3秒: 6步}
+            timesteps_for_horizon = {1: 2, 2: 4, 3: 6}  # {1s: 2 steps, 2s: 4, 3s: 6}
             num_timesteps = timesteps_for_horizon.get(time_horizon, 6)
             min_len = min(num_timesteps, int(pred_mode_absolute.shape[0]), int(gt_traj.shape[0]))
             l2_error = torch.norm(pred_mode_absolute[:min_len] - gt_traj[:min_len], dim=1).mean().item()
@@ -532,7 +532,7 @@ def main():
                 # Compute L2 error for the specified time horizon
                 # Each timestep = 0.5s: 1s=2 points, 2s=4 points, 3s=6 points (full trajectory)
                 # Dictionary mapping: {time_horizon_in_seconds: number_of_timesteps}
-                timesteps_for_horizon = {1: 2, 2: 4, 3: 6}  # {1秒: 2步, 2秒: 4步, 3秒: 6步}
+                timesteps_for_horizon = {1: 2, 2: 4, 3: 6}  # {1s: 2 steps, 2s: 4, 3s: 6}
                 num_timesteps = timesteps_for_horizon.get(args.time_horizon, 6)
                 min_len = min(num_timesteps, int(pred_mode_absolute.shape[0]), int(gt_traj.shape[0]))
                 l2_error = torch.norm(pred_mode_absolute[:min_len] - gt_traj[:min_len], dim=1).mean().item()
@@ -581,7 +581,7 @@ def main():
                 # Compute L2 error for the specified time horizon
                 # Each timestep = 0.5s: 1s=2 points, 2s=4 points, 3s=6 points (full trajectory)
                 # Dictionary mapping: {time_horizon_in_seconds: number_of_timesteps}
-                timesteps_for_horizon = {1: 2, 2: 4, 3: 6}  # {1秒: 2步, 2秒: 4步, 3秒: 6步}
+                timesteps_for_horizon = {1: 2, 2: 4, 3: 6}  # {1s: 2 steps, 2s: 4, 3s: 6}
                 num_timesteps = timesteps_for_horizon.get(args.time_horizon, 6)
                 min_len = min(num_timesteps, int(pred_mode_absolute.shape[0]), int(gt_traj.shape[0]))
                 l2_error = torch.norm(pred_mode_absolute[:min_len] - gt_traj[:min_len], dim=1).mean().item()

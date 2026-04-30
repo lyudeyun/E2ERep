@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """
-将 validation set 的 pkl 文件拆分成 repair set 和新的 validation set
-拆分的最小单位是 clip，而不是帧
+Split a validation-set PKL into a repair subset and a new validation subset.
+Splits are by clip, not by individual frames.
 """
 import pickle
 import argparse
@@ -12,8 +12,8 @@ from collections import defaultdict
 
 def get_clips_from_pkl(pkl_file):
     """
-    从 pkl 文件中提取所有 clips 及其帧索引
-    
+    List every clip and its frame indices from a PKL.
+
     Returns:
         clips_dict: {clip_id: [frame_indices]}
         clip_list: [(clip_id, frame_count, frame_indices)]
@@ -21,16 +21,16 @@ def get_clips_from_pkl(pkl_file):
     with open(pkl_file, 'rb') as f:
         data = pickle.load(f)
     
-    # 按 clip 分组（使用 folder 作为 clip 标识）
+    # Group frames by clip id (``folder`` field)
     clips_dict = defaultdict(list)
     for i, d in enumerate(data):
         clip_id = d.get('folder', '')
         clips_dict[clip_id].append(i)
     
-    # 转换为列表，便于排序和选择
+    # Materialize as a list for sorting / selection
     clip_list = [(clip_id, len(indices), indices) 
                  for clip_id, indices in clips_dict.items()]
-    clip_list.sort(key=lambda x: x[0])  # 按 clip_id 排序
+    clip_list.sort(key=lambda x: x[0])  # Stable order by clip_id
     
     return clips_dict, clip_list
 
@@ -39,25 +39,24 @@ def split_by_clips(clip_list, mode='ratio', repair_ratio=0.5,
                    repair_clip_count=None, repair_clip_ids=None, 
                    random_seed=42, shuffle=True):
     """
-    按 clip 拆分数据
-    
+    Split clips into repair vs validation buckets.
+
     Args:
         clip_list: [(clip_id, frame_count, frame_indices)]
         mode: 'ratio', 'count', 'manual'
-        repair_ratio: repair set 的 clip 比例（mode='ratio' 时使用）
-        repair_clip_count: repair set 的 clip 数量（mode='count' 时使用）
-        repair_clip_ids: repair set 的 clip ID 列表（mode='manual' 时使用）
-        random_seed: 随机种子
-        shuffle: 是否随机打乱
-    
+        repair_ratio: fraction of clips for repair when mode='ratio'
+        repair_clip_count: number of repair clips when mode='count'
+        repair_clip_ids: explicit repair clip IDs when mode='manual'
+        random_seed: RNG seed
+        shuffle: shuffle before slicing when True
+
     Returns:
-        repair_clips: [(clip_id, frame_count, frame_indices)]
-        val_clips: [(clip_id, frame_count, frame_indices)]
+        repair_clips, val_clips: same structure as clip_list entries
     """
     total_clips = len(clip_list)
     
     if mode == 'manual':
-        # 手动选择模式
+        # Manual clip selection
         if repair_clip_ids is None:
             raise ValueError("repair_clip_ids must be provided when mode='manual'")
         
@@ -70,7 +69,7 @@ def split_by_clips(clip_list, mode='ratio', repair_ratio=0.5,
             print(f"Warning: Some clip IDs not found: {missing}")
     
     elif mode == 'count':
-        # 按 clip 数量模式
+        # Fixed clip count mode
         if repair_clip_count is None:
             raise ValueError("repair_clip_count must be provided when mode='count'")
         
@@ -88,7 +87,7 @@ def split_by_clips(clip_list, mode='ratio', repair_ratio=0.5,
         val_clips = clip_list_shuffled[repair_clip_count:]
     
     else:  # mode == 'ratio'
-        # 按比例模式
+        # Ratio-based split
         repair_clip_count = int(total_clips * repair_ratio)
         
         if shuffle:
@@ -133,28 +132,28 @@ def split_by_shortest_clips(clip_list, k=1):
 
 def save_split_pkl(input_pkl, output_pkl, selected_clips):
     """
-    保存选中的 clips 到新的 pkl 文件
-    
+    Write frames belonging to selected clips into a new PKL.
+
     Args:
-        input_pkl: 输入的 pkl 文件
-        output_pkl: 输出的 pkl 文件
+        input_pkl: source PKL path
+        output_pkl: destination PKL path
         selected_clips: [(clip_id, frame_count, frame_indices)]
     """
     with open(input_pkl, 'rb') as f:
         all_data = pickle.load(f)
     
-    # 收集所有选中的帧索引
+    # Gather frame indices for chosen clips
     selected_indices = []
     for clip_id, frame_count, frame_indices in selected_clips:
         selected_indices.extend(frame_indices)
     
-    # 按原始顺序排序
+    # Preserve temporal order
     selected_indices.sort()
     
-    # 提取对应的数据
+    # Subset the original list
     selected_data = [all_data[i] for i in selected_indices]
-    
-    # 保存
+
+    # Persist
     os.makedirs(os.path.dirname(output_pkl) if os.path.dirname(output_pkl) else '.', exist_ok=True)
     with open(output_pkl, 'wb') as f:
         pickle.dump(selected_data, f)
@@ -163,7 +162,7 @@ def save_split_pkl(input_pkl, output_pkl, selected_clips):
 
 
 def list_clips(pkl_file):
-    """列出所有 clips 的信息"""
+    """Print a table of clips."""
     _, clip_list = get_clips_from_pkl(pkl_file)
     
     print(f"Total clips: {len(clip_list)}")
@@ -231,12 +230,12 @@ Examples:
         print(f"Error: Input file not found: {args.input}")
         return
     
-    # 列出所有 clips
+    # List mode
     if args.list:
         list_clips(args.input)
         return
     
-    # 获取所有 clips
+    # Load clip index
     print(f"Loading validation pkl file: {args.input}")
     clips_dict, clip_list = get_clips_from_pkl(args.input)
     total_clips = len(clip_list)
@@ -246,7 +245,7 @@ Examples:
     # shortest-k overrides mode (for fast iteration)
     use_shortest = args.shortest_k is not None
 
-    # 处理 manual 模式
+    # Manual mode inputs
     repair_clip_ids = None
     if (not use_shortest) and args.mode == 'manual':
         if args.repair_clip_file:
@@ -258,7 +257,7 @@ Examples:
             print("Error: --repair-clip-ids or --repair-clip-file must be provided in manual mode")
             return
     
-    # 验证参数
+    # Validate CLI args
     if (not use_shortest) and args.mode == 'ratio' and not (0 < args.repair_ratio < 1):
         print(f"Error: repair_ratio must be between 0 and 1, got {args.repair_ratio}")
         return
@@ -267,7 +266,7 @@ Examples:
         print("Error: --repair-clip-count must be provided in count mode")
         return
     
-    # 拆分 clips
+    # Perform split
     if use_shortest:
         repair_clips, val_clips = split_by_shortest_clips(clip_list, k=args.shortest_k)
     else:
@@ -281,7 +280,7 @@ Examples:
             shuffle=not args.no_shuffle
         )
     
-    # 统计信息
+    # Stats
     repair_clip_count = len(repair_clips)
     repair_frame_count = sum(frame_count for _, frame_count, _ in repair_clips)
     val_clip_count = len(val_clips)
@@ -291,12 +290,12 @@ Examples:
     print(f"  Repair set: {repair_clip_count} clips, {repair_frame_count} frames ({repair_frame_count/total_frames*100:.1f}%)")
     print(f"  New validation set: {val_clip_count} clips, {val_frame_count} frames ({val_frame_count/total_frames*100:.1f}%)")
     
-    # 显示 repair set 的 clip IDs
+    # Echo repair clip IDs
     print(f"\nRepair set clip IDs:")
     for clip_id, frame_count, _ in repair_clips:
         print(f"  {clip_id} ({frame_count} frames)")
     
-    # 保存文件
+    # Write outputs
     print(f"\nSaving repair set to: {args.output_repair}")
     repair_saved_frames = save_split_pkl(args.input, args.output_repair, repair_clips)
     

@@ -9,22 +9,22 @@
 
 set -euo pipefail
 
-# ==== 环境（按需启用 module） ====
+# ==== Environment (enable module load if needed) ====
 # module load matlab
 # module load cuda
 
-# ==== Conda 环境 ====
+# ==== Conda ====
 source /home/pj25001076/ku50002427/miniconda3/etc/profile.d/conda.sh
 conda activate b2d_zoo
 export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}"
 
-# ==== 进入工程 ====
+# ==== Repo root ====
 cd /home/pj25001076/ku50002427/git/B2DRepair || exit 1
 
-# ==== 日志目录 ====
+# ==== Logs ====
 mkdir -p logs
 
-# ==== 运行（方案A：单卡并行两个实验）====
+# ==== Runs (scheme A: multiple experiments on one GPU) ====
 CUDA_VISIBLE_DEVICES=0 \
 python3 run_experiment.py \
   --model-type VAD \

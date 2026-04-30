@@ -1,15 +1,15 @@
 #!/bin/bash
-set -e  # 一旦有命令失败就退出
+set -e  # Exit on first failure
 
 PYTHON_BIN=python3
 
-# 1) 确认 python3 存在
+# 1) Ensure python3 exists
 if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
   echo "Error: python3 not found in PATH."
   exit 1
 fi
 
-# 2) 检查 / 安装 huggingface_hub
+# 2) Check / install huggingface_hub
 if ! "$PYTHON_BIN" -m pip show huggingface_hub > /dev/null 2>&1; then
   echo "huggingface_hub is not installed. Installing now..."
   "$PYTHON_BIN" -m pip install --user huggingface_hub
@@ -17,9 +17,9 @@ else
   echo "huggingface_hub is already installed."
 fi
 
-# 3) 确保 hf 命令可用（新版 CLI）
+# 3) Ensure hf CLI is available
 if ! command -v hf >/dev/null 2>&1; then
-  # 你现在的 hf 在这个目录里：~/Library/Python/3.9/bin
+  # Typical user install path on macOS
   HF_BIN="$HOME/Library/Python/3.9/bin/hf"
   if [ -x "$HF_BIN" ]; then
     echo "Adding $HOME/Library/Python/3.9/bin to PATH for this script..."
@@ -31,10 +31,10 @@ if ! command -v hf >/dev/null 2>&1; then
   fi
 fi
 
-# 4) 创建存放数据的目录
+# 4) Create output directory
 mkdir -p Bench2Drive-mini
 
-# 5) 需要下载的文件列表
+# 5) Files to download
 FILES=(
   "HardBreakRoute_Town01_Route30_Weather3.tar.gz"
   "DynamicObjectCrossing_Town02_Route13_Weather6.tar.gz"
@@ -48,7 +48,7 @@ FILES=(
   "VehicleTurningRoute_Town15_Route443_Weather1.tar.gz"
 )
 
-# 6) 逐个下载
+# 6) Download each file
 for f in "${FILES[@]}"; do
   echo "Downloading $f ..."
   hf download rethinklab/Bench2Drive \

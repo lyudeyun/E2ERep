@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-# 1) 尝试使用 conda 的 b2d_zoo 环境
+# 1) Try activating conda env b2d_zoo
 if command -v conda &>/dev/null; then
   CONDA_BASE="$(conda info --base)"
   # shellcheck source=/dev/null
@@ -9,7 +9,7 @@ if command -v conda &>/dev/null; then
   conda activate b2d_zoo
 fi
 
-# 2) 确认 hf CLI 可用（来自 huggingface_hub）
+# 2) Ensure hf CLI is available (huggingface_hub)
 if ! command -v hf &>/dev/null; then
   echo "hf CLI not found. Trying to install huggingface_hub..."
   python -m pip install --user huggingface_hub
@@ -17,10 +17,10 @@ fi
 
 echo "Using hf from: $(command -v hf)"
 
-# 3) 输出目录与模式
-# 用法:
-#   ./download_train_val.sh              # 仅下载验证集 50 个 clips
-#   ./download_train_val.sh all           # 下载完整数据集（谨慎，体积巨大）
+# 3) Output directory and mode
+# Usage:
+#   ./download_train_val.sh       # 50 validation clips only
+#   ./download_train_val.sh all   # Full dataset (large download)
 MODE="${1:-val}"
 if [[ "$MODE" == "all" ]]; then
   OUT_DIR="Bench2Drive-all"
@@ -39,7 +39,7 @@ if [[ "$MODE" == "all" ]]; then
   exit 0
 fi
 
-# 4) 这 50 个 validation clips（去掉前面的 v1/）
+# 4) These 50 validation clips (no v1/ prefix)
 clips=(
 "ParkingCrossingPedestrian_Town13_Route545_Weather25"
 "OppositeVehicleTakingPriority_Town04_Route214_Weather6"
@@ -93,7 +93,7 @@ clips=(
 "ParkedObstacle_Town10HD_Route372_Weather8"
 )
 
-# 5) 循环下载
+# 5) Download loop
 for clip in "${clips[@]}"; do
   fname="${clip}.tar.gz"
   echo "Downloading $fname ..."

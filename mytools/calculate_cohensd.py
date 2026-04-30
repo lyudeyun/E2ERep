@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
 """
-计算Cohen's d统计量，用于比较不同实验配置的效果
+Compute Cohen's d to compare experiment configurations.
 
-使用方法：
+Usage:
 conda activate b2d_zoo
 python calculate_cohensd.py [--model-type vad|uniad]
 
-- VAD：从 open_loop_eval/<model>_rep_val.log 读取 plan_L2_* / plan_obj_box_col_*。
-- UniAD：从 open_loop_eval/<model>_rep_val.json 用 baseline/convert_uniad_to_vad_metrics.py
-  转成 VAD 格式的 summary 再解析（与 VAD 指标一致）。
+- VAD: read plan_L2_* / plan_obj_box_col_* from open_loop_eval/<model>_rep_val.log.
+- UniAD: convert open_loop_eval/<model>_rep_val.json with baseline/convert_uniad_to_vad_metrics.py
+  to a VAD-style summary, then parse (same metrics as VAD).
 
-实验结构：
-- 两个方法：Arachne_v2, semSegRep
-- 三个fitness函数：DISC, CONT, CONT2
-- 每个实验会有若干次重复（repetition），数量以实际落盘文件为准
-- 权重选择（wXX）以实际实验文件夹名解析到的为准（VAD常见 w26/52/105；UniAD可能是 w7/13/14 等）
+Experiment layout:
+- Two methods: Arachne_v2, semSegRep
+- Three fitness objectives: DISC, CONT, CONT2
+- Several repetitions per experiment (whatever exists on disk)
+- Weight count wXX is parsed from folder names (VAD often w26/52/105; UniAD may be w7/13/14, etc.)
 
-提取的指标：
-- plan_L2_1s, plan_L2_2s, plan_L2_3s (L2误差)
-- plan_obj_box_col_1s, plan_obj_box_col_2s, plan_obj_box_col_3s (碰撞率)
+Metrics extracted:
+- plan_L2_1s, plan_L2_2s, plan_L2_3s (L2 error)
+- plan_obj_box_col_1s, plan_obj_box_col_2s, plan_obj_box_col_3s (collision rate)
 """
 
 import os
@@ -50,9 +50,9 @@ from collections import defaultdict
 
 def extract_metrics_from_log(log_file):
     """
-    从 VAD 格式的 log/summary 文件中提取指标。
-    支持: plan_L2_1s:value 行格式，以及 convert_uniad_to_vad_metrics.py 输出的
-    summary 格式（如 "  plan_L2_1s: 0.5 (n=100)"）。
+    Parse metrics from a VAD-style log or summary file.
+    Supports plan_L2_1s:value lines and convert_uniad_to_vad_metrics.py summaries
+    (e.g. "  plan_L2_1s: 0.5 (n=100)").
     """
     metrics = {}
     try:
@@ -60,12 +60,12 @@ def extract_metrics_from_log(log_file):
             content = f.read()
 
         for horizon in [1, 2, 3]:
-            # 支持 "plan_L2_1s:0.5" 以及 "plan_L2_1s: 0.5 (n=...)"（冒号后可有空格）
+            # Allow "plan_L2_1s:0.5" or "plan_L2_1s: 0.5 (n=...)" (optional space after colon)
             pattern = rf'plan_L2_{horizon}s:\s*([\d.e+-]+)'
             matches = re.findall(pattern, content)
             if matches:
-                # UniAD converter summary 里同一指标会出现两次（avg_all / avg_valid）。
-                # 这里取“最后一次出现”，以便默认使用 avg_valid（有效帧）统计。
+                # UniAD converter summaries list each metric twice (avg_all / avg_valid).
+                # Take the last match so we default to avg_valid (valid frames only).
                 metrics[f'plan_L2_{horizon}s'] = float(matches[-1].strip())
             else:
                 metrics[f'plan_L2_{horizon}s'] = None
@@ -88,9 +88,9 @@ def extract_metrics_from_log(log_file):
 
 def count_collision_frames_vad_rule(json_path):
     """
-    从 converter 输出的 JSON（已按 VAD 规则设置 fut_valid_flag）中统计
-    发生碰撞的帧数：有效帧且 plan_obj_box_col_3s > 0。
-    与 baseline 588 帧的统计口径一致。
+    Count frames with collision from converter JSON (fut_valid_flag per VAD rules):
+    valid frames where plan_obj_box_col_3s > 0.
+    Matches the baseline 588-frame counting convention.
     """
     try:
         with open(json_path, 'r', encoding='utf-8') as f:
@@ -108,13 +108,13 @@ def count_collision_frames_vad_rule(json_path):
 
 def count_vad_collision_from_json(json_path):
     """
-    VAD open-loop JSON 直接统计碰撞（不做均值换算）。
+    Collision stats from VAD open-loop JSON (no mean rescaling).
 
     Returns:
       (valid_frames, collision_frames, collision_events)
-        - valid_frames: fut_valid_flag == True 的帧数
-        - collision_frames: 有效帧且 plan_obj_box_col_3s > 0 的帧数（每帧至多算 1 次）
-        - collision_events: sum(plan_obj_box_col_3s * 6)（6-step 碰撞事件次数）
+        - valid_frames: count with fut_valid_flag == True
+        - collision_frames: valid frames with plan_obj_box_col_3s > 0 (at most one per frame)
+        - collision_events: sum(plan_obj_box_col_3s * 6) (six-step collision events)
     """
     try:
         with open(json_path, "r", encoding="utf-8") as f:
@@ -138,34 +138,34 @@ def count_vad_collision_from_json(json_path):
 
 
 def parse_experiment_name(folder_name):
-    """解析实验文件夹名称，提取配置信息"""
-    # 格式示例: VAD_base_REP_VAL_Arachne_v2_DE_w26_p52_i50_es5_CONT_1
-    # 或: VAD_base_REP_VAL_semSegRep_DE_w26_p52_i50_es5_CONT_1
-    
+    """Parse experiment folder name into configuration fields."""
+    # Example: VAD_base_REP_VAL_Arachne_v2_DE_w26_p52_i50_es5_CONT_1
+    # Or: VAD_base_REP_VAL_semSegRep_DE_w26_p52_i50_es5_CONT_1
+
     parts = folder_name.split('_')
-    
-    # 查找方法名
+
+    # Method name
     method = None
     if 'Arachne_v2' in folder_name:
         method = 'Arachne_v2'
     elif 'semSegRep' in folder_name:
         method = 'semSegRep'
     
-    # 查找权重数量
+    # Weight count
     weight_count = None
     for i, part in enumerate(parts):
         if part.startswith('w') and part[1:].isdigit():
-            weight_count = int(part[1:])  # 提取数字部分
+            weight_count = int(part[1:])  # Numeric part after 'w'
             break
-    
-    # 查找fitness函数类型（倒数第二个字段）
+
+    # Fitness type (second-to-last token)
     fitness_type = None
     if len(parts) >= 2:
         fitness_type = parts[-2]
         if fitness_type not in ['DISC', 'CONT', 'CONT2']:
             fitness_type = None
     
-    # 查找重复次数（最后一个字段）
+    # Repetition index (last token)
     repetition = None
     if len(parts) >= 1:
         try:
@@ -177,17 +177,17 @@ def parse_experiment_name(folder_name):
 
 def cohens_d(group1, group2, paired=False):
     """
-    计算Cohen's d效应量
-    
+    Compute Cohen's d effect size.
+
     Parameters:
-    - group1, group2: 两组数据
-    - paired: 是否为配对样本（paired samples）
+    - group1, group2: two samples
+    - paired: use paired-sample formula if True
     """
     if len(group1) == 0 or len(group2) == 0:
         return None
     
     if paired:
-        # 配对样本的Cohen's d
+        # Paired Cohen's d
         if len(group1) != len(group2):
             return None
         diffs = group1 - group2
@@ -197,13 +197,13 @@ def cohens_d(group1, group2, paired=False):
             return None
         d = mean_diff / std_diff
     else:
-        # 独立样本的Cohen's d
+        # Independent-samples Cohen's d
         mean1 = np.mean(group1)
         mean2 = np.mean(group2)
         std1 = np.std(group1, ddof=1) if len(group1) > 1 else 0
         std2 = np.std(group2, ddof=1) if len(group2) > 1 else 0
 
-        # 合并标准差
+        # Pooled standard deviation
         n1, n2 = len(group1), len(group2)
         if n1 + n2 - 2 == 0:
             return None
@@ -219,14 +219,14 @@ def cohens_d(group1, group2, paired=False):
 
 def interpret_cohens_d(d):
     """
-    根据规则解释Cohen's d的效应量大小
-    规则：
-    - large_worse = d > 0.8        (group2更好，差异很大)
-    - medium_worse = 0.2 <= d <= 0.8 (group2更好，中等差异)
-    - small_worse = 0 < d < 0.2      (group2更好，小差异)
-    - small_better = -0.2 < d < 0   (group1更好，小差异)
-    - medium_better = -0.8 <= d <= -0.2 (group1更好，中等差异)
-    - large_better = d < -0.8       (group1更好，差异很大)
+    Map Cohen's d to qualitative labels (group2 better when d > 0).
+    Rules:
+    - large_worse = d > 0.8        (group2 much better)
+    - medium_worse = 0.2 <= d <= 0.8 (group2 moderately better)
+    - small_worse = 0 < d < 0.2      (group2 slightly better)
+    - small_better = -0.2 < d < 0   (group1 slightly better)
+    - medium_better = -0.8 <= d <= -0.2 (group1 moderately better)
+    - large_better = d < -0.8       (group1 much better)
     """
     if d is None:
         return "N/A"
@@ -245,15 +245,15 @@ def interpret_cohens_d(d):
         return "large_better"
 
 def main():
-    # 解析命令行参数
-    parser = argparse.ArgumentParser(description='计算Cohen\'s d统计量')
-    # NOTE: 当前只保留 3s 指标，移除 1s/2s/3s time horizon 相关参数
+    # CLI
+    parser = argparse.ArgumentParser(description="Compute Cohen's d statistics")
+    # NOTE: Only 3s metrics are kept; 1s/2s/3s time-horizon CLI options were removed
     parser.add_argument('--model-type', type=str, choices=['vad', 'uniad'], default='vad',
-                        help='模型类型：vad 或 uniad（默认 vad）')
+                        help='Model type: vad or uniad (default: vad)')
     args = parser.parse_args()
-    
-    # 实验根目录（按模型类型）
-    # NOTE: 数据根目录写死为 /data1/deyun/B2DRepair_Data（你的机器实际落盘位置）
+
+    # Experiment roots per model type
+    # NOTE: Hard-coded data root for this machine's disk layout
     data_root = "/data1/deyun/B2DRepair_Data"
     if args.model_type == 'vad':
         base_dirs = [
@@ -274,12 +274,12 @@ def main():
                 return 'uniad_tiny_rep_val.log'
             return 'uniad_base_rep_val.log'
     
-    # 存储所有数据
+    # Aggregated rows
     all_data = []
-    missing_log = []  # 缺少log文件的实验
-    parse_failed = []  # 无法解析配置的实验
-    extract_failed = []  # 无法提取指标的实验
-    success_count = 0  # 成功提取的实验数
+    missing_log = []  # Runs missing log/json
+    parse_failed = []  # Unparseable folder names
+    extract_failed = []  # Metrics could not be read
+    success_count = 0  # Successfully parsed experiments
     
     print("=" * 80)
     print("Step 1: 提取所有实验的指标数据")
@@ -293,7 +293,7 @@ def main():
         print(f"\n处理目录: {base_dir}")
         base_path = Path(base_dir)
 
-        # 现在目录结构为: <base_path>/(small|middle|large)/<EXP>/open_loop_eval/...
+        # Layout: <base_path>/(small|middle|large)/<EXP>/open_loop_eval/...
         exp_folders = []
         for pat in folder_patterns:
             for exp_folder in base_path.rglob(pat):
@@ -302,7 +302,7 @@ def main():
         exp_folders = sorted(set(exp_folders))
         print(f"  找到 {len(exp_folders)} 个实验文件夹")
 
-        # UniAD 时用 convert_uniad_to_vad_metrics.py 把 JSON 转成 VAD 格式的 summary 再解析
+        # UniAD: convert JSON to VAD-style summary via convert_uniad_to_vad_metrics.py
         converter_script = Path(__file__).resolve().parent.parent / 'baseline' / 'convert_uniad_to_vad_metrics.py'
 
         for exp_folder in exp_folders:
@@ -316,7 +316,7 @@ def main():
                     missing_log.append(str(exp_folder.relative_to(base_path)))
                     continue
                 metrics = extract_metrics_from_log(log_file)
-                # VAD: 直接从 open_loop_eval/*.json 统计碰撞帧数/次数（不使用均值换算）
+                # VAD: collision counts from open_loop_eval/*.json (no mean rescaling)
                 open_loop_dir = exp_folder / 'open_loop_eval'
                 vad_json = json_file
                 if not vad_json.exists() and open_loop_dir.exists():
@@ -330,7 +330,7 @@ def main():
                     if _events is not None:
                         metrics['collision_event_count'] = float(_events)
             else:
-                # UniAD: 需要 JSON，用 converter 转成 VAD 格式的 summary 再解析
+                # UniAD: need JSON, then converter produces VAD-style summary for parsing
                 if not json_file.exists():
                     open_loop_dir = exp_folder / 'open_loop_eval'
                     rep_val_candidates = []
@@ -384,7 +384,7 @@ def main():
                     extract_failed.append(str(exp_folder.relative_to(base_path)))
                     continue
 
-            # 解析实验配置
+            # Parse folder metadata
             method, weight_count, fitness_type, repetition = parse_experiment_name(exp_folder.name)
             if not all([method, weight_count, fitness_type, repetition]):
                 parse_failed.append(str(exp_folder.relative_to(base_path)))
@@ -393,7 +393,7 @@ def main():
                 extract_failed.append(str(exp_folder.relative_to(base_path)))
                 continue
 
-            # 存储数据
+            # Append row
             data_entry = {
                 'method': method,
                 'weight_count': weight_count,
@@ -405,7 +405,7 @@ def main():
             all_data.append(data_entry)
             success_count += 1
 
-    # 详细报告数据提取情况
+    # Report extraction summary
     print(f"\n" + "=" * 80)
     print("数据提取汇总")
     print("=" * 80)
@@ -417,24 +417,24 @@ def main():
 
     if missing_log:
         print(f"\n缺少log文件的实验 ({len(missing_log)} 个):")
-        for folder in missing_log[:20]:  # 只显示前20个
+        for folder in missing_log[:20]:  # Show at most 20
             print(f"  - {folder}")
         if len(missing_log) > 20:
-            print(f"  ... 还有 {len(missing_log) - 20} 个")
+            print(f"  ... {len(missing_log) - 20} more")
 
     if parse_failed:
         print(f"\n无法解析配置的实验 ({len(parse_failed)} 个):")
-        for folder in parse_failed[:20]:  # 只显示前20个
+        for folder in parse_failed[:20]:  # Show at most 20
             print(f"  - {folder}")
         if len(parse_failed) > 20:
-            print(f"  ... 还有 {len(parse_failed) - 20} 个")
+            print(f"  ... {len(parse_failed) - 20} more")
 
     if extract_failed:
         print(f"\n无法提取指标的实验 ({len(extract_failed)} 个):")
-        for folder in extract_failed[:20]:  # 只显示前20个
+        for folder in extract_failed[:20]:  # Show at most 20
             print(f"  - {folder}")
         if len(extract_failed) > 20:
-            print(f"  ... 还有 {len(extract_failed) - 20} 个")
+            print(f"  ... {len(extract_failed) - 20} more")
     
     print(f"\n总共提取了 {len(all_data)} 个实验的数据")
 
@@ -451,21 +451,22 @@ def main():
         print("\n脚本已停止执行。")
         sys.exit(1)
 
-    # 转换为DataFrame便于分析
+    # Build DataFrame for analysis
     df = pd.DataFrame(all_data)
-    # 从数据中读取权重与 fitness 列表，支持 VAD (w26/52/105) 与 UniAD (w7/13/14 等)
+    # Weight and fitness lists from data (VAD w26/52/105 vs UniAD w7/13/14, etc.)
     weight_counts = sorted(df['weight_count'].unique().astype(int).tolist())
-    fitness_types = ['DISC', 'CONT', 'CONT2']
+    # Fitness order for analyses/printing.
+    fitness_types = ['CONT', 'CONT2', 'DISC']
     methods = ['Arachne_v2', 'semSegRep']
     weight_labels = [f"w{w}" for w in weight_counts]
     
-    # 仅保留 3s 指标（不再显示/比较 1s、2s）
+    # Keep 3s metrics only (drop 1s/2s comparisons)
     metrics_to_analyze = [
         'plan_L2_3s',
         'plan_obj_box_col_3s',
     ]
     
-    # 各配置下均值统计（仅 3s）
+    # Per-configuration means (3s only)
     print("\n" + "=" * 80)
     print("各配置下指标均值（仅 3s）")
     print("=" * 80)
@@ -481,7 +482,7 @@ def main():
             f"  {method}, w{weight_count}, {fitness_type} (n={n}): "
             f"L2_3s={row['plan_L2_3s']:.6f}, col_3s={row['plan_obj_box_col_3s']:.6f}"
         )
-    # L2 3s 各配置平均值（单独列出）
+    # L2 @ 3s means by configuration
     print("\n【L2 error 3s 各配置平均值】")
     l2_3s = df.groupby(config_cols)['plan_L2_3s'].agg(['mean', 'std', 'count']).round(6)
     for idx in l2_3s.index:
@@ -491,7 +492,7 @@ def main():
         count_val = int(l2_3s.at[idx, 'count'])
         std_str = f"{std_val:.6f}" if pd.notna(std_val) else "N/A"
         print(f"  {method}, w{weight_count}, {fitness_type}: mean={mean_val:.6f}, std={std_str}, n={count_val}")
-    # Collision 3s 各配置平均值（单独列出）；UniAD 为发生碰撞的帧数，VAD 为碰撞率
+    # Collision @ 3s means; UniAD uses collision-frame counts, VAD uses rate
     print("\n【Collision 3s 各配置平均值】")
     collision_col = 'collision_frame_count' if args.model_type in ('uniad', 'vad') else 'plan_obj_box_col_3s'
     col_3s = df.groupby(config_cols)[collision_col].agg(['mean', 'std', 'count']).round(6)
@@ -505,53 +506,52 @@ def main():
         print(f"  {method}, w{weight_count}, {fitness_type}: mean={mean_fmt}, std={std_str}, n={count_val}")
     print("=" * 80)
 
-    # L2 3s 与 Collision 3s 各配置 10 次重复的箱线图，并标出“初始未修复”的基线值
-    # VAD 与 UniAD 使用不同的 baseline（均按有效帧统计）
+    # Boxplots for L2/Collision @ 3s across repetitions with un-repaired baselines
+    # VAD and UniAD baselines differ (both valid-frame statistics)
     if args.model_type == 'vad':
-        # VAD baseline（来自原始 VAD open-loop 评估结果）
-        # 说明：旧版用 plan_obj_box_col_3s(均值) * 6121 * 6 近似换算 #colls，
-        # 但这无法反映“发生碰撞的有效帧数”。现在改为直接从 baseline JSON 统计。
+        # VAD baseline from original open-loop eval
+        # Legacy code scaled plan_obj_box_col_3s mean * 6121 * 6 to #colls, which
+        # mis-represented valid frames with collisions; now taken from baseline JSON.
         BASELINE_L2_3S = 1.4262655224607823
         # baseline/VAD/vad_base_baseline_b2d_infos_val_partB_25clips.json:
-        # - collision_frames（有效帧且 plan_obj_box_col_3s>0）= 80
-        # - collision_events（sum plan_obj_box_col_3s*6）≈ 85
+        # - collision_frames (valid & plan_obj_box_col_3s>0) = 80
+        # - collision_events (sum plan_obj_box_col_3s*6) ≈ 85
         BASELINE_COLLISION_FRAME_COUNT = 80
         BASELINE_COLLISION_EVENT_COUNT = 85
     else:
-        # UniAD baseline：来自 uniad_base_baseline_b2d_infos_val_partB_25clips.json 经
-        # baseline/convert_uniad_to_vad_metrics.py 转成 VAD 规则后的 summary：
-        # - 有效帧 = fut_valid_flag（VAD 规则：full_future and mask_sum > 0），n=6371
+        # UniAD baseline from uniad_base_baseline_b2d_infos_val_partB_25clips.json via
+        # baseline/convert_uniad_to_vad_metrics.py (VAD rules):
+        # - valid frames = fut_valid_flag (VAD: full_future and mask_sum > 0), n=6371
         # - BASELINE_L2_3S = plan_L2_3s (avg_valid)
-        # - BASELINE_COLLISION_3S = plan_obj_box_col_3s (avg_valid)，即有效帧上每帧
-        #   plan_obj_box_col_1s/2s/3s 非负均值再整体平均
-        # - BASELINE_COLLISION_FRAME_COUNT = VAD 规则下发生碰撞的帧数（图例用）
+        # - BASELINE_COLLISION_3S = plan_obj_box_col_3s (avg_valid): per-frame non-neg
+        #   means of plan_obj_box_col_1s/2s/3s averaged over valid frames
+        # - BASELINE_COLLISION_FRAME_COUNT = collision frames under VAD rules (legend)
         BASELINE_L2_3S = 1.2513238752833544
         BASELINE_COLLISION_3S = 0.014457873542816614
         BASELINE_COLLISION_FRAME_COUNT = 588
     if HAS_MATPLOTLIB:
-        # 为 boxplot 明确指定顺序：
-        #  method 固定顺序: semSegRep（前9个）-> Arachne_v2（后9个）
-        #  在每个 method 下，先按 fitness_type: CONT -> CONT2 -> DISC
-        #  再按 weight_count 升序: w7 -> w13 -> w26 (或其他实际权重)
+        # Deterministic boxplot order:
+        #  semSegRep first (9 boxes) then Arachne_v2 (9 boxes)
+        #  Within each method: fitness CONT -> CONT2 -> DISC
+        #  Then weight_count ascending (e.g. w7 -> w13 -> w26)
         config_order = []
         for method in ['semSegRep', 'Arachne_v2']:
-            # 注意：这里显式指定 boxplot 中 fitness_type 的顺序：
-            #  先 CONT，再 CONT2，最后 DISC
+            # Explicit fitness order for each method strip
             for fitness_type in ['CONT', 'CONT2', 'DISC']:
                 for weight_count in weight_counts:
                     key = (method, weight_count, fitness_type)
                     if key in config_means.index:
                         config_order.append(key)
-        # x 轴标签优化（分层展示 2 * 3 * 3）：
-        # - 组内 box：x 轴 tick 仅显示权重等级（Low/Med/High）
-        # - 中组：每 3 个 box（同 method + 同 fitness）用上方括号/横线标一次 fit
-        # - 大组：每 9 个 box（同 method）用更上方括号/横线标一次 approach（loss）
+        # X-axis layout (2×3×3 hierarchy):
+        # - Inner ticks: weight tier only (Low/Med/High)
+        # - Mid brackets: every 3 boxes (same method + fitness) label the fit term
+        # - Big brackets: every 9 boxes (same method) label the approach / loss
         #
-        # 这样每个 box 不再写完整组合名，信息密度更低、重复更少。
+        # Avoids repeating full config strings on every tick.
         box_level_labels = []
         mid_group_specs = []  # (start, end, mid_label_mathtext)  e.g. "$fit_{ER}$"
         big_group_specs = []  # (start, end, big_label_mathtext)  e.g. "$FL_{naive}$"
-        # 将 (method, fitness_type, weight_count) 映射到 LaTeX/mathtext 友好的标签
+        # Map (method, fitness_type, weight_count) to LaTeX/mathtext-safe labels
         loss_map = {
             "Arachne_v2": r"FL_{adv}",
             "semSegRep": r"FL_{naive}",
@@ -561,7 +561,7 @@ def main():
             "CONT": r"fit_{ER}",
             "CONT2": r"fit_{ERC}",
         }
-        # 权重等级映射：
+        # Weight tier labels:
         # - UniAD: w7 -> Low, w13 -> Mid, w26 -> High
         # - VAD:   w26 -> Low, w52 -> Mid, w105 -> High
         if args.model_type == 'uniad':
@@ -626,8 +626,8 @@ def main():
         l2_data = [df[(df['method'] == m) & (df['weight_count'] == w) & (df['fitness_type'] == f)]['plan_L2_3s'].dropna().values
                    for (m, w, f) in config_order]
         # Collision plot:
-        # - VAD：用 JSON 直接统计 collision_frames（每帧至多算 1 次）
-        # - UniAD：用 converter 输出的 JSON 统计 collision_frame_count（口径一致）
+        # - VAD: collision_frames from JSON (at most once per frame)
+        # - UniAD: collision_frame_count from converter JSON (same convention)
         if args.model_type == 'vad':
             col_data = [df[(df['method'] == m) & (df['weight_count'] == w) & (df['fitness_type'] == f)]['collision_frame_count'].dropna().values
                        for (m, w, f) in config_order]
@@ -646,41 +646,41 @@ def main():
                     transform=trans, ha="center", va="bottom", color=color, clip_on=False)
 
         def add_hierarchical_labels(ax):
-            # 在上方绘制中组（fit）与大组（loss）括号标注
-            # 中组：每 3 个 box 一组（同 method+fit）
+            # Draw mid (fit) and big (loss) bracket annotations above the axes
+            # Mid: groups of 3 boxes sharing method+fitness
             for s, e, label in mid_group_specs:
                 x0 = s + 1.0
                 x1 = e + 1.0
-                # y_axes 稍高一点，避免贴着轴边被“吞掉”
+                # Raise y slightly so brackets are not clipped
                 _draw_bracket(ax, x0, x1, y_axes=1.03, text=label, text_y_offset=0.01, color="#666666", lw=1.1)
-            # 大组：每 9 个 box 一组（同 method）
+            # Big: every 9 boxes share the method
             for s, e, label in big_group_specs:
                 x0 = s + 1.0
                 x1 = e + 1.0
                 _draw_bracket(ax, x0, x1, y_axes=1.14, text=label, text_y_offset=0.01, color="#333333", lw=1.4)
-            # 轻微竖线分隔“大组”
+            # Light vertical separators between big groups
             for s, e, _ in big_group_specs[:-1]:
                 x_sep = (e + 1) + 0.5
                 ax.axvline(x=x_sep, color="#dddddd", linewidth=1.0, zorder=0)
 
-        # 两图统一尺寸和边距，便于上下对齐；高度适中便于放论文
+        # Shared figure size/margins so stacked plots align (publication-friendly height)
         FIG_SIZE = (14, 5)
         SUBPLOT_LEFT, SUBPLOT_RIGHT = 0.06, 0.98
-        # 上方留空间放括号标签（mid/big）+ 图例（legend 放到图外）
+        # Reserve top margin for brackets + external legend
         SUBPLOT_BOTTOM, SUBPLOT_TOP = 0.20, 0.74
-        # 固定 axes 区域：left, bottom, width, height（两张图共用同一套参数）
-        # 这样即使 bbox_inches="tight" 动态裁剪外边界，两张图的数据区域也保持一致。
-        # 同时给顶部留更大空间，避免 legend 与上方括号重叠。
+        # Fixed axes box [left, bottom, width, height] shared by both figures so
+        # bbox_inches='tight' still keeps data areas aligned.
+        # Extra top room prevents legend colliding with bracket labels.
         AX_POS = [0.06, 0.18, 0.92, 0.54]
         SAVE_PAD_INCHES = 0.02
         LEGEND_ANCHOR_Y = 1.00
-        # 全局字体大小（轴标签、刻度、图例等），便于论文排版
+        # Global font size for axes, ticks, legend (paper-ready)
         plt.rcParams['font.size'] = 20
-        # L2 error 3s 一张图（18 个配置）+ 初始值水平线
+        # L2 @ 3s boxplot (18 configs) + baseline horizontal line
         fig1, ax1 = plt.subplots(figsize=FIG_SIZE)
         fig1.subplots_adjust(left=SUBPLOT_LEFT, right=SUBPLOT_RIGHT, bottom=SUBPLOT_BOTTOM, top=SUBPLOT_TOP)
         ax1.set_position(AX_POS)
-        # x 轴不再重复写 Low/Med/High（已由颜色+图例表达），因此 tick label 置空
+        # Blank x tick labels; tiers encoded by color + legend
         bp1 = ax1.boxplot(l2_data, labels=[""] * len(box_level_labels), patch_artist=True, showfliers=False)
         ax1.axhline(
             y=BASELINE_L2_3S,
@@ -690,13 +690,13 @@ def main():
             # L2_Err(M_{orig}, D_{test})
             label=rf"$\mu_{{\mathrm{{L2\_Err}}}}(M_{{\mathrm{{orig}}}}, D_{{\mathrm{{test}}}})$ = {BASELINE_L2_3S:.4f}",
         )
-        # 这里的纵轴展示的是“均值指标”的分布，因此用 μ_{L2_Err} 更准确
+        # Y axis shows distribution of mean metric → label μ_{L2_Err}
         ax1.set_ylabel(r"$\mu_{\mathrm{L2\_Err}}$")
         ax1.tick_params(axis='x', rotation=0, length=0)
         add_hierarchical_labels(ax1)
-        # 配色策略（最终版）：
-        # - 面填充颜色：仅表示组内 box（Low/Med/High）
-        # - 大组/中组：由上方括号与竖线分隔来表达（不再用颜色区分大组）
+        # Color policy:
+        # - Face color encodes weight tier (Low/Med/High) only
+        # - Big/mid structure from brackets + separators (not extra colors)
         level_colors = {
             "Low": "#66c2a5",   # green
             "Med": "#fc8d62",   # orange
@@ -711,7 +711,7 @@ def main():
         for median in bp1['medians']:
             median.set_color('#333333')
             median.set_linewidth(1.5)
-        # Legend：放到图外顶部，避免遮挡括号/数据
+        # Legend above the figure to avoid covering brackets/data
         try:
             from matplotlib.patches import Patch
             handles, _labels = ax1.get_legend_handles_labels()
@@ -739,7 +739,7 @@ def main():
         l2_pdf = out_dir / f"l2_3s_boxplot_{args.model_type}.pdf"
         fig1.savefig(l2_pdf, bbox_inches='tight', pad_inches=SAVE_PAD_INCHES)
         plt.close(fig1)
-        # Collision 3s 一张图（18 个配置）+ 初始值水平线（VAD 为碰撞次数，UniAD 为发生碰撞的帧数）
+        # Collision @ 3s plot + baseline (VAD: event counts; UniAD: collision frames)
         fig2, ax2 = plt.subplots(figsize=FIG_SIZE)
         fig2.subplots_adjust(left=SUBPLOT_LEFT, right=SUBPLOT_RIGHT, bottom=SUBPLOT_BOTTOM, top=SUBPLOT_TOP)
         ax2.set_position(AX_POS)
@@ -749,7 +749,7 @@ def main():
             color='red',
             linestyle='--',
             linewidth=1.5,
-            # 混合写法：前面的 '#' 用普通文本，后面的 colls(...) 用 LaTeX
+            # Prefix '#' as plain text; colls(...) rendered with mathtext
             label="#" + rf"$\mathrm{{colls}}(M_{{orig}}, D_{{test}})$ = {baseline_collision_plot:.0f}",
         )
         ax2.set_ylabel('#colls')
@@ -801,8 +801,7 @@ def main():
     
     results = []
     
-    # 比较1: 不同方法之间的比较 (Arachne_v2 vs semSegRep)
-    # 使用配对比较：先计算每种配置的均值，然后配对比较
+    # Comparison 1: methods (Arachne_v2 vs semSegRep), paired on shared configs
     print("\n--- 比较1: 方法比较 (Arachne_v2 vs semSegRep) ---")
     for metric in metrics_to_analyze:
         method1, method2 = 'Arachne_v2', 'semSegRep'
@@ -853,10 +852,10 @@ def main():
                 print(f"    {method1}向量: {m1_array}")
                 print(f"    {method2}向量: {m2_array}")
     
-    # 比较2: 不同fitness函数之间的比较
+    # Comparison 2: fitness objectives
     print("\n--- 比较2: Fitness函数比较 ---")
     for metric in metrics_to_analyze:
-        # 构造“配对维度”：每个维度是一对 (method, weight_count)，要求三个fitness在该维度都有数据
+        # Paired grid: each cell is (method, weight_count) with all three fitness values
         base_positions = []
         for method in methods:
             if method not in df['method'].unique():
@@ -915,10 +914,10 @@ def main():
                             'n2': int(len(vec2))
                         })
 
-    # 比较3: 不同权重数量之间的比较
+    # Comparison 3: weight counts
     print("\n--- 比较3: 权重数量比较 ---")
     for metric in metrics_to_analyze:
-        # 构造“配对维度”：每个维度是一对 (method, fitness_type)，要求所有 weight_counts 在该维度都有数据
+        # Paired grid: each cell is (method, fitness_type) with every weight count present
         base_positions = []
         for method in methods:
             if method not in df['method'].unique():
@@ -980,15 +979,15 @@ def main():
                             'n2': int(len(vec2))
                         })
 
-    # 转换为DataFrame便于汇总
+    # Results table
     results_df = pd.DataFrame(results)
     
-    # 打印汇总报告
+    # Pretty-print summary
     print("\n" + "=" * 80)
     print("Step 3: 汇总报告")
     print("=" * 80)
     
-    # 按比较类型和指标汇总
+    # Group by comparison type and metric
     print("\nCohen's d 统计分析结果汇总\n")
 
     for comparison_type in ['Method', 'Fitness', 'Weight']:
@@ -1002,9 +1001,9 @@ def main():
             metric_subset = subset[subset['metric'] == metric]
             if len(metric_subset) > 0:
                 if comparison_type == 'Fitness':
-                    # Fitness比较：显示3×3矩阵
-                    fitness_types = ['DISC', 'CONT', 'CONT2']
-                    # 构建矩阵
+                    # Fitness: 3×3 matrix (same ordering as Step 2)
+                    fitness_types = ['CONT', 'CONT2', 'DISC']
+                    # Build matrix
                     matrix = {}
                     for _, row in metric_subset.iterrows():
                         if pd.notna(row['cohens_d']):
@@ -1013,8 +1012,8 @@ def main():
                             key = (row['group1'], row['group2'])
                             matrix[key] = effect_size
                     
-                    print(f"指标：{metric}；DISC vs CONT vs CONT2")
-                    print("    " + " " * 12 + "DISC" + " " * 12 + "CONT" + " " * 12 + "CONT2")
+                    print(f"指标：{metric}；CONT vs CONT2 vs DISC")
+                    print("    " + " " * 12 + "CONT" + " " * 12 + "CONT2" + " " * 12 + "DISC")
                     for i, fitness1 in enumerate(fitness_types):
                         row_str = f"    {fitness1:12s}"
                         for j, fitness2 in enumerate(fitness_types):
@@ -1025,20 +1024,20 @@ def main():
                                 if key in matrix:
                                     row_str += matrix[key].center(16)
                                 else:
-                                    row_str += "identical".center(16)  # N/A表示数据完全相同或差异完全相同
+                                    row_str += "identical".center(16)  # Truly identical or symmetric diffs
                         print(row_str)
                 elif comparison_type == 'Weight':
-                    # Weight比较：显示 N×N 矩阵（N = 实际权重数量）
-                    # 优先按 weight_counts 排序，其次按字典序兜底
+                    # Weight: N×N matrix (N = number of weight tiers)
+                    # Prefer sorted weight_counts, else lexical fallback
                     weight_names = list(weight_labels)
                     if not weight_names:
-                        # 从结果里兜底提取
+                        # Fallback: infer names from results
                         names = set(metric_subset['group1'].dropna().tolist()) | set(metric_subset['group2'].dropna().tolist())
                         def _w_key(x):
                             m = re.search(r'(\d+)', str(x))
                             return int(m.group(1)) if m else 10**9
                         weight_names = sorted(names, key=_w_key)
-                    # 构建矩阵
+                    # Build matrix
                     matrix = {}
                     for _, row in metric_subset.iterrows():
                         if pd.notna(row['cohens_d']):
@@ -1063,16 +1062,16 @@ def main():
                                     row_str += "identical".center(16)
                         print(row_str)
                 else:
-                    # Method比较：一行显示
+                    # Method: single-line summary rows
                     for _, row in metric_subset.iterrows():
                         if pd.notna(row['cohens_d']):
                             d = row['cohens_d']
-                            # 使用新规则解释效应量大小
+                            # Map d to qualitative label
                             effect_size = interpret_cohens_d(d)
                             
                             print(f"指标：{metric}；{row['group1']} vs {row['group2']}：{effect_size}")
     
-    # NOTE: 目录/指标现在只保留 3s，移除 time horizon（1s/2s/3s）之间的比较逻辑。
+    # NOTE: Only 3s metrics remain; cross-horizon (1s/2s/3s) comparisons were removed.
     print("\n" + "=" * 80)
     print("分析完成！")
     print("=" * 80)

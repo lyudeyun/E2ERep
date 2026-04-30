@@ -78,6 +78,9 @@ fi
 mkdir -p "$(dirname "${CHECKPOINT_ENDPOINT}")"
 mkdir -p "${SAVE_PATH}"
 
+# Repo root so `import Bench2DriveZoo` works (uniad_b2d_agent.py, vad_b2d_agent.py, ...).
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
 export CARLA_SERVER="${CARLA_ROOT}/CarlaUE4.sh"
 # Remove inherited CARLA PythonAPI / egg entries first.
 # This avoids loading an ABI-incompatible egg such as py3.7 inside a Python 3.10 env.
@@ -124,6 +127,7 @@ else
     fi
   fi
 fi
+export PYTHONPATH=$PYTHONPATH:"${REPO_ROOT}"
 export PYTHONPATH=$PYTHONPATH:leaderboard
 export PYTHONPATH=$PYTHONPATH:leaderboard/team_code
 export PYTHONPATH=$PYTHONPATH:scenario_runner

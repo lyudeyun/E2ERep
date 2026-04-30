@@ -1,6 +1,6 @@
 #!/bin/bash
-# 批量重新运行开环评估 - PJM 超算作业脚本
-# 用法: 修改下方 EXP_DIR / EVAL_DATASET 等变量后，提交: pjsub batch_reeval_openloop.pjm.sh
+# Batch re-run open-loop evaluation — PJM job script
+# Usage: edit EXP_DIR / EVAL_DATASET below, then: pjsub batch_reeval_openloop.pjm.sh
 
 #PJM -L rscgrp=c-batch
 #PJM -L gpu=1
@@ -12,35 +12,35 @@
 
 set -euo pipefail
 
-# ==== 可调参数（按需修改）====
-# 实验根目录（其下每个子目录为一个实验，会扫描并重跑未完成开环评估的）
+# ==== Tunables (edit as needed) ====
+# Experiment root (each subdir is one experiment; rescan for incomplete open-loop eval)
 EXP_DIR="${EXP_DIR:-/home/pj25001076/ku50002427/git/B2DRepair/uniad_base_Arachne_v2_DE_results}"
-# 评估数据集 PKL（相对路径相对于 B2DRepair 仓库根）
+# Eval dataset PKL (relative to B2DRepair repo root)
 EVAL_DATASET="${EVAL_DATASET:-Bench2DriveZoo/data/infos/b2d_infos_val_partB_25clips.pkl}"
-# 使用的 GPU
+# GPU for evaluation
 EVAL_CUDA_DEVICE="${EVAL_CUDA_DEVICE:-0}"
-# 并行评估数（单卡下同时跑几个，默认 1 串行）
+# Parallel eval workers on this GPU (default 1 = serial)
 JOBS="${JOBS:-6}"
-# occupancy 缓存目录（可选，不设则不传该参数）
+# Occupancy cache dir (optional; omit env to skip passing --occ-output-dir)
 OCC_OUTPUT_DIR="${OCC_OUTPUT_DIR:-baseline/UniAD/uniad_occ_cache}"
-# 仅打印不执行：设为 1 则 dry-run
+# Dry-run only when DRY_RUN=1
 DRY_RUN="${DRY_RUN:-0}"
 
-# ==== 环境（按需启用 module）====
+# ==== Environment (enable module load if needed) ====
 # module load cuda
 
-# ==== Conda 环境 ====
+# ==== Conda ====
 source /home/pj25001076/ku50002427/miniconda3/etc/profile.d/conda.sh
 conda activate b2d_zoo
 export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}"
 
-# ==== 进入工程 ====
+# ==== Repo root ====
 cd /home/pj25001076/ku50002427/git/B2DRepair || exit 1
 
-# ==== 日志目录 ====
+# ==== Logs ====
 mkdir -p logs
 
-# ==== 构建参数 ====
+# ==== Extra CLI args ====
 EXTRA_ARGS=()
 if [[ -n "${OCC_OUTPUT_DIR}" ]]; then
   EXTRA_ARGS+=(--occ-output-dir "$OCC_OUTPUT_DIR")
@@ -49,7 +49,7 @@ if [[ "${DRY_RUN}" == "1" ]]; then
   EXTRA_ARGS+=(--dry-run)
 fi
 
-# ==== 运行批量重评 ====
+# ==== Run batch re-eval ====
 echo "=========================================="
 echo "批量重跑开环评估"
 echo "  EXP_DIR=$EXP_DIR"

@@ -118,7 +118,7 @@ CMD_COLORS = [
 COMPARE_TRAJ_LW = 3.0
 COMPARE_TRAJ_ORIG_COLOR = "#d62728"  # red
 COMPARE_TRAJ_REP_COLOR = "#2ca02c"  # green
-# ``--compare_input`` 紧凑图例：Original 红虚线，Repaired 绿实线
+# ``--compare_input`` compact legend: Original red dashed, Repaired green solid
 COMPARE_ORIG_LINESTYLE = "--"
 COMPARE_REPAIR_LINESTYLE = "-"
 
@@ -140,9 +140,9 @@ def _rgb_hex_blended_on_white(hex_color, alpha):
 
 
 FIG_SIZE = (16.0, 16.0)
-VIZ_FONT_PT = 30.0
+VIZ_FONT_PT = 32.0
 # Upper-left metrics box and upper-right legend (axes/ticks stay VIZ_FONT_PT).
-CORNER_FONT_PT = 30.0
+CORNER_FONT_PT = 32.0
 # Extra space above axes between title and plot (points); avoids overlap with top y tick labels.
 TITLE_PAD_PT = 22.0
 # Shift ego icon/silhouette toward -forward (m) so the nose does not cover the first pred segment; tune if needed.
@@ -323,7 +323,7 @@ def _normalize_model(s):
 
 
 def _recompute_vad_l2_metrics(frame, model_norm):
-    """与 ``baseline/convert_uniad_to_vad_metrics.py::compute_vad_l2`` 相同；VAD 多分支用 ``ego_fut_cmd_idx``。"""
+    """Same as ``baseline/convert_uniad_to_vad_metrics.py::compute_vad_l2``; VAD multi-branch uses ``ego_fut_cmd_idx``."""
     if not isinstance(frame, dict):
         return None
     preds = frame.get("predictions") or []
@@ -565,8 +565,8 @@ def _draw_ego_car(
             img = plt.imread(resolved)
             img = _autocrop_icon(img)
             img = _pad_icon_to_aspect(img, target_aspect_wh)
-            # PNG 俯视图资源通常「车头在图片上方」；origin=upper 让首行对齐 extent 的 ymax，
-            # 与 forward_axis=y（前方 = +y 向上）一致。origin=lower 会把车头翻到 -y，后视镜看起来像在车尾。
+            # PNG bird's-eye assets usually have the car nose toward +image up; origin=upper
+            # aligns row 0 with extent ymax, matching forward_axis=y (+y forward). origin=lower flips the nose.
             ax.imshow(
                 img,
                 extent=extent,
@@ -1003,7 +1003,7 @@ def visualize_one_frame(
             _draw_gt_boxes(ax, info)
 
     pred_cmd_indices = _pred_cmd_indices(mnorm, vad_pred_draw, predictions, ego_fut_cmd_idx)
-    # Compare + UniAD: 只画 ``predictions[0]``，避免 ``ego_fut_cmd_idx`` 非 0 时把唯一轨迹画成虚线且与图例不符
+    # Compare + UniAD: plot ``predictions[0]`` only so a single traj is not forced dashed when cmd idx ≠ 0
     if use_compact_compare_legend and mnorm == "uniad" and predictions:
         pred_cmd_indices = [0] if predictions[0] else []
     hide_selected_suffix = mnorm == "vad" and vad_pred_draw == "selected" and len(pred_cmd_indices) == 1
@@ -1120,8 +1120,8 @@ def visualize_one_frame(
         )
         ax.plot(gt[-1, 0], gt[-1, 1], color="black", marker="D", markersize=8, zorder=9)
 
-    # Metrics：``--model uniad`` 且本帧 ``fut_valid_flag`` 为 True 时，用 VAD 口径从轨迹重算 L2（与 convert_uniad_to_vad_metrics 一致）；
-    # ``--model vad`` 始终 VAD 口径；UniAD 且 valid=False 时只读 JSON。
+    # Metrics: for ``--model uniad`` with ``fut_valid_flag`` True, recompute L2 VAD-style from traj (same as converter);
+    # ``--model vad`` always VAD-style; UniAD invalid frames read JSON only.
     metrics = []
 
     def _l2_dict_for_corner(fr):
@@ -1149,7 +1149,7 @@ def visualize_one_frame(
 
     def _l2_compare_corner_line(title, fr):
         """Compare-mode L2; value is still ``plan_L2_3s`` (3s horizon) but the label omits ``3s``."""
-        # title 可能含 LaTeX（如 ``\mathrm{orig}`` 里的 ``{...}``），不能用 ``str.format``，否则触发 KeyError。
+        # Titles may contain LaTeX braces; avoid ``str.format`` on them (KeyError on ``{...}``).
         if not isinstance(fr, dict):
             return title + ": n/a"
         d, tag = _l2_dict_for_corner(fr)
@@ -1210,7 +1210,12 @@ def visualize_one_frame(
             transform=ax.transAxes,
             fontsize=CORNER_FONT_PT,
             verticalalignment="top",
-            bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.8),
+            bbox=dict(
+                boxstyle="round",
+                facecolor="#e8ecf2",
+                edgecolor="#b8c0cc",
+                alpha=0.92,
+            ),
         )
 
     ax.set_aspect("equal", "box")

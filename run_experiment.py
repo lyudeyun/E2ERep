@@ -77,13 +77,13 @@ def send_email_notification(subject: str, body: str) -> None:
     """
     Send an email notification if SMTP environment variables are configured.
     
-    当前版本直接使用固定的 Gmail 配置，不依赖环境变量。
+    This version uses fixed Gmail settings instead of environment variables.
     """
-    # 直接使用固定配置（注意：如果提交到 Git，有泄露密码的风险）
+    # Fixed credentials (do not commit secrets to Git)
     host = "smtp.gmail.com"
     port = 587
     user = "deyunlyu@gmail.com"
-    password = "ctmktibfuxcanswd"  # 建议后续改成环境变量方式
+    password = "ctmktibfuxcanswd"  # Prefer moving to env vars later
     sender = "deyunlyu@gmail.com"
     recipient = "lyudeyun@gmail.com"
 
@@ -100,7 +100,7 @@ def send_email_notification(subject: str, body: str) -> None:
             server.send_message(msg)
         print(f"[EMAIL] Notification sent to {recipient}.")
     except Exception as e:
-        # 不让异常影响主流程，只打印提示
+        # Log only; never fail the main workflow on notify errors
         print(f"[EMAIL] Failed to send notification: {e}")
 
 
@@ -403,7 +403,7 @@ def run_evaluation(model_name, model_type, repaired_model, eval_dataset, exp_dir
     else:
         cfg_options = f"data.test.ann_file='{ann_file}'"
 
-    # VAD/UniAD 评估中间文件写临时目录，跑完即删，不落盘
+    # Write VAD/UniAD eval scratch under tmpfs; delete after run
     tmp_eval_dir = tempfile.mkdtemp(prefix="b2d_eval_")
     if model_type == "VAD":
         cmd = [
@@ -422,8 +422,8 @@ def run_evaluation(model_name, model_type, repaired_model, eval_dataset, exp_dir
             '--data-output', str(output_json),
         ]
     elif model_type == "UniAD":
-        # torchrun 默认 rendezvous 使用 29500，多任务并行会端口冲突。
-        # 使用 --standalone 让 torchrun 自动选择空闲端口/rdzv_id，避免冲突。
+        # Default torchrun rendezvous uses 29500; parallel jobs collide.
+        # --standalone lets torchrun pick a free port / rdzv id.
         cmd = [
             f"PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True",
             f"CUDA_VISIBLE_DEVICES={cuda_device}",
@@ -454,8 +454,8 @@ def run_evaluation(model_name, model_type, repaired_model, eval_dataset, exp_dir
     log_file = (eval_dir / f"{model_lower}_rep_val.log").resolve()
     
     b2d_root = repo_root / "Bench2DriveZoo"
-    # 在集群/旧系统上，系统 libstdc++ 可能缺少 GLIBCXX_3.4.30，导致 llvmlite/numba 加载失败。
-    # 子进程继承环境时优先使用 conda 的 lib，避免 GLIBCXX_3.4.30 not found。
+    # Old cluster images may lack GLIBCXX_3.4.30 for llvmlite/numba.
+    # Prefer conda libstdc++ in child processes to avoid missing-symbol errors.
     run_env = os.environ.copy()
     conda_prefix = os.environ.get("CONDA_PREFIX")
     if conda_prefix:
@@ -939,7 +939,7 @@ def main():
     
     repo_root = Path(__file__).parent.absolute()
     base_dir = Path(args.exp_dir)
-    base_dir.mkdir(parents=True, exist_ok=True)  # 递归创建父目录（如果不存在）
+    base_dir.mkdir(parents=True, exist_ok=True)  # Create parents if missing
 
     # If using tmpfs data, sanity-check that the in-memory dataset exists.
     if getattr(args, "use_tmpfs_data", False):
@@ -1069,7 +1069,7 @@ def main():
             ]
             send_email_notification(subj, "\n".join(body_lines))
         except Exception as _e:
-            # 邮件失败不影响主流程
+            # Email failures must not fail the job
             pass
 
         return exit_code
