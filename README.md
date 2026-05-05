@@ -21,8 +21,7 @@ We choose two most representative transformer-based E2E models, UniAD and VAD, a
 ### For open-loop repair and evaluation
 
 To produce repair and test data, we evenly partition the official [open-loop validation dataset](./Bench2DriveZoo/data/infos/b2d_infos_val.pkl) of [Bench2Drive](https://github.com/Thinklab-SJTU/Bench2Drive), which contains 50 clips (i.e., sequences of multiple input
-frames), into a repair dataset [$D_{rep}$](./Bench2DriveZoo/data/infos/b2d_infos_val_partA_25clips.pkl) and a test dataset [$D_{test}$](./Bench2DriveZoo/data/infos/b2d_infos_val_partB_25clips.pkl), with 25 clips each. After filtering out inputs with incomplete ground truth trajectories, for UniAD, we obtain 4,935 inputs for $D_{rep}$ and 6,371 inputs for $D_{test}$; for VAD, we obtain 4,685
-inputs for $D_{rep}$ and 6,121 inputs for $D_{test}$.
+frames), into a repair dataset $D_{rep}$ and a test dataset $D_{test}$, with 25 clips each. After filtering out inputs with incomplete ground truth trajectories, for UniAD, we obtain 4,935 inputs for $D_{rep}$ and 6,371 inputs for $D_{test}$; for VAD, we obtain 4,685 inputs for $D_{rep}$ and 6,121 inputs for $D_{test}$.
 
 ### For closed-loop evaluation
 
