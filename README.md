@@ -201,7 +201,7 @@ For VAD-base, use the same command with `--model-type VAD`, `--model-name VAD_ba
 
 * **Metric:**
 
-    Make sure there are exactly **220** routes in your merged JSON for **Bench2Drive220**. **Failed** / **Crashed** status is also acceptable. Otherwise, the headline metrics are inaccurate.
+    Make sure there are exactly **220** routes in your merged JSON for  `Bench2Drive220`. **Failed** / **Crashed** status is also acceptable. Otherwise, the headline metrics are inaccurate.
 
     * [`tools/merge_route_json.py`](./tools/merge_route_json.py) builds `merged.json` from per-route JSON fragments.
     * [`tools/ability_benchmark.py`](./tools/ability_benchmark.py) reads routes from the `-f` XML (`total_routes = len(routes)`).
