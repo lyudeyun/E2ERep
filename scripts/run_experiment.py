@@ -34,6 +34,31 @@ def str2bool(v):
     raise argparse.ArgumentTypeError(f"Invalid boolean value: {v!r}")
 
 
+def parse_fitness_choice(value):
+    """
+    Map paper abbreviations or legacy CLI tokens to internal fitness keys.
+
+    Paper: CA -> discrete, ER -> continuous, ERC -> continuous2.
+    Legacy: discrete, continuous, continuous2, all (unchanged).
+    """
+    key = str(value).strip().lower()
+    aliases = {
+        'ca': 'discrete',
+        'er': 'continuous',
+        'erc': 'continuous2',
+        'discrete': 'discrete',
+        'continuous': 'continuous',
+        'continuous2': 'continuous2',
+        'all': 'all',
+    }
+    if key not in aliases:
+        raise argparse.ArgumentTypeError(
+            f"invalid fitness {value!r}; expected CA|ER|ERC "
+            f"or discrete|continuous|continuous2|all"
+        )
+    return aliases[key]
+
+
 def get_model_paths(model_name, model_type, repo_root):
     """Get Bench2DriveZoo model config/checkpoint paths."""
     b2d_root = repo_root / "Bench2DriveZoo"
@@ -793,10 +818,18 @@ def main():
                             'or semSegRep (fixed threshold baseline)')
     parser.add_argument('--search-algo', choices=['PSO', 'DE'], default='PSO',
                        help='Search algorithm: PSO (Particle Swarm Optimization) or DE (Differential Evolution)')
-    parser.add_argument('--fitness', choices=['continuous', 'continuous2', 'discrete', 'all'],
-                       default='continuous',
-                       help='Fitness type: continuous (total L2), continuous2 (total L2 + collision penalty), '
-                            'discrete (success rate), or all (run all three types sequentially)')
+    parser.add_argument(
+        '--fitness',
+        type=str,
+        default='continuous',
+        help=(
+            'Fitness / objective (paper vs legacy alias): '
+            'CA or discrete (count-based); ER or continuous (total L2); '
+            'ERC or continuous2 (L2 + collision penalty); '
+            'all (run CA, ER, ERC sequentially). '
+            'Matching is case-insensitive for CA/ER/ERC.'
+        ),
+    )
     parser.add_argument('--run-idx', type=int, default=None,
                        help='Run index (auto-detected if not provided)')
     parser.add_argument('--num-runs', type=int, default=1,
@@ -816,8 +849,9 @@ def main():
     parser.add_argument('--repair-alpha', type=float, default=0.5)
     parser.add_argument('--repair-layers', type=str, default=None,
                        help='Layers to repair (space-separated). '
-                            'Default: VAD uses "pts_bbox_head.ego_fut_decoder.0 pts_bbox_head.ego_fut_decoder.2", '
-                            'UniAD uses "planning_head.reg_branch.0 planning_head.reg_branch.2"')
+                            'Default: VAD uses two layers '
+                            '("pts_bbox_head.ego_fut_decoder.0 pts_bbox_head.ego_fut_decoder.2"); '
+                            'UniAD uses one layer ("planning_head.reg_branch.0").')
     parser.add_argument('--repair-particles-multiplier', type=int, default=2,
                        help='Multiplier for number of PSO particles (particles = multiplier * --repair-num-weights, default: 2)')
     parser.add_argument('--repair-num-iterations', type=int, default=100)
@@ -905,6 +939,7 @@ def main():
     )
     
     args = parser.parse_args()
+    args.fitness = parse_fitness_choice(args.fitness)
     
     # Determine model_name from model_type (default if not specified)
     if args.model_name is None:
@@ -936,7 +971,7 @@ def main():
         args.exp_dir = f"./{model_lower}_{rep_method_clean}_{search_algo_clean}_results"
         print(f"Auto-generated exp-dir: {args.exp_dir}")
     
-    repo_root = Path(__file__).parent.absolute()
+    repo_root = Path(__file__).resolve().parent.parent
     base_dir = Path(args.exp_dir)
     base_dir.mkdir(parents=True, exist_ok=True)  # Create parents if missing
 
