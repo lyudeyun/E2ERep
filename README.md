@@ -18,7 +18,7 @@ We choose two most representative transformer-based E2E models, UniAD and VAD, a
 
 ## Dataset
 
-### For open-loop evaluation
+### For open-loop repair and evaluation
 
 To produce repair and test data, we evenly partition the official [open-loop validation dataset](./Bench2DriveZoo/data/infos/b2d_infos_val.pkl) of [Bench2Drive](https://github.com/Thinklab-SJTU/Bench2Drive), which contains 50 clips (i.e., sequences of multiple input
 frames), into a repair dataset [$D_{rep}$](./Bench2DriveZoo/data/infos/b2d_infos_val_partA_25clips.pkl) and a test dataset [$D_{test}$](./Bench2DriveZoo/data/infos/b2d_infos_val_partB_25clips.pkl), with 25 clips each. After filtering out inputs with incomplete ground truth trajectories, for UniAD, we obtain 4,935 inputs for $D_{rep}$ and 6,371 inputs for $D_{test}$; for VAD, we obtain 4,685
@@ -167,7 +167,7 @@ For VAD-base, use the same command with `--model-type VAD`, `--model-name VAD_ba
 
 * **Run evaluations:**
 
-    Multi-GPU: set `TASK_NUM`, `GPU_RANK_LIST`, `TASK_LIST`, `TEAM_AGENT`, and `TEAM_CONFIG`. Single GPU: run `run_evaluation_single_*.sh` and edit `BASE_ROUTES`, `TEAM_*`, and related variables at the top (for Dev10, point `BASE_ROUTES` at `leaderboard/data/drivetransformer_bench2drive_dev10` instead of `bench2drive220`; see comments in those scripts). Debug images can use a lot of disk space.
+    Multi-GPU: set `TASK_NUM`, `GPU_RANK_LIST`, `TASK_LIST`, `TEAM_AGENT`, and `TEAM_CONFIG`. Single GPU: run `run_evaluation_single_*.sh` and edit `BASE_ROUTES`, `TEAM_*`, and related variables at the top (for `Dev10`, point `BASE_ROUTES` at `leaderboard/data/drivetransformer_bench2drive_dev10` instead of `Bench2Drive220`; see comments in those scripts). Debug images can use a lot of disk space.
 
     * **Baseline UniAD:**
         ```bash
@@ -201,15 +201,23 @@ For VAD-base, use the same command with `--model-type VAD`, `--model-name VAD_ba
 
 * **Metric:**
 
-    * [`tools/merge_route_json.py`](./tools/merge_route_json.py) merges route JSON fragments into `merged.json`. Driving score and success rate divide by 220; if the folder does not contain 220 route records, the script warns and those headline numbers are not meaningful for smaller suites such as Dev10.
-    * [`tools/ability_benchmark.py`](./tools/ability_benchmark.py) reads routes from the `-f` XML (`total_routes = len(routes)`). Use [`leaderboard/data/bench2drive220.xml`](./leaderboard/data/bench2drive220.xml) or [`leaderboard/data/drivetransformer_bench2drive_dev10.xml`](./leaderboard/data/drivetransformer_bench2drive_dev10.xml) to match Bench2Drive220 versus Dev10.
+    Make sure there are exactly **220** routes in your merged JSON for **Bench2Drive220**. **Failed** / **Crashed** status is also acceptable. Otherwise, the headline metrics are inaccurate.
+
+    * [`tools/merge_route_json.py`](./tools/merge_route_json.py) builds `merged.json` from per-route JSON fragments.
+    * [`tools/ability_benchmark.py`](./tools/ability_benchmark.py) reads routes from the `-f` XML (`total_routes = len(routes)`).
+    * [`tools/efficiency_smoothness_benchmark.py`](./tools/efficiency_smoothness_benchmark.py) needs `metric_info` logged during evaluation (see Bench2Drive team-agent notes).
 
     ```bash
+    # Merge eval json and get driving score and success rate
+    # This script will assume the total number of routes with results is 220. If there is not enough, the missed ones will be treated as 0 score.
     python tools/merge_route_json.py -f your_json_folder/
 
-    # Ability breakdown: use the XML that matches the evaluated route set
+    # Get multi-ability results (use the XML that matches the evaluated route set)
     python tools/ability_benchmark.py -f leaderboard/data/bench2drive220.xml -r your_json_folder/merged.json
     python tools/ability_benchmark.py -f leaderboard/data/drivetransformer_bench2drive_dev10.xml -r your_json_folder/merged.json
+
+    # Get driving efficiency and driving smoothness results
+    python tools/efficiency_smoothness_benchmark.py -f your_json_folder/merged.json -m your_metric_folder/
     ```
 
 ## Deal with CARLA
