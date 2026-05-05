@@ -237,11 +237,12 @@ This part comes from Bench2Drive, but it's important to deal with some bugs caus
 
 ## Acknowledgements
 
-Built on the following open-source projects:
+This project builds on prior open-source efforts; we are grateful to their authors and maintainers. In particular, we acknowledge:
+
 * [scenario_runner](https://github.com/carla-simulator/scenario_runner)
 * [Bench2Drive](https://github.com/Thinklab-SJTU/Bench2Drive)
 * [leaderboard](https://github.com/carla-simulator/leaderboard)
 * [UniAD](https://github.com/OpenDriveLab/UniAD)
 * [VAD](https://github.com/hustvl/VAD)
 
-We also thank the authors of the other libraries we use.
+Our thanks also go to everyone behind the many other libraries and tools used throughout the codebase.
