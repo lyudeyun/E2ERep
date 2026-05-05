@@ -1,6 +1,6 @@
 
 <h2 align="center">
-  <img src='./assets/bench2drive.jpg'>
+  <img src='./assets_b2d/bench2drive.jpg'>
 </h2>
 
 <h2 align="center">
@@ -16,7 +16,7 @@ NeurIPS 2024 Datasets and Benchmarks Track
   <a href="https://discord.gg/uZuU3JXVNV">Discord</a>
 </h2>
 
-![overview](./assets/overview.jpg)
+![overview](./assets_b2d/overview.jpg)
 
 
 <h2 align="center">
@@ -55,7 +55,7 @@ What can Think2Drive + Bench2Drive provide ? <b>Please click to view the video.<
   - The datasets has 3 subsets, collected by **our strong world model based RL expert [Think2Drive](https://arxiv.org/abs/2402.16720)**, namely Mini (10 clips), Base (1000 clips) and Full (10000 clips), to accommodate different levels of computational resource.
   - [Detailed explanation](docs/anno.md) of dataset structure, annotation information, and visualization of data.
 
-| Subset  | Hugging Face<img src="./assets/hf-logo.png" alt="Hugging Face" width="18"/> | Baidu Cloud<img src="https://nd-static.bdstatic.com/m-static/v20-main/favicon-main.ico" alt="Baidu Yun" width="18"/> | Approx. Size | File List|
+| Subset  | Hugging Face<img src="./assets_b2d/hf-logo.png" alt="Hugging Face" width="18"/> | Baidu Cloud<img src="https://nd-static.bdstatic.com/m-static/v20-main/favicon-main.ico" alt="Baidu Yun" width="18"/> | Approx. Size | File List|
 | :---: |  :---: | :---: | :---: | :---: |
 | Mini |   [Download script](https://github.com/Thinklab-SJTU/Bench2Drive/blob/main/tools/download_mini.sh) |  - |  4G | [Mini Json File](./docs/bench2drive_mini_10.json) |
 | Base |  [Hugging Face Link](https://huggingface.co/datasets/rethinklab/Bench2Drive) |  [Baidu Cloud Link](https://pan.baidu.com/s/1ZIL-MPhLbgdBYmHkHncn8Q?pwd=1234) |  400G |  [Base Json File](./docs/bench2drive_base_1000.json)|
@@ -85,7 +85,7 @@ Use the command line: *huggingface-cli download --repo-type dataset --resume-dow
   - Add your agent to leaderboard/team_code/your_agent.py & Link your model folder under the Bench2Drive directory.
     ```bash
         Bench2Drive\ 
-          assets\
+          assets_b2d\
           docs\
           leaderboard\
             team_code\
@@ -138,7 +138,7 @@ Use the command line: *huggingface-cli download --repo-type dataset --resume-dow
 
 - V0.0.3(Currently in use)
   - Fix typos in the ability calculation. ([Issue #112](https://github.com/Thinklab-SJTU/Bench2Drive/issues/112))
-  ![benchmark](./assets/benchmark_v3.jpg)
+  ![benchmark](./assets_b2d/benchmark_v3.jpg)
 
 - V0.0.2(Depracated)
   - Fix the BACK CAMERA's extrinsic bug. ([Issue #36](https://github.com/Thinklab-SJTU/Bench2Drive/issues/36))
@@ -147,14 +147,14 @@ Use the command line: *huggingface-cli download --repo-type dataset --resume-dow
   - Code Version
     - [Bench2Drive](https://github.com/Thinklab-SJTU/Bench2Drive/tree/cd1883c937470ea4d144bf6c7d8922e76d792f07)
     - [Bench2DriveZoo](https://github.com/Thinklab-SJTU/Bench2DriveZoo/tree/914b328f26b5534fd13b04d5fc644c8d82196d7b)
-  ![depracated benchmark](./assets/benchmark_v2.PNG)
+  ![depracated benchmark](./assets_b2d/benchmark_v2.PNG)
 
 - V0.0.1(Depracated)
   - Initial Version
   - Code Version
     - [Bench2Drive](https://github.com/Thinklab-SJTU/Bench2Drive/tree/ee62902eeb8a9f7ab50fa62009c2de12bf645220)
     - [Bench2DriveZoo](https://github.com/Thinklab-SJTU/Bench2DriveZoo/tree/31432e868c3ca1bef5c7fa39ba4bd4e7a3e7538a)
-  ![depracated benchmark](./assets/benchmark.jpg)
+  ![depracated benchmark](./assets_b2d/benchmark.jpg)
 
 ## License <a name="license"></a>
 
