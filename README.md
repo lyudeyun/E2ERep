@@ -11,16 +11,16 @@ End-to-End (E2E) autonomous driving systems integrate perception, prediction, an
 
 ## Overall Results
 
-Fig. 2 and Fig. 3 report, for the two E2E models, the distributions across 10 runs of $\mu_{{L2\text{-}Err}}^{\mathrm{test},\mathrm{fin}}$ and #${colls}^{test,fin}$ for the six versions of E2ERep, initialized with the three weight-selection percentages.
+Fig. 2 and Fig. 3 report, for the two E2E models, the distributions across 10 runs of $\mu_{{L2\mathrm{-}Err}}^{\mathrm{test},\mathrm{fin}}$ and #${colls}^{test,fin}$ for the six versions of E2ERep, initialized with the three weight-selection percentages.
 
-In the figure, the dashed red line identifies the performance of the original model $M_{\mathrm{orig}}$. We observe that, for each metric, most of the approaches are able to improve the metric in some of their repetitions, and some approaches consistently improve it in all repetitions. By comparing the results of UniAD (Fig. 2) and VAD (Fig. 3), we observe that, overall, the improvements are more consistent in VAD; for UniAD, some approaches are never able to improve #colls. Still, for UniAD there are approaches that consistently improve both $\mu_{\text{L2\text{-}Err}}^{\text{test, fin}}$ and #colls.
+In the figure, the dashed red line identifies the performance of the original model $M_{\mathrm{orig}}$. We observe that, for each metric, most of the approaches are able to improve the metric in some of their repetitions, and some approaches consistently improve it in all repetitions. By comparing the results of UniAD (Fig. 2) and VAD (Fig. 3), we observe that, overall, the improvements are more consistent in VAD; for UniAD, some approaches are never able to improve #colls. Still, for UniAD there are approaches that consistently improve both $\mu_{\text{L2\mathrm{-}Err}}^{\text{test, fin}}$ and #colls.
 
 
 $\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad$ (a) $\mu^{test,fin}_{L2\_{Err}}$
 
 <img src="./assets/l2_3s_boxplot_uniad.png" width="840" alt="UniAD L2 error @ 3s" />
 
-$\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad$ (b) &#35;$\mathrm{colls}^{\mathrm{test},\mathrm{fin}}$
+$\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad$ (b) &#35; $\!\mathrm{colls}^{\mathrm{test},\mathrm{fin}}$
 
 <img src="./assets/collision_3s_boxplot_uniad.png" width="840" alt="UniAD collision @ 3s" />
 
@@ -30,7 +30,7 @@ $\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad$ (a) $
 
 <img src="./assets/l2_3s_boxplot_vad.png" width="840" alt="VAD L2 error @ 3s" />
 
-$\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad$ (b) &#35;$\mathrm{colls}^{\mathrm{test},\mathrm{fin}}$
+$\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad$ (b) &#35; $\!\mathrm{colls}^{\mathrm{test},\mathrm{fin}}$
 
 <img src="./assets/collision_3s_boxplot_vad.png" width="840" alt="VAD collision @ 3s" />
 
