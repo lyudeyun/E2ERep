@@ -20,7 +20,7 @@ $\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad$ (a) $
 
 <img src="./assets/l2_3s_boxplot_uniad.png" width="840" alt="UniAD L2 error @ 3s" />
 
-$\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad$ (b) $\#\mathrm{colls}^{test,fin}$
+$\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad$ (b) $\text{\#}\mathrm{colls}^{\mathrm{test},\mathrm{fin}}$
 
 <img src="./assets/collision_3s_boxplot_uniad.png" width="840" alt="UniAD collision @ 3s" />
 
@@ -30,7 +30,7 @@ $\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad$ (a) $
 
 <img src="./assets/l2_3s_boxplot_vad.png" width="840" alt="VAD L2 error @ 3s" />
 
-$\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad$ (b) $\#\mathrm{colls}^{test,fin}$
+$\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad$ (b) $\text{\#}\mathrm{colls}^{\mathrm{test},\mathrm{fin}}$
 
 <img src="./assets/collision_3s_boxplot_vad.png" width="840" alt="VAD collision @ 3s" />
 
