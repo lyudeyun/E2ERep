@@ -13,15 +13,15 @@ End-to-End (E2E) autonomous driving systems integrate perception, prediction, an
 
 Fig. 2 and Fig. 3 report, for the two E2E models, the distributions across 10 runs of $\mu^{test,fin}_{L2_{Err}}$ and $\#colls^{test,fin}$ for the six versions of E2ERep, initialized with the three weights selection percentages.
 
-In the figure, the dashed red line identifies the performance of the original model $M_{orig}$. We observe that, for each metric, most of the approaches are able to improve the metric in some of their repetitions, and some approaches consistently improve it in all repetitions. By comparing the results of UniAD (Fig. 2) and VAD (Fig. 3) we observe that, overall, the improvements are more consistent in VAD; for UniAD, some approaches are never able to improve \numCollisions. Still, also for UniAD, there are approaches that consistently improve both $\mu_{L2\_Err}$ and $\#colls$.
+In the figure, the dashed red line identifies the performance of the original model $M_{orig}$. We observe that, for each metric, most of the approaches are able to improve the metric in some of their repetitions, and some approaches consistently improve it in all repetitions. By comparing the results of UniAD (Fig. 2) and VAD (Fig. 3) we observe that, overall, the improvements are more consistent in VAD; for UniAD, some approaches are never able to improve \numCollisions. Still, also for UniAD, there are approaches that consistently improve both $\mu_{L2\_Err}$ and #$colls$.
 
-| (a) $\mu^{test,fin}_{L2_{Err}}$ | (b) $\#colls^{test,fin}$ |
+| (a) $\mu^{test,fin}_{L2_{Err}}$ | (b) #$colls^{test,fin}$ |
 | :--: | :--: |
 | <img src="./assets/l2_3s_boxplot_uniad.png" width="420" alt="UniAD L2 error @ 3s" /> | <img src="./assets/collision_3s_boxplot_uniad.png" width="420" alt="UniAD collision @ 3s" /> |
 
 <p align="center"><em>Fig. 2. UniAD — open-loop overall results.</em></p>
 
-| (a) $\mu^{test,fin}_{L2_{Err}}$ | (b) $\#colls^{test,fin}$ |
+| (a) $\mu^{test,fin}_{L2_{Err}}$ | (b) #$colls^{test,fin}$ |
 | :--: | :--: |
 | <img src="./assets/l2_3s_boxplot_vad.png" width="420" alt="VAD L2 error @ 3s" /> | <img src="./assets/collision_3s_boxplot_vad.png" width="420" alt="VAD collision @ 3s" /> |
 
