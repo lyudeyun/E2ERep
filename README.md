@@ -16,7 +16,7 @@ Fig. 2 and Fig. 3 report, for the two E2E models, the distributions across 10 ru
 In the figure, the dashed red line identifies the performance of the original model $M_{\mathrm{orig}}$. We observe that, for each metric, most of the approaches are able to improve the metric in some of their repetitions, and some approaches consistently improve it in all repetitions. By comparing the results of UniAD (Fig. 2) and VAD (Fig. 3), we observe that, overall, the improvements are more consistent in VAD; for UniAD, some approaches are never able to improve #colls. Still, for UniAD there are approaches that consistently improve both $\mu_{\text{L2-Err}}^{\text{test, fin}}$ and #colls.
 
 
-$\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad$ (a) $\mu^{test,fin}_{L2\_{Err}}$
+$\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad$ (a) $\mu^{test,fin}_{L2-Err}$
 
 <img src="./assets/l2_3s_boxplot_uniad.png" width="840" alt="UniAD L2 error @ 3s" />
 
@@ -26,7 +26,7 @@ $\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad$ (b) &
 
 <p align="center"><em>Fig. 2. UniAD — open-loop overall results.</em></p>
 
-$\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad$ (a) $\mu^{test,fin}_{L2\_{Err}}$
+$\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad$ (a) $\mu^{test,fin}_{L2-Err}$
 
 <img src="./assets/l2_3s_boxplot_vad.png" width="840" alt="VAD L2 error @ 3s" />
 
