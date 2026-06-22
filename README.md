@@ -7,6 +7,26 @@ This repository is for the artifact evaluation of the paper "On the Effectivenes
 End-to-End (E2E) autonomous driving systems integrate perception, prediction, and planning into a unified DNN model. They have emerged as a key paradigm for the next-generation of autonomous driving. While the integrated architecture brings some benefits, these models can still make unsafe planning decisions, posing safety risks to the vehicle and other traffic participants. Once such faulty behaviors are observed, retraining the entire model is often costly and yields limited improvement. DNN repair has been proposed as a fine-grained alternative that uses a search algorithm to adjust some faulty model parameters to fix unsafe behaviors without full retraining. Inspired by these approaches, in this paper we present a practical experience report on the application of DNN repair for E2E models. In principle, during repair, the performance of each candidate repaired model should be assessed in a simulation environment (i.e., in a closed-loop manner) to check that the vehicle does not encounter any unsafe situation. However, such assessment is too costly due to the long simulation time and, so, it does not allow to repair the model in a scalable way. Therefore, in this paper, we investigate whether using open-loop metrics that check the quality of single inferences of the E2E model (which are much faster to compute) allows to effectively improve the model. To this aim, we propose a novel open-loop DNN repair approach for trajectory planning in E2E models. In the approach, we introduce a way to split repair data between correct and wrong data based on two open-loop metrics, i.e., L2 error and number of collisions. Moreover, we introduce three alternative fitness functions that make use of the two open-loop metrics in the assessment of the candidate repaired models. The approaches have been experimented on two representative E2E architectures, i.e., UNIAD and VAD. Key lessons from experiments include: our proposed approaches can improve the models under repair in terms of open-loop performance; however, these improvements are not always reflected in improvements on closed-loop performance.
 
 ![Overview](./assets/workflow.png)
+<p align="center"><em>Fig. 1. Overview of E2ERep.</em></p>
+
+## Overall Results
+
+Fig. 2 and Fig. 3 report, for the two E2E models, the distributions across 10 runs of $\mu^{test,fin}_{L2_{Err}}$ and $\#colls^{test,fin}$ for the six versions of E2ERep, initialized with the three weights selection percentages.
+
+In the figure, the dashed red line identifies the performance of the original model $M_{orig}$. We observe that, for each metric, most of the approaches are able to improve the metric in some of their repetitions, and some approaches consistently improve it in all repetitions. By comparing the results of UniAD (Fig. 2) and VAD (Fig. 3) we observe that, overall, the improvements are more consistent in VAD; for UniAD, some approaches are never able to improve \numCollisions. Still, also for UniAD, there are approaches that consistently improve both $\mu_{L2\_Err}$ and $\#colls$.
+
+| (a) $\mu^{test,fin}_{L2_{Err}}$ | (b) $\#colls^{test,fin}$ |
+| :--: | :--: |
+| <img src="./assets/l2_3s_boxplot_uniad.png" width="420" alt="UniAD L2 error @ 3s" /> | <img src="./assets/collision_3s_boxplot_uniad.png" width="420" alt="UniAD collision @ 3s" /> |
+
+<p align="center"><em>Fig. 2. UniAD — open-loop overall results.</em></p>
+
+| (a) $\mu^{test,fin}_{L2_{Err}}$ | (b) $\#colls^{test,fin}$ |
+| :--: | :--: |
+| <img src="./assets/l2_3s_boxplot_vad.png" width="420" alt="VAD L2 error @ 3s" /> | <img src="./assets/collision_3s_boxplot_vad.png" width="420" alt="VAD collision @ 3s" /> |
+
+<p align="center"><em>Fig. 3. VAD — open-loop overall results.</em></p>
+
 
 
 ## Two Target ADSs
