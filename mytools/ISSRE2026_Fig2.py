@@ -7,11 +7,11 @@ plt.rcParams.update(
         "font.family": "sans-serif",
         "font.sans-serif": ["Helvetica Neue", "Arial", "DejaVu Sans"],
         "mathtext.fontset": "cm",
-        "axes.titlesize": 21,
-        "axes.labelsize": 22,
-        "xtick.labelsize": 20,
-        "ytick.labelsize": 20,
-        "legend.fontsize": 24,
+        "axes.titlesize": 22,
+        "axes.labelsize": 23,
+        "xtick.labelsize": 21,
+        "ytick.labelsize": 21,
+        "legend.fontsize": 25,
         "figure.facecolor": "none",
         "axes.facecolor": "none",
         "axes.edgecolor": "#cbd5e1",
@@ -54,16 +54,23 @@ sigma_schematic = b - a
 
 xmin = 0.0
 xmax = mu_schematic + 1.35 * sigma_schematic
-curve_y_max = 0.40
+curve_y_max = 0.20
 rng = np.random.default_rng(42)
 
 Y_SPLIT = 0.5
-Y_BOTTOM = 0.0
 Y_TOP = 1.0
+Y_AXIS = 0.0
+Y_BOTTOM = 0.0
+Y_TRUE_TOP = Y_TOP - curve_y_max
+
+
+def curve_y_top(x):
+    """Top marginal density: baseline on the true-zone upper edge, peak upward."""
+    return Y_TRUE_TOP + curve_height(x)
 
 
 def windowed_normal(x, mu, sigma, x0, x1):
-    """正态密度 × 窗口函数：左右端点在 x0/x1 处高度为 0。"""
+    """Gaussian density times a window; height is zero at x0 and x1."""
     x = np.asarray(x, dtype=float)
     bell = np.exp(-0.5 * ((x - mu) / sigma) ** 2)
     half_span = (x1 - x0) / 2.0
@@ -81,11 +88,11 @@ def curve_height(x):
 no_collision_y_lo = 0.06
 no_collision_y_hi = 0.44
 collision_y_lo = 0.56
-collision_y_hi = 0.94
+collision_y_hi = Y_TRUE_TOP - 0.04
 
 
 def sample_no_collision_points(n_points):
-    """x 方向按曲线高度加权；y 在 No collision 区域内均匀分散。"""
+    """Sample x with curve-weighted density; spread y uniformly in the false region."""
     x_grid = np.linspace(xmin, xmax, 400)
     weights = windowed_normal(
         x_grid, mu_schematic, sigma_schematic, xmin, xmax
@@ -98,11 +105,11 @@ def sample_no_collision_points(n_points):
 
 
 # =========================
-# 1. 示意数据
+# 1. Schematic data
 # =========================
 
 n_no_collision = 420
-n_collision = 12
+n_collision = 21
 
 l2_nc, y_nc = sample_no_collision_points(n_no_collision)
 collisions_nc = np.zeros(n_no_collision, dtype=int)
@@ -111,6 +118,9 @@ x_grid = np.linspace(xmin, xmax, 400)
 col_weights = windowed_normal(
     x_grid, mu_schematic, sigma_schematic, xmin, xmax
 )
+# Bias collision samples toward the right for denser top-right points
+right_bias = np.clip((x_grid - mu_schematic) / (xmax - mu_schematic + 1e-9), 0.0, 1.0)
+col_weights = col_weights * (0.30 + 0.70 * right_bias)
 col_weights /= col_weights.sum()
 l2_col = rng.choice(x_grid, size=n_collision, p=col_weights)
 y_col = rng.uniform(collision_y_lo, collision_y_hi, size=n_collision)
@@ -125,7 +135,7 @@ middle = (collisions == 0) & (l2_errors >= a) & (l2_errors < b)
 negative = (collisions == 1) | (l2_errors >= b)
 
 # =========================
-# 2. 画图
+# 2. Plot
 # =========================
 
 fig, ax = plt.subplots(figsize=(11.5, 5.6))
@@ -134,7 +144,8 @@ ax.patch.set_alpha(0)
 fig.subplots_adjust(left=0.08, right=0.98, top=0.90, bottom=0.32)
 
 ymin, ymax = Y_BOTTOM, Y_TOP
-no_collision_top = (Y_SPLIT - ymin) / (ymax - ymin)
+no_collision_axes_bottom = Y_AXIS / Y_TOP
+no_collision_axes_top = Y_SPLIT / Y_TOP
 label_transform = blended_transform_factory(ax.transData, ax.transAxes)
 
 region_specs = [
@@ -146,8 +157,8 @@ for x0, x1, fill in region_specs:
     ax.axvspan(
         x0,
         x1,
-        ymin=0.0,
-        ymax=no_collision_top,
+        ymin=no_collision_axes_bottom,
+        ymax=no_collision_axes_top,
         color=fill,
         alpha=0.95,
         zorder=0,
@@ -155,7 +166,7 @@ for x0, x1, fill in region_specs:
 
 ax.axhspan(
     Y_SPLIT,
-    Y_TOP,
+    Y_TRUE_TOP,
     xmin=0.0,
     xmax=1.0,
     color=COLORS["collision_zone"],
@@ -163,15 +174,21 @@ ax.axhspan(
     zorder=0,
 )
 
-for x in (a, b):
-    ax.axvline(
-        x,
+def draw_vertical_marker(x, *, linestyle, linewidth=1.4, alpha=0.85, zorder=1):
+    y_top = curve_y_top(x)
+    ax.plot(
+        [x, x],
+        [Y_AXIS, y_top],
         color=COLORS["threshold"],
-        linestyle=(0, (4, 4)),
-        linewidth=1.4,
-        alpha=0.85,
-        zorder=1,
+        linestyle=linestyle,
+        linewidth=linewidth,
+        alpha=alpha,
+        zorder=zorder,
     )
+
+
+for x in (a, b):
+    draw_vertical_marker(x, linestyle=(0, (4, 4)))
 
 ax.axhline(
     Y_SPLIT,
@@ -183,14 +200,14 @@ ax.axhline(
 )
 
 curve_x = np.linspace(xmin, xmax, 400)
-curve_y = curve_height(curve_x)
+curve_y = curve_y_top(curve_x)
 ax.fill_between(
     curve_x,
-    Y_BOTTOM,
+    Y_TRUE_TOP,
     curve_y,
     color="#94a3b8",
     alpha=0.12,
-    zorder=1,
+    zorder=2,
 )
 ax.plot(
     curve_x,
@@ -198,12 +215,12 @@ ax.plot(
     color=COLORS["threshold"],
     linewidth=1.8,
     alpha=0.75,
-    zorder=2,
+    zorder=3,
+    clip_on=False,
 )
 
-ax.axvline(
+draw_vertical_marker(
     mu_schematic,
-    color=COLORS["threshold"],
     linestyle="-",
     linewidth=1.3,
     alpha=0.75,
@@ -240,7 +257,7 @@ for x_pos, formula in formula_specs:
         transform=label_transform,
         ha="center",
         va="top",
-        fontsize=27,
+        fontsize=28,
         color="#000000",
     )
 
@@ -251,24 +268,30 @@ ax.text(
     transform=ax.transAxes,
     ha="center",
     va="top",
-    fontsize=25,
+    fontsize=26,
     color="#000000",
     family="monospace",
 )
 
 ax.set_xlim(xmin, xmax)
 ax.set_ylim(ymin, ymax)
-ax.set_ylabel("isCollision", labelpad=10, fontfamily="monospace", fontsize=24)
+ax.set_ylabel("isCollision", labelpad=10, fontfamily="monospace", fontsize=25)
 ax.set_xticks([])
 ax.tick_params(axis="x", which="both", bottom=False)
-ax.tick_params(axis="y", labelsize=25)
-ax.set_yticks([0.25, 0.75])
+ax.tick_params(axis="y", labelsize=26)
+ax.set_yticks([Y_SPLIT / 2, (Y_SPLIT + Y_TRUE_TOP) / 2])
 ax.set_yticklabels([r"$\mathit{false}$", r"$\mathit{true}$"])
+
+pos = ax.get_position()
+# Visually center the legend, compensating for the left y-axis label
+legend_center_x = (pos.x0 + pos.x1) / 2 - pos.x0 * 0.38
+legend_transform = blended_transform_factory(fig.transFigure, ax.transAxes)
 
 legend = ax.legend(
     frameon=False,
     loc="lower center",
-    bbox_to_anchor=(0.5, 1.02),
+    bbox_to_anchor=(legend_center_x, 1.02),
+    bbox_transform=legend_transform,
     ncol=3,
     alignment="center",
     columnspacing=0.7,
@@ -276,13 +299,11 @@ legend = ax.legend(
     handlelength=1.0,
     borderaxespad=0.0,
     labelspacing=0.9,
-    fontsize=24,
+    fontsize=25,
 )
 
-for spine in ("top", "right"):
-    ax.spines[spine].set_visible(False)
-for spine in ("left", "bottom"):
-    ax.spines[spine].set_color("#cbd5e1")
+for spine in ax.spines.values():
+    spine.set_visible(False)
 
 plt.savefig(
     "l2_collision_three_categories_polished.pdf",
