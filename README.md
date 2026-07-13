@@ -1,6 +1,6 @@
 # E2ERep
 
-This repository is for the artifact evaluation of the paper "On the Effectiveness of Open-Loop DNN Repair in End-to-End Autonomous Driving Systems", currently under review for ISSRE 2026.
+This repository contains the artifact for our paper "On the Effectiveness of Open-Loop DNN Repair in End-to-End Autonomous Driving Systems", accepted at ISSRE 2026.
 
 ## Abstract 
 
