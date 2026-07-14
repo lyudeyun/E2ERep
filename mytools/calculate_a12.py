@@ -325,8 +325,8 @@ def main():
 
     # Experiment roots
     base_dirs = [
-        '/home/deyun/git/B2DRepair/vad_base_Arachne_v2_DE_results',
-        '/home/deyun/git/B2DRepair/vad_base_semSegRep_DE_results'
+        '/home/deyun/git/E2ERep/vad_base_Arachne_v2_DE_results',
+        '/home/deyun/git/E2ERep/vad_base_semSegRep_DE_results'
     ]
 
     # config -> metric -> list of values from all repetitions
@@ -335,9 +335,9 @@ def main():
     time_horizon_data = {}
 
     print("=" * 80)
-    print("Step 1: 提取所有实验的指标数据")
+    print("Step 1: Extract metrics from all experiments")
     if args.time_horizon:
-        print(f"只读取 time_horizon={args.time_horizon} 的数据")
+        print(f"Reading only time_horizon={args.time_horizon} data")
     print("=" * 80)
 
     for base_dir in base_dirs:
@@ -345,7 +345,7 @@ def main():
             print(f"Warning: {base_dir} not found")
             continue
 
-        print(f"\n处理目录: {base_dir}")
+        print(f"\nProcessing directory: {base_dir}")
         base_path = Path(base_dir)
 
         # If time_horizon is set, search only under that subdirectory
@@ -366,7 +366,7 @@ def main():
                     exp_folders.append(exp_folder)
 
         exp_folders = sorted(exp_folders)
-        print(f"  找到 {len(exp_folders)} 个实验文件夹")
+        print(f"  Found {len(exp_folders)} experiment folders")
 
         for exp_folder in exp_folders:
             log_file = exp_folder / 'open_loop_eval' / 'vad_base_rep_val.log'
@@ -436,16 +436,16 @@ def main():
         for fitness_type in fitness_types:
             groups.append(generate_group_name(method, fitness_type))
 
-    print(f"实际有数据的配置: {len(all_data)} 种（18种理论配置中的子集）")
+    print(f"Configs with data: {len(all_data)} (subset of 18 theoretical configs)")
 
     if len(all_data) == 0:
-        print("\n错误: 没有提取到任何实验数据！")
+        print("\nError: no experiment data extracted!")
         sys.exit(1)
 
     print("\n" + "=" * 80)
-    print("Step 2: 计算Aˆ12统计量（6×6分组表：方法+fitness；每格包含w26/w52/w105三条比较）")
+    print("Step 2: Compute A12 statistics (6x6 table by method+fitness; each cell has w26/w52/w105 comparisons)")
     print("=" * 80)
-    print("分组顺序：先方法，再fitness（例如：Arachne_v2_DISC / Arachne_v2_CONT / Arachne_v2_CONT2 / semSegRep_...）")
+    print("Group order: method first, then fitness (e.g., Arachne_v2_DISC / Arachne_v2_CONT / Arachne_v2_CONT2 / semSegRep_...)")
 
     # Excel output path
     if args.time_horizon:
@@ -457,7 +457,7 @@ def main():
 
     # One grouped table per metric
     for metric in metrics_to_analyze:
-        print(f"\n指标: {metric}")
+        print(f"\nMetric: {metric}")
         print("=" * 80)
 
         # ----------------------------
@@ -560,12 +560,12 @@ def main():
                             mismatches.append((metric, row_group, col_group, w, f"a12+a21={a12_12+a12_21}"))
 
             if mismatches:
-                print("\n[SELF_CHECK] 发现A12一致性异常：")
+                print("\n[SELF_CHECK] Found A12 consistency anomalies:")
                 for item in mismatches[:50]:
                     m, rg, cg, w, msg = item
                     print(f"  - metric={m}, cell={rg} vs {cg}, w{w}: {msg}")
                 if len(mismatches) > 50:
-                    print(f"  ... 还有 {len(mismatches)-50} 条")
+                    print(f"  ... and {len(mismatches)-50} more")
                 raise SystemExit("[SELF_CHECK] FAILED")
             else:
                 print(f"[SELF_CHECK] PASSED for metric={metric} (checked={checked})")
@@ -576,14 +576,14 @@ def main():
     # Time-horizon comparison notice
     if args.compare_horizons:
         print("\n" + "=" * 80)
-        print("Step 3: Time Horizon比较（1s vs 2s vs 3s）")
+        print("Step 3: Time-horizon comparison (1s vs 2s vs 3s)")
         print("=" * 80)
-        print("注意：由于1s和2s只有5个重复实验，而3s有10个重复实验，样本量不同")
-        print("Aˆ12不适合用于不同样本量的比较，请使用calculate_cohensd.py进行time horizon比较")
+        print("Note: 1s/2s have 5 repeats while 3s has 10; sample sizes differ")
+        print("A12 is not suitable for unequal sample sizes; use calculate_cohensd.py for time-horizon comparison")
         print("=" * 80)
 
     print("\n" + "=" * 80)
-    print(f"分析完成！结果已保存到: {excel_file}")
+    print(f"Done. Results saved to: {excel_file}")
     print("=" * 80)
 
 

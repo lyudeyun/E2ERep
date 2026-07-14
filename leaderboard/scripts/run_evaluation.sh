@@ -101,7 +101,7 @@ send_eval_email_once() {
 import os
 from datetime import datetime
 
-subject_prefix = os.environ.get("EMAIL_SUBJECT_PREFIX", "[B2DRepair]")
+subject_prefix = os.environ.get("EMAIL_SUBJECT_PREFIX", "[E2ERep]")
 exit_code = os.environ.get("PIPE_EXIT_CODE", "")
 
 

@@ -125,7 +125,7 @@ def plot_distribution(l2_errors, output_path=None):
 if __name__ == '__main__':
     import sys
     
-    json_path = Path('/home/deyun/git/B2DRepair/baseline/vad_base_baseline_b2d_infos_val_partA_25clips.json')
+    json_path = Path('/home/deyun/git/E2ERep/baseline/vad_base_baseline_b2d_infos_val_partA_25clips.json')
     
     if len(sys.argv) > 1:
         json_path = Path(sys.argv[1])

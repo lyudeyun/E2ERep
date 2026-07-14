@@ -15,8 +15,8 @@ set -euo pipefail
 
 # ==== Tunables (edit as needed) ====
 # Experiment root (each subdir is one experiment; rescan for incomplete open-loop eval)
-EXP_DIR="${EXP_DIR:-/home/pj25001076/ku50002427/git/B2DRepair/uniad_base_Arachne_v2_DE_results}"
-# Eval dataset PKL (relative to B2DRepair repo root)
+EXP_DIR="${EXP_DIR:-/home/pj25001076/ku50002427/git/E2ERep/uniad_base_Arachne_v2_DE_results}"
+# Eval dataset PKL (relative to E2ERep repo root)
 EVAL_DATASET="${EVAL_DATASET:-Bench2DriveZoo/data/infos/b2d_infos_val_partB_25clips.pkl}"
 # GPU for evaluation
 EVAL_CUDA_DEVICE="${EVAL_CUDA_DEVICE:-0}"
@@ -36,7 +36,7 @@ conda activate b2d_zoo
 export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}"
 
 # ==== Repo root ====
-cd /home/pj25001076/ku50002427/git/B2DRepair || exit 1
+cd /home/pj25001076/ku50002427/git/E2ERep || exit 1
 
 # ==== Logs ====
 mkdir -p logs
@@ -52,13 +52,13 @@ fi
 
 # ==== Run batch re-eval ====
 echo "=========================================="
-echo "批量重跑开环评估"
+echo "Batch re-run open-loop evaluation"
 echo "  EXP_DIR=$EXP_DIR"
 echo "  EVAL_DATASET=$EVAL_DATASET"
 echo "  EVAL_CUDA_DEVICE=$EVAL_CUDA_DEVICE"
 echo "  JOBS=$JOBS"
 echo "=========================================="
-echo "即将执行的命令:"
+echo "Commands to run:"
 printf 'CUDA_VISIBLE_DEVICES=%s python3 batch_reeval_openloop.py --exp-dir %q --eval-dataset %q --eval-cuda-device %q --jobs %q' \
   "$EVAL_CUDA_DEVICE" "$EXP_DIR" "$EVAL_DATASET" "$EVAL_CUDA_DEVICE" "$JOBS"
 printf ' %s' "${EXTRA_ARGS[@]}"
@@ -75,5 +75,5 @@ python3 batch_reeval_openloop.py \
   2>&1 | tee "logs/batch_reeval_openloop_$(date +%Y%m%d_%H%M%S).log"
 
 echo "=========================================="
-echo "批量重评结束"
+echo "Batch re-evaluation finished"
 echo "=========================================="

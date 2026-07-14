@@ -1085,7 +1085,7 @@ def main():
         try:
             script_path = Path(__file__).resolve()
             cmd_line = " ".join(sys.argv)
-            subj = f"[B2DRepair] Experiments finished (model={args.model_name}, fitness=all)"
+            subj = f"[E2ERep] Experiments finished (model={args.model_name}, fitness=all)"
             body_lines = [
                 f"Script: {script_path}",
                 f"Command line: {cmd_line}",
@@ -1140,7 +1140,7 @@ def main():
         try:
             script_path = Path(__file__).resolve()
             cmd_line = " ".join(sys.argv)
-            subj = f"[B2DRepair] Experiments finished (model={args.model_name}, fitness={args.fitness})"
+            subj = f"[E2ERep] Experiments finished (model={args.model_name}, fitness={args.fitness})"
             body_lines = [
                 f"Script: {script_path}",
                 f"Command line: {cmd_line}",

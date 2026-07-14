@@ -19,7 +19,9 @@ from distutils.version import LooseVersion
 import importlib
 import os
 import pkg_resources
+import shlex
 import sys
+
 try:
     # Import torch before CARLA so CUDA can initialize in this process (torch agents / UniAD).
     import torch  # noqa: F401
@@ -205,9 +207,13 @@ class LeaderboardEvaluator(object):
         """
         self.carla_path = os.environ["CARLA_ROOT"]
         args.port = find_free_port(args.port)
-        cmd1 = f"{os.path.join(self.carla_path, 'CarlaUE4.sh')} -RenderOffScreen -nosound -carla-rpc-port={args.port} -graphicsadapter={args.gpu_rank}"
+        server_log_dir = os.path.abspath(os.environ.get("SAVE_PATH", "."))
+        os.makedirs(server_log_dir, exist_ok=True)
+        server_log_path = os.path.join(server_log_dir, f"carla_server_port{args.port}_gpu{args.gpu_rank}.log")
+        cmd1 = f"{os.path.join(self.carla_path, 'CarlaUE4.sh')} -RenderOffScreen -nosound -carla-rpc-port={args.port} -graphicsadapter={args.gpu_rank} > {shlex.quote(server_log_path)} 2>&1"
         self.server = subprocess.Popen(cmd1, shell=True, preexec_fn=os.setsid)
         print(f"Starting CARLA server pid={self.server.pid}: {cmd1}", flush=True)
+        print(f"CARLA server log: {server_log_path}", flush=True)
         atexit.register(os.killpg, self.server.pid, signal.SIGKILL)
         time.sleep(30)
             

@@ -21,7 +21,7 @@ Below, ``\\`` at line end is one backslash in this file (bash line continuation)
 
   python mytools/visualize_openloop.py \\
     --input baseline/VAD/vad_base_baseline_b2d_infos_val_partB_25clips.json \\
-    --compare_input /home/deyun/git/B2DRepair/B2DRepair_Data/vad_base_Arachne_v2_DE_results/middle/VAD_base_REP_VAL_t3s_Arachne_v2_DE_w52_p104_i50_es5_CONT2_9/open_loop_eval/vad_base_rep_val.json \\
+    --compare_input /home/deyun/git/E2ERep/E2ERep_Data/vad_base_Arachne_v2_DE_results/middle/VAD_base_REP_VAL_t3s_Arachne_v2_DE_w52_p104_i50_es5_CONT2_9/open_loop_eval/vad_base_rep_val.json \\
     --model vad \\
     --vad-pred-draw selected \\
     --scene \\
@@ -32,7 +32,7 @@ Below, ``\\`` at line end is one backslash in this file (bash line continuation)
   
   python mytools/visualize_openloop.py \\
     --input baseline/UniAD/uniad_base_baseline_b2d_infos_val_partB_25clips.json \\
-    --compare_input /home/deyun/git/B2DRepair/B2DRepair_Data/uniad_base_Arachne_v2_DE_results/large/UniAD_base_REP_VAL_t3s_Arachne_v2_DE_w26_p52_i50_es5_CONT2_7/open_loop_eval/uniad_base_rep_val.json \\
+    --compare_input /home/deyun/git/E2ERep/E2ERep_Data/uniad_base_Arachne_v2_DE_results/large/UniAD_base_REP_VAL_t3s_Arachne_v2_DE_w26_p52_i50_es5_CONT2_7/open_loop_eval/uniad_base_rep_val.json \\
     --model uniad \\
     --scene \\
     --output_dir uniad_base_cmp_ori_rep \\
@@ -43,7 +43,7 @@ Below, ``\\`` at line end is one backslash in this file (bash line continuation)
 Example (UniAD only, no ``--compare_input``; no ``--vad-pred-draw``). Replace ``--input`` with your UniAD open-loop JSON path::
 
   python mytools/visualize_openloop.py \\
-    --input B2DRepair_Data/uniad_base_Arachne_v2_DE_results/large/UniAD_base_REP_VAL_t3s_Arachne_v2_DE_w26_p52_i50_es5_CONT2_7/open_loop_eval/uniad_base_rep_val.json \\
+    --input E2ERep_Data/uniad_base_Arachne_v2_DE_results/large/UniAD_base_REP_VAL_t3s_Arachne_v2_DE_w26_p52_i50_es5_CONT2_7/open_loop_eval/uniad_base_rep_val.json \\
     --model uniad \\
     --scene \\
     --output_dir viz_openloop_smoke \\

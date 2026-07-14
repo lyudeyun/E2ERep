@@ -254,7 +254,7 @@ def main():
 
     # Experiment roots per model type
     # NOTE: Hard-coded data root for this machine's disk layout
-    data_root = "/data1/deyun/B2DRepair_Data"
+    data_root = "/data1/deyun/E2ERep_Data"
     if args.model_type == 'vad':
         base_dirs = [
             str(Path(data_root) / "vad_base_Arachne_v2_DE_results"),
@@ -282,7 +282,7 @@ def main():
     success_count = 0  # Successfully parsed experiments
     
     print("=" * 80)
-    print("Step 1: 提取所有实验的指标数据")
+    print("Step 1: Extract metrics from all experiments")
     print("=" * 80)
 
     for base_dir in base_dirs:
@@ -290,7 +290,7 @@ def main():
             print(f"Warning: {base_dir} not found")
             continue
 
-        print(f"\n处理目录: {base_dir}")
+        print(f"\nProcessing directory: {base_dir}")
         base_path = Path(base_dir)
 
         # Layout: <base_path>/(small|middle|large)/<EXP>/open_loop_eval/...
@@ -300,7 +300,7 @@ def main():
                 if exp_folder.is_dir():
                     exp_folders.append(exp_folder)
         exp_folders = sorted(set(exp_folders))
-        print(f"  找到 {len(exp_folders)} 个实验文件夹")
+        print(f"  Found {len(exp_folders)} experiment folders")
 
         # UniAD: convert JSON to VAD-style summary via convert_uniad_to_vad_metrics.py
         converter_script = Path(__file__).resolve().parent.parent / 'baseline' / 'convert_uniad_to_vad_metrics.py'
@@ -407,48 +407,48 @@ def main():
 
     # Report extraction summary
     print(f"\n" + "=" * 80)
-    print("数据提取汇总")
+    print("Data extraction summary")
     print("=" * 80)
-    print(f"✓ 成功提取: {success_count} 个实验")
-    print(f"✗ 缺少log文件: {len(missing_log)} 个实验")
-    print(f"✗ 无法解析配置: {len(parse_failed)} 个实验")
-    print(f"✗ 无法提取指标: {len(extract_failed)} 个实验")
-    print(f"总计: {success_count + len(missing_log) + len(parse_failed) + len(extract_failed)} 个实验文件夹")
+    print(f"OK extracted: {success_count} experiments")
+    print(f"Missing log files: {len(missing_log)} experiments")
+    print(f"Failed to parse config: {len(parse_failed)} experiments")
+    print(f"Failed to extract metrics: {len(extract_failed)} experiments")
+    print(f"Total: {success_count + len(missing_log) + len(parse_failed) + len(extract_failed)} experiment folders")
 
     if missing_log:
-        print(f"\n缺少log文件的实验 ({len(missing_log)} 个):")
+        print(f"\nExperiments missing log files ({len(missing_log)}):")
         for folder in missing_log[:20]:  # Show at most 20
             print(f"  - {folder}")
         if len(missing_log) > 20:
             print(f"  ... {len(missing_log) - 20} more")
 
     if parse_failed:
-        print(f"\n无法解析配置的实验 ({len(parse_failed)} 个):")
+        print(f"\nExperiments with unparsable config ({len(parse_failed)}):")
         for folder in parse_failed[:20]:  # Show at most 20
             print(f"  - {folder}")
         if len(parse_failed) > 20:
             print(f"  ... {len(parse_failed) - 20} more")
 
     if extract_failed:
-        print(f"\n无法提取指标的实验 ({len(extract_failed)} 个):")
+        print(f"\nExperiments with metric extraction failure ({len(extract_failed)}):")
         for folder in extract_failed[:20]:  # Show at most 20
             print(f"  - {folder}")
         if len(extract_failed) > 20:
             print(f"  ... {len(extract_failed) - 20} more")
     
-    print(f"\n总共提取了 {len(all_data)} 个实验的数据")
+    print(f"\nExtracted data from {len(all_data)} experiments")
 
     if len(all_data) == 0:
         print("\n" + "=" * 80)
-        print("错误: 没有提取到任何实验数据！")
+        print("Error: no experiment data extracted!")
         print("=" * 80)
-        print("\n请检查上述缺失数据的详细信息。")
-        print("可能的原因：")
-        print("1. 实验目录路径不正确")
-        print("2. VAD: 缺少 open_loop_eval/<model>_rep_val.log；UniAD: 缺少 open_loop_eval/<model>_rep_val.json")
-        print("3. log文件中不包含所需的指标数据（plan_L2_*s 或 plan_obj_box_col_*s）")
-        print("4. 实验文件夹名称格式不正确，无法解析配置")
-        print("\n脚本已停止执行。")
+        print("\nPlease check the missing-data details above.")
+        print("Possible causes:")
+        print("1. Incorrect experiment directory path")
+        print("2. VAD: missing open_loop_eval/<model>_rep_val.log; UniAD: missing open_loop_eval/<model>_rep_val.json")
+        print("3. Log files do not contain required metrics (plan_L2_*s or plan_obj_box_col_*s)")
+        print("4. Experiment folder name format is incorrect; cannot parse config")
+        print("\nScript stopped.")
         sys.exit(1)
 
     # Build DataFrame for analysis
@@ -468,12 +468,12 @@ def main():
     
     # Per-configuration means (3s only)
     print("\n" + "=" * 80)
-    print("各配置下指标均值（仅 3s）")
+    print("Per-config metric means (3s only)")
     print("=" * 80)
     config_cols = ['method', 'weight_count', 'fitness_type']
     mean_cols = ['plan_L2_3s', 'plan_obj_box_col_3s']
     config_means = df.groupby(config_cols)[mean_cols].mean().round(6)
-    print("\n【各配置均值】 (method, weight_count, fitness_type) -> 各指标均值")
+    print("\n[Per-config means] (method, weight_count, fitness_type) -> metric means")
     for idx in config_means.index:
         method, weight_count, fitness_type = idx
         row = config_means.loc[idx]
@@ -483,7 +483,7 @@ def main():
             f"L2_3s={row['plan_L2_3s']:.6f}, col_3s={row['plan_obj_box_col_3s']:.6f}"
         )
     # L2 @ 3s means by configuration
-    print("\n【L2 error 3s 各配置平均值】")
+    print("\n[L2 error 3s per-config averages]")
     l2_3s = df.groupby(config_cols)['plan_L2_3s'].agg(['mean', 'std', 'count']).round(6)
     for idx in l2_3s.index:
         method, weight_count, fitness_type = idx
@@ -493,7 +493,7 @@ def main():
         std_str = f"{std_val:.6f}" if pd.notna(std_val) else "N/A"
         print(f"  {method}, w{weight_count}, {fitness_type}: mean={mean_val:.6f}, std={std_str}, n={count_val}")
     # Collision @ 3s means; UniAD uses collision-frame counts, VAD uses rate
-    print("\n【Collision 3s 各配置平均值】")
+    print("\n[Collision 3s per-config averages]")
     collision_col = 'collision_frame_count' if args.model_type in ('uniad', 'vad') else 'plan_obj_box_col_3s'
     col_3s = df.groupby(config_cols)[collision_col].agg(['mean', 'std', 'count']).round(6)
     for idx in col_3s.index:
@@ -791,18 +791,18 @@ def main():
         col_pdf = out_dir / f"collision_3s_boxplot_{args.model_type}.pdf"
         fig2.savefig(col_pdf, bbox_inches='tight', pad_inches=SAVE_PAD_INCHES)
         plt.close(fig2)
-        print(f"\n箱线图已保存: {l2_pdf}, {col_pdf}")
+        print(f"\nBoxplots saved: {l2_pdf}, {col_pdf}")
     else:
-        print("\n(未安装 matplotlib，跳过箱线图)")
+        print("\n(matplotlib not installed; skipping boxplots)")
 
     print("\n" + "=" * 80)
-    print("Step 2: 计算Cohen's d统计量")
+    print("Step 2: Compute Cohen's d statistics")
     print("=" * 80)
     
     results = []
     
     # Comparison 1: methods (Arachne_v2 vs semSegRep), paired on shared configs
-    print("\n--- 比较1: 方法比较 (Arachne_v2 vs semSegRep) ---")
+    print("\n--- Comparison 1: methods (Arachne_v2 vs semSegRep) ---")
     for metric in metrics_to_analyze:
         method1, method2 = 'Arachne_v2', 'semSegRep'
         if method1 not in df['method'].unique() or method2 not in df['method'].unique():
@@ -848,12 +848,12 @@ def main():
             if d is not None:
                 order_str = ", ".join([f"(w{w}, {ft})" for (w, ft) in configs])
                 print(f"\n  {metric}:")
-                print(f"    向量维度: {len(m1_array)}×1；维度顺序: {order_str}")
-                print(f"    {method1}向量: {m1_array}")
-                print(f"    {method2}向量: {m2_array}")
+                print(f"    Vector dim: {len(m1_array)}x1; order: {order_str}")
+                print(f"    {method1} vector: {m1_array}")
+                print(f"    {method2} vector: {m2_array}")
     
     # Comparison 2: fitness objectives
-    print("\n--- 比较2: Fitness函数比较 ---")
+    print("\n--- Comparison 2: fitness functions ---")
     for metric in metrics_to_analyze:
         # Paired grid: each cell is (method, weight_count) with all three fitness values
         base_positions = []
@@ -886,9 +886,9 @@ def main():
         if len(base_positions) > 0 and len(fitness_vectors) == len(fitness_types):
             print(f"\n  {metric}:")
             order_str = ", ".join([f"({m}, w{w})" for (m, w) in base_positions])
-            print(f"    向量维度: {len(base_positions)}×1；维度顺序: {order_str}")
+            print(f"    Vector dim: {len(base_positions)}x1; order: {order_str}")
             for ft in fitness_types:
-                print(f"    {ft}向量: {fitness_vectors[ft]}")
+                print(f"    {ft} vector: {fitness_vectors[ft]}")
 
             for i, fitness1 in enumerate(fitness_types):
                 for j, fitness2 in enumerate(fitness_types):
@@ -915,7 +915,7 @@ def main():
                         })
 
     # Comparison 3: weight counts
-    print("\n--- 比较3: 权重数量比较 ---")
+    print("\n--- Comparison 3: weight counts ---")
     for metric in metrics_to_analyze:
         # Paired grid: each cell is (method, fitness_type) with every weight count present
         base_positions = []
@@ -948,10 +948,10 @@ def main():
         if len(base_positions) > 0 and len(weight_vectors) == len(weight_counts):
             print(f"\n  {metric}:")
             order_str = ", ".join([f"({m}, {ft})" for (m, ft) in base_positions])
-            print(f"    向量维度: {len(base_positions)}×1；维度顺序: {order_str}")
+            print(f"    Vector dim: {len(base_positions)}x1; order: {order_str}")
             for label in weight_labels:
                 if label in weight_vectors:
-                    print(f"    {label}向量: {weight_vectors[label]}")
+                    print(f"    {label} vector: {weight_vectors[label]}")
 
             for i, w1 in enumerate(weight_labels):
                 for j, w2 in enumerate(weight_labels):
@@ -984,15 +984,15 @@ def main():
     
     # Pretty-print summary
     print("\n" + "=" * 80)
-    print("Step 3: 汇总报告")
+    print("Step 3: Summary report")
     print("=" * 80)
     
     # Group by comparison type and metric
-    print("\nCohen's d 统计分析结果汇总\n")
+    print("\nCohen's d statistics summary\n")
 
     for comparison_type in ['Method', 'Fitness', 'Weight']:
         print(f"\n{'=' * 80}")
-        print(f"比较类型: {comparison_type}")
+        print(f"Comparison type: {comparison_type}")
         print(f"{'=' * 80}\n")
 
         subset = results_df[results_df['comparison_type'] == comparison_type]
@@ -1012,7 +1012,7 @@ def main():
                             key = (row['group1'], row['group2'])
                             matrix[key] = effect_size
                     
-                    print(f"指标：{metric}；CONT vs CONT2 vs DISC")
+                    print(f"Metric: {metric}; CONT vs CONT2 vs DISC")
                     print("    " + " " * 12 + "CONT" + " " * 12 + "CONT2" + " " * 12 + "DISC")
                     for i, fitness1 in enumerate(fitness_types):
                         row_str = f"    {fitness1:12s}"
@@ -1047,7 +1047,7 @@ def main():
                             matrix[key] = effect_size
                     
                     header = "    " + " " * 12 + "".join([f"{w:>16s}" for w in weight_names])
-                    print(f"指标：{metric}；" + " vs ".join(weight_names))
+                    print(f"Metric: {metric}; " + " vs ".join(weight_names))
                     print(header)
                     for i, weight1 in enumerate(weight_names):
                         row_str = f"    {weight1:12s}"
@@ -1069,11 +1069,11 @@ def main():
                             # Map d to qualitative label
                             effect_size = interpret_cohens_d(d)
                             
-                            print(f"指标：{metric}；{row['group1']} vs {row['group2']}：{effect_size}")
+                            print(f"Metric: {metric}; {row['group1']} vs {row['group2']}: {effect_size}")
     
     # NOTE: Only 3s metrics remain; cross-horizon (1s/2s/3s) comparisons were removed.
     print("\n" + "=" * 80)
-    print("分析完成！")
+    print("Done.")
     print("=" * 80)
 
 if __name__ == '__main__':

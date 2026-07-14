@@ -20,7 +20,7 @@ conda activate b2d_zoo
 export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}"
 
 # ==== Repo root ====
-cd /home/pj25001076/ku50002427/git/B2DRepair || exit 1
+cd /home/pj25001076/ku50002427/git/E2ERep || exit 1
 
 # ==== Logs ====
 mkdir -p logs
