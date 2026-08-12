@@ -744,7 +744,7 @@ class ObjectRangeFilter(object):
         # using mask to index gt_labels_3d will cause bug when
         # len(gt_labels_3d) == 1, where mask=1 will be interpreted
         # as gt_labels_3d[1] and cause out of index error
-        gt_labels_3d = gt_labels_3d[mask.numpy().astype(np.bool)]
+        gt_labels_3d = gt_labels_3d[mask.numpy().astype(np.bool_)]
 
         # limit rad to [-pi, pi]
         gt_bboxes_3d.limit_yaw(offset=0.5, period=2 * np.pi)
@@ -1802,7 +1802,7 @@ class ObjectRangeFilterTrack(object):
         # using mask to index gt_labels_3d will cause bug when
         # len(gt_labels_3d) == 1, where mask=1 will be interpreted
         # as gt_labels_3d[1] and cause out of index error
-        mask = mask.numpy().astype(np.bool)
+        mask = mask.numpy().astype(np.bool_)
         gt_labels_3d = gt_labels_3d[mask]
         gt_inds = gt_inds[mask]
         gt_fut_traj = gt_fut_traj[mask]
@@ -1889,13 +1889,13 @@ class CustomObjectRangeFilter(ObjectRangeFilter):
         # using mask to index gt_labels_3d will cause bug when
         # len(gt_labels_3d) == 1, where mask=1 will be interpreted
         # as gt_labels_3d[1] and cause out of index error
-        gt_labels_3d = gt_labels_3d[mask.numpy().astype(np.bool)]
+        gt_labels_3d = gt_labels_3d[mask.numpy().astype(np.bool_)]
 
         # limit rad to [-pi, pi]
         gt_bboxes_3d.limit_yaw(offset=0.5, period=2 * np.pi)
         results['gt_bboxes_3d'] = gt_bboxes_3d
         results['gt_labels_3d'] = gt_labels_3d
-        # results['ann_tokens'] = results['ann_tokens'][mask.numpy().astype(np.bool)]
+        # results['ann_tokens'] = results['ann_tokens'][mask.numpy().astype(np.bool_)]
 
         return results
 
@@ -1957,7 +1957,7 @@ class VADObjectRangeFilter(object):
         # using mask to index gt_labels_3d will cause bug when
         # len(gt_labels_3d) == 1, where mask=1 will be interpreted
         # as gt_labels_3d[1] and cause out of index error
-        gt_labels_3d = gt_labels_3d[mask.numpy().astype(np.bool)]
+        gt_labels_3d = gt_labels_3d[mask.numpy().astype(np.bool_)]
         
 
         # limit rad to [-pi, pi]
@@ -1967,7 +1967,7 @@ class VADObjectRangeFilter(object):
 
         if 'attr_labels' in input_dict:
             gt_attr_labels = input_dict['attr_labels']
-            gt_attr_labels = gt_attr_labels[mask.numpy().astype(np.bool)]
+            gt_attr_labels = gt_attr_labels[mask.numpy().astype(np.bool_)]
             input_dict['gt_attr_labels'] = gt_attr_labels
 
         return input_dict
