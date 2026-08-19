@@ -62,7 +62,8 @@ Example (VAD only, no ``--compare_input``; ``--vad-pred-draw`` is still required
     --only_scene_token 'v1/OppositeVehicleTakingPriority_Town04_Route214_Weather6' \\
     --only_frame_idx 0
 
-With lane map, other agents (GT boxes), and ``mytools/ego.png`` when data exists, add ``--scene`` (and optional ``--output_dir``).
+With lane map, other agents (GT boxes), and ``mytools/ego.png`` when data exists, add ``--scene``
+(map polylines load from ``Bench2DriveZoo/data/infos/b2d_map_infos_by_town/{Town}.pkl``).
 
 Parameter meanings and defaults: each flag is documented in ``main()`` via
 ``parser.add_argument(..., help=...)`` (see around the ``ArgumentParser`` block), or run:
@@ -113,6 +114,9 @@ CMD_COLORS = [
     "#ff7f0e",  # orange
     "#8c564b",  # brown
 ]
+# Default overlay (not --compare_input): GT green, selected ego plan red.
+TRAJ_GT_COLOR = "#2ca02c"
+TRAJ_PRED_COLOR = "#d62728"
 
 # With --compare_input and a matched frame: primary preds vs compare preds (fixed colors, uniform width).
 COMPARE_TRAJ_LW = 3.0
@@ -265,9 +269,125 @@ def _default_b2d_infos_pkl_path(repo_root: Path) -> str:
     return ""
 
 
-def _default_map_infos_pkl_path(repo_root: Path) -> str:
-    cand = repo_root / "Bench2DriveZoo/data/infos/b2d_map_infos.pkl"
+def _default_map_npz_root(repo_root: Path) -> Path:
+    return repo_root / "Bench2DriveZoo/data/bench2drive/maps"
+
+
+def _default_map_infos_by_town_dir(repo_root: Path) -> Path:
+    return repo_root / "Bench2DriveZoo/data/infos/b2d_map_infos_by_town"
+
+
+def _hd_map_npz_path(npz_root, town_name):
+    """``maps/{town}_HD_map.npz`` (same naming as Bench2Drive HD maps)."""
+    root = Path(npz_root)
+    town = str(town_name or "")
+    if not town or not root.is_dir():
+        return ""
+    cand = root / "{}_HD_map.npz".format(town)
     return str(cand.resolve()) if cand.is_file() else ""
+
+
+def _map_info_from_hd_npz(npz_path):
+    """
+    Convert one ``*_HD_map.npz`` to the per-town dict stored in ``b2d_map_infos.pkl``.
+    Same logic as ``prepare_B2D.gengrate_map`` (including the y-flip).
+    """
+    raw = np.load(npz_path, allow_pickle=True)["arr"]
+    map_info = dict(raw)
+    lane_points, lane_types, lane_sample_points = [], [], []
+    trigger_volumes_points, trigger_volumes_types, trigger_volumes_sample_points = [], [], []
+    for _road_id, road in map_info.items():
+        for lane_id, lane in road.items():
+            if lane_id == "Trigger_Volumes":
+                for single_trigger_volume in lane:
+                    points = np.array(single_trigger_volume["Points"])
+                    points[:, 1] *= -1
+                    trigger_volumes_points.append(points)
+                    trigger_volumes_sample_points.append(points.mean(axis=0))
+                    trigger_volumes_types.append(single_trigger_volume["Type"])
+            else:
+                for single_lane in lane:
+                    points = np.array([raw_point[0] for raw_point in single_lane["Points"]])
+                    points[:, 1] *= -1
+                    lane_points.append(points)
+                    lane_types.append(single_lane["Type"])
+                    n = points.shape[0]
+                    if n % 50 != 0:
+                        divide = [50 * i for i in range(n // 50 + 1)]
+                    else:
+                        divide = [50 * i for i in range(n // 50)]
+                    divide.append(n - 1)
+                    lane_sample_points.append(points[divide])
+    return {
+        "lane_points": lane_points,
+        "lane_sample_points": lane_sample_points,
+        "lane_types": lane_types,
+        "trigger_volumes_points": trigger_volumes_points,
+        "trigger_volumes_sample_points": trigger_volumes_sample_points,
+        "trigger_volumes_types": trigger_volumes_types,
+    }
+
+
+def _dump_town_map_pkl(path, town_name, town_info):
+    if pickle is None:
+        raise RuntimeError("pickle is not available in this Python environment.")
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_suffix(out.suffix + ".tmp")
+    with open(tmp, "wb") as f:
+        pickle.dump({str(town_name): town_info}, f)
+    tmp.replace(out)
+
+
+class _LazyTownMapStore:
+    """Load one town at a time: per-town pkl, else HD npz (optionally cache), else combined pkl."""
+
+    def __init__(self, by_town_dir="", npz_root="", write_cache=True):
+        self.by_town_dir = Path(by_town_dir) if by_town_dir else None
+        self.npz_root = Path(npz_root) if npz_root else None
+        self.write_cache = bool(write_cache)
+        self._towns = {}
+
+    def __contains__(self, town):
+        return self.get(town) is not None
+
+    def __getitem__(self, town):
+        info = self.get(town)
+        if info is None:
+            raise KeyError(town)
+        return info
+
+    def get(self, town):
+        town = str(town or "")
+        if not town:
+            return None
+        if town in self._towns:
+            return self._towns[town]
+        info = self._load_town(town)
+        if info is not None:
+            self._towns[town] = info
+        return info
+
+    def _load_town(self, town):
+        if self.by_town_dir is not None:
+            p = self.by_town_dir / "{}.pkl".format(town)
+            if p.is_file():
+                print("Loading town map pkl: {}".format(p), flush=True)
+                blob = _load_map_infos_pkl(str(p))
+                if town in blob and isinstance(blob[town], dict):
+                    return blob[town]
+                if "lane_points" in blob:
+                    return blob
+        npz_path = _hd_map_npz_path(self.npz_root, town) if self.npz_root is not None else ""
+        if npz_path:
+            print("Converting HD map npz: {}".format(npz_path), flush=True)
+            info = _map_info_from_hd_npz(npz_path)
+            if self.write_cache and self.by_town_dir is not None:
+                dest = self.by_town_dir / "{}.pkl".format(town)
+                print("Caching town map pkl: {}".format(dest), flush=True)
+                _dump_town_map_pkl(dest, town, info)
+            return info
+        return None
 
 
 def _default_ego_icon_path() -> str:
@@ -615,11 +735,42 @@ def _draw_ego_car(
     return True
 
 
-def _draw_gt_boxes(ax, info, max_boxes=80, alpha=0.6):
+# Coarse NPC families for BEV boxes (not one color per instance).
+_GT_BOX_COLOR_VEHICLE = "#1f77b4"
+_GT_BOX_COLOR_PEDESTRIAN = "#2ca02c"
+_GT_BOX_COLOR_CONSTRUCTION = "#d62728"
+_GT_BOX_COLOR_SIGN = "#9467bd"
+_GT_BOX_COLOR_LIGHT = "#ff7f0e"
+_GT_BOX_COLOR_OTHER = "#7f7f7f"
+
+
+def _gt_box_color(name):
+    n = str(name or "").lower()
+    if "walker" in n or "pedestrian" in n:
+        return _GT_BOX_COLOR_PEDESTRIAN
+    if "traffic_light" in n or "traffic.traffic_light" in n:
+        return _GT_BOX_COLOR_LIGHT
+    if (
+        "cone" in n
+        or "construction" in n
+        or "warning" in n
+        or "accident" in n
+        or n.startswith("static.")
+    ):
+        return _GT_BOX_COLOR_CONSTRUCTION
+    if "vehicle" in n or n in ("car", "van", "truck", "bicycle", "motorcycle", "bus"):
+        return _GT_BOX_COLOR_VEHICLE
+    if "traffic" in n or "sign" in n:
+        return _GT_BOX_COLOR_SIGN
+    return _GT_BOX_COLOR_OTHER
+
+
+def _draw_gt_boxes(ax, info, max_boxes=80, alpha=0.85):
     """
     Draw gt boxes from one info dict (as in b2d_infos_*.pkl).
     Expects info['gt_boxes'] shape (N, >=7) and optionally info['gt_names'].
     Convention is assumed: [x, y, z, dx, dy, dz, yaw, ...] in ego frame.
+    Color is by NPC family (vehicle / pedestrian / construction / sign / light), not per instance.
     """
     if not info:
         return 0
@@ -629,6 +780,7 @@ def _draw_gt_boxes(ax, info, max_boxes=80, alpha=0.6):
     boxes = np.asarray(gt_boxes)
     if boxes.ndim != 2 or boxes.shape[0] == 0 or boxes.shape[1] < 7:
         return 0
+    names = info.get("gt_names", None)
     n = int(min(boxes.shape[0], max_boxes))
     for i in range(n):
         x, y = float(boxes[i, 0]), float(boxes[i, 1])
@@ -641,14 +793,24 @@ def _draw_gt_boxes(ax, info, max_boxes=80, alpha=0.6):
         yaw_in_box = float(boxes[i, 6])
         yaw = -(yaw_in_box + np.pi / 2.0)
         poly = _box_corners_xy(x, y, dx, dy, yaw)
-        ax.plot(poly[:, 0], poly[:, 1], color="#666666", linewidth=1.0, alpha=alpha, zorder=2)
-        # Indicate heading: a short line from center to front edge center (+x in box local frame)
-        # Our `_box_corners_xy` ordering uses front edge at corners[0] -> corners[1].
+        nm = names[i] if names is not None and i < len(names) else ""
+        c = _gt_box_color(nm)
+        ax.add_patch(
+            mpatches.Polygon(
+                poly[:-1],
+                closed=True,
+                facecolor=c,
+                edgecolor=c,
+                linewidth=1.4,
+                alpha=min(0.35, float(alpha) * 0.45),
+                zorder=2,
+            )
+        )
+        ax.plot(poly[:, 0], poly[:, 1], color=c, linewidth=1.5, alpha=alpha, zorder=2)
         front_center = 0.5 * (poly[0, :2] + poly[1, :2])
-        ax.plot([x, front_center[0]], [y, front_center[1]], color="#666666", linewidth=1.6, alpha=min(1.0, alpha + 0.25), zorder=3)
-        # Emphasize the front edge so "head/tail" is visually obvious
-        ax.plot([poly[0, 0], poly[1, 0]], [poly[0, 1], poly[1, 1]], color="#666666", linewidth=2.4, alpha=min(1.0, alpha + 0.25), zorder=3)
-        ax.plot(x, y, marker=".", color="#666666", markersize=2, alpha=alpha, zorder=2)
+        ax.plot([x, front_center[0]], [y, front_center[1]], color=c, linewidth=1.8, alpha=min(1.0, alpha + 0.1), zorder=3)
+        ax.plot([poly[0, 0], poly[1, 0]], [poly[0, 1], poly[1, 1]], color=c, linewidth=2.6, alpha=min(1.0, alpha + 0.1), zorder=3)
+        ax.plot(x, y, marker=".", color=c, markersize=3, alpha=alpha, zorder=2)
     return n
 
 
@@ -829,6 +991,22 @@ def _plot_contiguous_runs(ax, xy, in_mask, color, linewidth, alpha, zorder):
     return nseg
 
 
+# VAD map classes in b2d_map_infos.pkl (see B2D_VAD_Dataset.map_element_class).
+LANE_MARKING_TYPES = frozenset(("Broken", "Solid", "SolidSolid"))
+LANE_CENTER_TYPES = frozenset(("Center",))
+
+
+def _lane_polyline_allowed(lane_type, lane_mode):
+    """Whether a lane_* polyline should be drawn. Trigger volumes are not filtered here."""
+    mode = str(lane_mode or "markings").lower()
+    t = str(lane_type or "")
+    if mode == "all":
+        return True
+    if mode == "center":
+        return t in LANE_CENTER_TYPES
+    return t in LANE_MARKING_TYPES
+
+
 def _draw_map_polylines_bev(
     ax,
     map_info,
@@ -838,24 +1016,29 @@ def _draw_map_polylines_bev(
     alpha=0.55,
     pretty=False,
     draw_trigger_volumes=True,
+    map_lane_types="markings",
 ):
     """
     Draw lane / trigger volume polylines as background.
     Map points in b2d_map_infos.pkl are world/map coords; B2D_vad_dataset.get_map_info uses
     sensors['LIDAR_TOP']['world2lidar'] — same frame as gt_boxes and collected ego_fut trajs.
+
+    ``map_lane_types``: ``markings`` (Broken/Solid/SolidSolid only; default), ``center``, or ``all``
+    (includes Center centerlines, i.e. VAD map-head GT).
     """
     if not isinstance(map_info, dict):
         return 0
     if world2lidar is None:
         return 0
     n = 0
+    lane_types = map_info.get("lane_types", None)
 
     # When pretty=True, prefer sampled polylines only (sparser map).
     keys = [("lane_sample_points", "#7a7a7a", 2.4 if pretty else 0.9)]
     if not pretty:
         keys = [
-            ("lane_points", "#7a7a7a", 1.2),
-            ("lane_sample_points", "#7a7a7a", 0.9),
+            ("lane_points", "#7a7a7a", 1.8),
+            ("lane_sample_points", "#7a7a7a", 1.3),
         ]
     if draw_trigger_volumes:
         keys += [
@@ -863,13 +1046,15 @@ def _draw_map_polylines_bev(
             ("trigger_volumes_sample_points", "#4c78a8", 1.6 if pretty else 0.9),
         ]
 
-    # IMPORTANT: By default we DO NOT drop any map/lane information.
-    # We only crop by view window (xlim/ylim) and plot contiguous in-view segments.
     for key, color, lw in keys:
         pts_list = map_info.get(key, None)
         if not isinstance(pts_list, list):
             continue
-        for pts in pts_list:
+        is_lane = key.startswith("lane_")
+        for i, pts in enumerate(pts_list):
+            if is_lane and isinstance(lane_types, list) and i < len(lane_types):
+                if not _lane_polyline_allowed(lane_types[i], map_lane_types):
+                    continue
             arr = np.asarray(pts, dtype=float)
             if arr.ndim != 2 or arr.shape[1] < 3 or arr.shape[0] < 2:
                 continue
@@ -933,6 +1118,7 @@ def visualize_one_frame(
     ego_forward_axis="y",
     model=None,
     vad_pred_draw=None,
+    map_lane_types="markings",
 ):
     mnorm = _normalize_model(model)
     # Compare overlay only when a matched second-frame dict exists (truthy); not just ``--compare_input`` set globally.
@@ -991,6 +1177,7 @@ def visualize_one_frame(
                 alpha=0.55,
                 pretty=False,
                 draw_trigger_volumes=True,
+                map_lane_types=map_lane_types,
             )
 
     # Optional: draw surrounding agents' GT boxes
@@ -1027,7 +1214,7 @@ def visualize_one_frame(
             lw = 3.2 if is_selected else 2.0
             alpha = 1.0 if is_selected else 0.55
             ls = "-" if is_selected else "--"
-            c = CMD_COLORS[cmd_idx % len(CMD_COLORS)]
+            c = TRAJ_PRED_COLOR if is_selected else CMD_COLORS[cmd_idx % len(CMD_COLORS)]
 
         label = CMD_LABELS[cmd_idx] if cmd_idx < len(CMD_LABELS) else "Cmd {}".format(cmd_idx)
         if is_selected and not hide_selected_suffix:
@@ -1110,7 +1297,7 @@ def visualize_one_frame(
         ax.plot(
             gt[:, 0],
             gt[:, 1],
-            color="black",
+            color=TRAJ_GT_COLOR,
             linewidth=COMPARE_TRAJ_LW if use_compact_compare_legend else 3,
             linestyle="-",
             marker="x",
@@ -1118,7 +1305,7 @@ def visualize_one_frame(
             label=("_nolegend_" if use_compact_compare_legend else "Ground Truth"),
             zorder=9,
         )
-        ax.plot(gt[-1, 0], gt[-1, 1], color="black", marker="D", markersize=8, zorder=9)
+        ax.plot(gt[-1, 0], gt[-1, 1], color=TRAJ_GT_COLOR, marker="D", markersize=8, zorder=9)
 
     # Metrics: for ``--model uniad`` with ``fut_valid_flag`` True, recompute L2 VAD-style from traj (same as converter);
     # ``--model vad`` always VAD-style; UniAD invalid frames read JSON only.
@@ -1249,7 +1436,7 @@ def visualize_one_frame(
                 Line2D(
                     [0],
                     [0],
-                    color="black",
+                    color=TRAJ_GT_COLOR,
                     linestyle="-",
                     linewidth=COMPARE_TRAJ_LW,
                     marker="x",
@@ -1385,8 +1572,8 @@ def main():
     parser.add_argument(
         "--scene",
         action="store_true",
-        help="Draw lane map + surrounding agent GT boxes. Uses --b2d_infos_pkl / --map_infos_pkl when set; "
-        "otherwise tries Bench2DriveZoo/data/infos/ defaults if those files exist.",
+        help="Draw lane map + surrounding agent GT boxes. Map: per-town pkl under "
+        "Bench2DriveZoo/data/infos/b2d_map_infos_by_town. Boxes: --b2d_infos_pkl or infos defaults.",
     )
     parser.add_argument(
         "--b2d_infos_pkl",
@@ -1400,15 +1587,28 @@ def main():
         help="Draw GT boxes from b2d_infos_pkl (matches scene_token or folder + frame_idx).",
     )
     parser.add_argument(
-        "--map_infos_pkl",
+        "--map_infos_by_town_dir",
         default="",
-        help="b2d_map_infos.pkl (world lane / trigger polylines). Relative paths are under repo root. "
-        "If empty with --scene/--draw_map, uses Bench2DriveZoo/data/infos/b2d_map_infos.pkl when present.",
+        help="Directory of per-town pkl files named {Town}.pkl (same content as one key of b2d_map_infos.pkl). "
+        "Default: Bench2DriveZoo/data/infos/b2d_map_infos_by_town.",
+    )
+    parser.add_argument(
+        "--map_npz_root",
+        default="",
+        help="Directory of {Town}_HD_map.npz. Default: Bench2DriveZoo/data/bench2drive/maps. "
+        "Used when the per-town pkl is missing.",
     )
     parser.add_argument(
         "--draw_map",
         action="store_true",
         help="Draw map polylines in LiDAR BEV (needs b2d_infos_pkl for world2lidar). Implied by --scene.",
+    )
+    parser.add_argument(
+        "--map-lane-types",
+        default="markings",
+        choices=["markings", "center", "all"],
+        help="Which lane polylines to draw with --scene/--draw_map: markings = Broken/Solid/SolidSolid "
+        "(painted lines; default); center = Center only; all = VAD map-head GT including centerlines.",
     )
     parser.add_argument(
         "--ego_icon",
@@ -1469,11 +1669,16 @@ def main():
         if b2d_infos_pkl:
             print("Using default b2d_infos_pkl: {}".format(b2d_infos_pkl))
 
-    map_infos_pkl = _resolve_repo_path(repo_root, args.map_infos_pkl) if (args.map_infos_pkl or "").strip() else ""
-    if draw_map and not map_infos_pkl:
-        map_infos_pkl = _default_map_infos_pkl_path(repo_root)
-        if map_infos_pkl:
-            print("Using default map_infos_pkl: {}".format(map_infos_pkl))
+    map_by_town_raw = (args.map_infos_by_town_dir or "").strip()
+    map_npz_raw = (args.map_npz_root or "").strip()
+    map_by_town_dir = (
+        Path(_resolve_repo_path(repo_root, map_by_town_raw))
+        if map_by_town_raw
+        else _default_map_infos_by_town_dir(repo_root)
+    )
+    map_npz_root = (
+        Path(_resolve_repo_path(repo_root, map_npz_raw)) if map_npz_raw else _default_map_npz_root(repo_root)
+    )
 
     ego_raw = (args.ego_icon or "").strip()
     if ego_raw:
@@ -1552,12 +1757,12 @@ def main():
 
     map_infos = None
     if draw_map:
-        if not map_infos_pkl:
-            print("WARNING: --draw_map / --scene but no b2d_map_infos.pkl; skip map polylines.")
-        else:
-            print("Loading map infos pkl: {}".format(map_infos_pkl))
-            map_infos = _load_map_infos_pkl(map_infos_pkl)
-            print("Loaded map infos: {} towns".format(len(map_infos)))
+        print("Map: per-town pkl dir {} (npz fallback {})".format(map_by_town_dir, map_npz_root))
+        map_infos = _LazyTownMapStore(
+            by_town_dir=str(map_by_town_dir),
+            npz_root=str(map_npz_root),
+            write_cache=False,
+        )
 
     vh = float(args.view_m)
     d = float(args.view_forward_center_offset_m)
@@ -1569,6 +1774,8 @@ def main():
             d,
         )
     )
+    if draw_map:
+        print("Map lanes: --map-lane-types {}".format(args.map_lane_types))
     mnorm = _normalize_model(args.model)
     print("Open-loop JSON: --model {}".format(mnorm))
     if mnorm == "vad":
@@ -1606,6 +1813,7 @@ def main():
             ego_forward_axis=args.ego_forward_axis,
             model=mnorm,
             vad_pred_draw=args.vad_pred_draw,
+            map_lane_types=args.map_lane_types,
         )
         count += 1
         if count == 1 or count % 50 == 0:
