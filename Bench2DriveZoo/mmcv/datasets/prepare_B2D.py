@@ -188,6 +188,36 @@ def gengrate_map(map_root):
             map_infos[town_name]['trigger_volumes_types'] = trigger_volumes_types
     with open(join(OUT_DIR,'b2d_map_infos.pkl'),'wb') as f:
         pickle.dump(map_infos,f)
+    split_map_infos_by_town(map_infos=map_infos)
+
+
+def split_map_infos_by_town(map_pkl=None, out_dir=None, map_infos=None):
+    """Dump ``OUT_DIR/b2d_map_infos_by_town/{Town}.pkl``. If ``map_infos`` is None, load the combined pkl."""
+    if map_infos is None:
+        src = map_pkl or join(OUT_DIR, 'b2d_map_infos.pkl')
+        print('loading combined map pickle: {}'.format(src))
+        with open(src, 'rb') as f:
+            map_infos = pickle.load(f)
+        if not isinstance(map_infos, dict):
+            raise ValueError('Unexpected b2d_map_infos format: {}'.format(type(map_infos)))
+    dest_dir = out_dir or join(OUT_DIR, 'b2d_map_infos_by_town')
+    os.makedirs(dest_dir, exist_ok=True)
+    n = 0
+    for town_name, town_info in sorted(map_infos.items()):
+        if not isinstance(town_info, dict) or 'lane_points' not in town_info:
+            print('  skip {}: not a town map dict'.format(town_name))
+            continue
+        out_path = join(dest_dir, '{}.pkl'.format(town_name))
+        tmp_path = out_path + '.tmp'
+        with open(tmp_path, 'wb') as f:
+            pickle.dump({town_name: town_info}, f)
+        os.replace(tmp_path, out_path)
+        n_lanes = len(town_info.get('lane_points', []))
+        size_mib = os.path.getsize(out_path) / 1024.0 / 1024.0
+        print('  wrote {}  lanes={}  ({:.1f} MiB)'.format(out_path, n_lanes, size_mib))
+        n += 1
+    print('split_map_infos_by_town: {} towns -> {}'.format(n, dest_dir))
+    return n
 
 def preprocess(folder_list,idx,tmp_dir,train_or_val):
 
@@ -381,7 +411,12 @@ if __name__ == "__main__":
     argparser = argparse.ArgumentParser(description=__doc__)
     argparser.add_argument('--workers',type=int, default= 4, help='num of workers to prepare dataset')
     argparser.add_argument('--tmp_dir', default="tmp_data", )
-    args = argparser.parse_args()    
+    argparser.add_argument('--split_map', action='store_true', help='split b2d_map_infos.pkl by town')
+    args = argparser.parse_args()
+    if args.split_map:
+        split_map_infos_by_town()
+        print('finish!')
+        raise SystemExit(0)
     workers = args.workers
     process_list = []
     with open('../../data/splits/bench2drive_base_train_val_split.json','r') as f:
