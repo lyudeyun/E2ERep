@@ -193,6 +193,7 @@ def gengrate_map(map_root):
 
 def split_map_infos_by_town(map_pkl=None, out_dir=None, map_infos=None):
     """Dump ``OUT_DIR/b2d_map_infos_by_town/{Town}.pkl``. If ``map_infos`` is None, load the combined pkl."""
+    print('splitting map by town for faster open-loop BEV viz...')
     if map_infos is None:
         src = map_pkl or join(OUT_DIR, 'b2d_map_infos.pkl')
         print('loading combined map pickle: {}'.format(src))
