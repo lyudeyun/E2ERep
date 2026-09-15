@@ -67,7 +67,28 @@ We conduct all the experiments on a system with the following specifications:
 
 ## Installation
 
-Follow the steps below to install E2ERep:
+E2ERep is built on top of [Bench2Drive](https://github.com/Thinklab-SJTU/Bench2Drive) and [Bench2DriveZoo](https://github.com/Thinklab-SJTU/Bench2DriveZoo). It inherits their repository structure, their evaluation pipeline, and their UniAD and VAD implementations. The steps below cover the setup needed to run E2ERep. For anything concerning the underlying benchmark and models -- dataset download and preparation, CARLA setup, pretrained checkpoints, and the evaluation tools -- please refer to [`README_B2D.md`](./README_B2D.md) and [`Bench2DriveZoo/README.md`](./Bench2DriveZoo/README.md).
+
+### Choosing a configuration
+
+The required Python, CUDA, and compiler versions depend on your GPU. Pick the configuration that matches your hardware:
+
+| | **Config A -- original Bench2Drive** | **Config B -- Blackwell / RTX 50 series** |
+| --- | --- | --- |
+| Target GPUs | compute capability up to 9.0 (Ampere, Ada, Hopper) | compute capability 10.0 and above (e.g. RTX PRO 6000 Blackwell, `sm_120`) |
+| Python | 3.8 | 3.10 |
+| PyTorch | cu118 build | cu128 build (tested with `torch 2.11.0+cu128`) |
+| CUDA toolkit | 11.8 | 12.8 |
+| Host compiler | GCC 9.4 | GCC 12 |
+| CARLA egg | `carla-0.9.15-py3.7` | `carla-0.9.15-py3.10` |
+
+Config B is mandatory on Blackwell GPUs, not merely recommended: the cu118 PyTorch wheels are compiled only up to `sm_90` and therefore cannot run on `sm_120` devices. You can check your GPU with `nvidia-smi --query-gpu=name,compute_cap --format=csv`.
+
+All experiments reported in the paper were run on Config B.
+
+In the steps below, lines marked **(A)** and **(B)** apply only to the corresponding configuration; unmarked lines apply to both.
+
+### Steps
 
 * **Step 1: Clone the repository:**
     ```bash
@@ -76,20 +97,30 @@ Follow the steps below to install E2ERep:
     ```
 * **Step 2: Create environment:**
     ```bash
-    ## python3.8 is recommended
-    conda create -n b2d_zoo python=3.8
+    conda create -n b2d_zoo python=3.8     # (A)
+    conda create -n b2d_zoo python=3.10    # (B)
     conda activate b2d_zoo
     ```
 * **Step 3: Install torch:**
     ```bash
+    # (A)
     pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+    # (B)
+    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
     ```
 * **Step 4: Set environment variables:**
     ```bash
-    # cuda 11.8 and GCC 9.4 is strongly recommended. Otherwise, it might encounter errors.
     cd Bench2DriveZoo
-    export PATH=YOUR_GCC_PATH/bin:$PATH
     export CUDA_HOME=YOUR_CUDA_PATH/
+
+    # (A) CUDA 11.8 with GCC 9.4
+    export PATH=YOUR_GCC_PATH/bin:$PATH
+
+    # (B) CUDA 12.8 requires a host compiler older than GCC 14.
+    # If your conda environment ships GCC 14 (check with `$CXX --version`),
+    # the mmcv build in Step 6 fails; point CC/CXX at GCC 12 explicitly:
+    export CC=/usr/bin/gcc-12
+    export CXX=/usr/bin/g++-12
     ```
 * **Step 5: Install ninja and packaging:**
     ```bash
@@ -97,7 +128,15 @@ Follow the steps below to install E2ERep:
     ```
 * **Step 6: Install mmcv:**
     ```bash
+    # (A)
     pip install -v -e .
+    # (B) build isolation would pull an incompatible torch, so disable it
+    pip install . --no-build-isolation --no-deps -v
+    ```
+    Verify the installation from a directory outside `Bench2DriveZoo`, so that the
+    installed package is imported rather than the source tree:
+    ```bash
+    cd / && python -c "import mmcv; print(mmcv.__file__)"
     ```
 * **Step 7: Prepare pretrained weights:**
     ```bash
@@ -105,7 +144,26 @@ Follow the steps below to install E2ERep:
     mkdir ckpts 
     ```
     Download the pretrained weights from [here](./Bench2DriveZoo/README.md) and put all `*.pth` in the `ckpts` directory.
-* **Step 8: Install CARLA for closed-loop evaluation.:**
+* **Step 8: Link the team code:**
+    ```bash
+    ## Run from the repository root.
+    mkdir -p leaderboard/team_code && cd leaderboard/team_code
+    for f in ../../Bench2DriveZoo/team_code/*.py; do ln -sfn "$f" .; done
+    cd ../..
+    ```
+* **Step 9: Prepare the dataset:**
+
+    Place the Bench2Drive validation data under `Bench2DriveZoo/data/` as follows:
+    ```text
+    Bench2DriveZoo/data/
+    |-- bench2drive/v1/<50 validation clips>/
+    |-- infos/b2d_infos_val.pkl
+    |-- infos/b2d_map_infos.pkl
+    |-- others/b2d_motion_anchor_infos_mode6.pkl
+    `-- splits/bench2drive_base_train_val_split.json
+    ```
+    See [`README_B2D.md`](./README_B2D.md) and [`Bench2DriveZoo/README.md`](./Bench2DriveZoo/README.md) for the download links and preparation scripts.
+* **Step 10: Install CARLA for closed-loop evaluation:**
     ```bash
     ## Ignore the line about downloading and extracting CARLA if you have already done so.
     mkdir carla
@@ -116,9 +174,34 @@ Follow the steps below to install E2ERep:
     cd .. && bash ImportAssets.sh
     export CARLA_ROOT=YOUR_CARLA_PATH
 
-    ## Important!!! Otherwise, the python environment can not find carla package
-    echo "$CARLA_ROOT/PythonAPI/carla/dist/carla-0.9.15-py3.7-linux-x86_64.egg" >> YOUR_CONDA_PATH/envs/YOUR_CONDA_ENV_NAME/lib/python3.8/site-packages/carla.pth # python 3.8 works well, please set YOUR_CONDA_PATH and YOUR_CONDA_ENV_NAME
+    ## (B) The CARLA 0.9.15 release ships eggs only for Python 2.7 and 3.7.
+    ## A Python 3.10 egg is provided in this repository; copy it into the CARLA tree.
+    cp third_party/carla/carla-0.9.15-py3.10-linux-x86_64.egg "$CARLA_ROOT/PythonAPI/carla/dist/"
+
+    ## Important!!! Otherwise, the python environment can not find carla package.
+    ## Use the egg and the site-packages path matching your Python version.
+    # (A)
+    echo "$CARLA_ROOT/PythonAPI/carla/dist/carla-0.9.15-py3.7-linux-x86_64.egg" >> YOUR_CONDA_PATH/envs/YOUR_CONDA_ENV_NAME/lib/python3.8/site-packages/carla.pth
+    # (B)
+    echo "$CARLA_ROOT/PythonAPI/carla/dist/carla-0.9.15-py3.10-linux-x86_64.egg" >> YOUR_CONDA_PATH/envs/YOUR_CONDA_ENV_NAME/lib/python3.10/site-packages/carla.pth
     ```
+    Verify with `python -c "import carla; print('carla imported')"`.
+
+    **Why an egg rather than a wheel?** The `.egg` and the `.whl` ship the same
+    three files -- `carla/__init__.py`, `carla/command.py`, and the compiled
+    `libcarla` extension -- and differ only in packaging metadata and in how they
+    are used. A wheel is unpacked into `site-packages` by `pip install`, whereas an
+    egg is used in place by putting its path on `sys.path` through `carla.pth`.
+    [`leaderboard/scripts/run_evaluation.sh`](./leaderboard/scripts/run_evaluation.sh)
+    locates the CARLA API by looking for `carla-0.9.15-py<major>.<minor>-linux-x86_64.egg`
+    under `$CARLA_ROOT/PythonAPI/carla/dist`, so the egg is the supported option here.
+    If you need a Python version for which no egg is available, official wheels are
+    published on PyPI (`pip download carla==0.9.15 --no-deps`), and third-party builds
+    for newer interpreters are available from
+    [gezp/carla_ros](https://github.com/gezp/carla_ros/releases); in that case, set
+    `CARLA_PY_EGG` or install the wheel and ignore the script's warning about the
+    missing egg.
+
 ## Open-loop Repair
 
 Open-loop repair, baseline JSON generation, and open-loop evaluation on the held-out PKL are orchestrated by [`scripts/run_experiment.py`](./scripts/run_experiment.py). Run from the repository root (not from `scripts/`).
