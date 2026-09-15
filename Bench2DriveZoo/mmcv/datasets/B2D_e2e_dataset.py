@@ -409,7 +409,7 @@ class B2D_E2E_Dataset(Custom3DDataset):
         ego_future_track, ego_future_mask = self.get_ego_future_xy(index,self.sample_interval,self.predict_frames)
         past_track, past_mask = self.get_past_or_future_xy(index,self.sample_interval,self.past_frames,past_or_future='past',local_xy=True)
         predict_track, predict_mask = self.get_past_or_future_xy(index,self.sample_interval,self.predict_frames,past_or_future='future',local_xy=False)
-        mask = (past_mask.sum((1,2))>0).astype(np.int)
+        mask = (past_mask.sum((1,2))>0).astype(int)
         future_track = predict_track[:,0:self.future_frames,:]*mask[:,None,None]
         future_mask = predict_mask[:,0:self.future_frames,:]*mask[:,None,None]
         full_past_track = np.concatenate([past_track,future_track],axis=1)
