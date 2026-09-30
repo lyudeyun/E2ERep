@@ -62,13 +62,10 @@ class MultiLayerWrapper(nn.Module):
         self.num_layers = len(target_layers_dict)
         self.layer_names = [f'layer{i}' for i in range(len(target_layers_dict))]
         self.target_layer_names = list(target_layers_dict.keys())
-        self.target_indices = {}
-        for name in self.target_layer_names:
-            for i, layer in enumerate(full_decoder):
-                if hasattr(layer, '__class__') and layer.__class__.__name__ == 'Linear':
-                    if i not in self.target_indices.values():
-                        self.target_indices[name] = i
-                        break
+        # e.g. 'pts_bbox_head.ego_fut_decoder.2' -> index 2 in full_decoder
+        self.target_indices = {
+            name: int(name.rsplit('.', 1)[1]) for name in self.target_layer_names
+        }
 
     def forward(self, x):
         """
@@ -324,32 +321,31 @@ def main():
     for layer_name in args.layers:
         try:
             layer = uniad_model.get_submodule(layer_name)
-            if not isinstance(layer, nn.Linear):
-                print(f"  Error: Layer '{layer_name}' is not Linear!")
-                continue
-            target_layers[layer_name] = layer
-            layer_params = layer.weight.numel() + (layer.bias.numel() if layer.bias is not None else 0)
-            total_params += layer_params
-            
-            # Print weight statistics
-            weight_np = layer.weight.detach().cpu().numpy()
-            weight_min = float(np.min(weight_np))
-            weight_max = float(np.max(weight_np))
-            weight_range = weight_max - weight_min
-            weight_mean = float(np.mean(weight_np))
-            weight_std = float(np.std(weight_np))
-            
-            print(f"  {layer_name}: {layer.weight.shape} ({layer_params} params)")
-            print(f"    Weight statistics:")
-            print(f"      Min: {weight_min:.6f}")
-            print(f"      Max: {weight_max:.6f}")
-            print(f"      Range: {weight_range:.6f} (Max - Min)")
-            print(f"      Mean: {weight_mean:.6f}")
-            print(f"      Std: {weight_std:.6f}")
-            print(f"      Search bounds: [{weight_min - weight_range * 1.0:.6f}, {weight_max + weight_range * 1.0:.6f}] (extended by ±100%)")
-            print(f"      Initialization perturbation: ±{weight_range * 0.05:.6f} (5% of range)")
         except AttributeError:
-            print(f"  Error: Layer '{layer_name}' not found!")
+            raise ValueError(f"Layer '{layer_name}' not found in model") from None
+        if not isinstance(layer, nn.Linear):
+            raise ValueError(f"Layer '{layer_name}' is not Linear (got {type(layer).__name__})")
+        target_layers[layer_name] = layer
+        layer_params = layer.weight.numel() + (layer.bias.numel() if layer.bias is not None else 0)
+        total_params += layer_params
+        
+        # Print weight statistics
+        weight_np = layer.weight.detach().cpu().numpy()
+        weight_min = float(np.min(weight_np))
+        weight_max = float(np.max(weight_np))
+        weight_range = weight_max - weight_min
+        weight_mean = float(np.mean(weight_np))
+        weight_std = float(np.std(weight_np))
+        
+        print(f"  {layer_name}: {layer.weight.shape} ({layer_params} params)")
+        print(f"    Weight statistics:")
+        print(f"      Min: {weight_min:.6f}")
+        print(f"      Max: {weight_max:.6f}")
+        print(f"      Range: {weight_range:.6f} (Max - Min)")
+        print(f"      Mean: {weight_mean:.6f}")
+        print(f"      Std: {weight_std:.6f}")
+        print(f"      Search bounds: [{weight_min - weight_range * 1.0:.6f}, {weight_max + weight_range * 1.0:.6f}] (extended by ±100%)")
+        print(f"      Initialization perturbation: ±{weight_range * 0.05:.6f} (5% of range)")
 
     print(f"  Total: {total_params} parameters across {len(args.layers)} layer(s)")
 

@@ -71,13 +71,10 @@ class MultiLayerWrapper(nn.Module):
         self.target_layer_names = list(target_layers_dict.keys())
         
         # Map target layer names to indices in full_decoder
-        self.target_indices = {}
-        for name in self.target_layer_names:
-            for i, layer in enumerate(full_decoder):
-                if hasattr(layer, '__class__') and layer.__class__.__name__ == 'Linear':
-                    if i not in self.target_indices.values():
-                        self.target_indices[name] = i
-                        break
+        # e.g. 'pts_bbox_head.ego_fut_decoder.2' -> index 2 in full_decoder
+        self.target_indices = {
+            name: int(name.rsplit('.', 1)[1]) for name in self.target_layer_names
+        }
     
     def forward(self, x):
         # Always pass through full decoder (for both training and eval)
@@ -470,15 +467,14 @@ def main():
     for layer_name in args.layers:
         try:
             layer = vad_model.get_submodule(layer_name)
-            if not isinstance(layer, nn.Linear):
-                print(f"  Error: Layer '{layer_name}' is not Linear!")
-                continue
-            target_layers[layer_name] = layer
-            layer_params = layer.weight.numel() + (layer.bias.numel() if layer.bias is not None else 0)
-            total_params += layer_params
-            print(f"  {layer_name}: {layer.weight.shape} ({layer_params} params)")
         except AttributeError:
-            print(f"  Error: Layer '{layer_name}' not found!")
+            raise ValueError(f"Layer '{layer_name}' not found in model") from None
+        if not isinstance(layer, nn.Linear):
+            raise ValueError(f"Layer '{layer_name}' is not Linear (got {type(layer).__name__})")
+        target_layers[layer_name] = layer
+        layer_params = layer.weight.numel() + (layer.bias.numel() if layer.bias is not None else 0)
+        total_params += layer_params
+        print(f"  {layer_name}: {layer.weight.shape} ({layer_params} params)")
     
     print(f"  Total: {total_params} parameters across {len(args.layers)} layer(s)")
     

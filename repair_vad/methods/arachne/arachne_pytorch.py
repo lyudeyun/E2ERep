@@ -14,6 +14,7 @@ matplotlib.use('Agg')  # Use non-interactive backend (no X server needed)
 import matplotlib.pyplot as plt
 import copy
 from mmcv.models.dense_heads.planning_head_plugin.metric_stp3 import PlanningMetric
+from repair_common.arachne_layers import ArachneTargetLayerMixin
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -86,7 +87,7 @@ except ImportError:
     from optimizers import get_optimizer
 
 
-class ArachnePyTorch:
+class ArachnePyTorch(ArachneTargetLayerMixin):
     """PyTorch version of Arachne for neural network repair."""
     
     def __init__(self):
@@ -351,36 +352,7 @@ class ArachnePyTorch:
                 
         loss.backward()
         
-        # Collect per-weight Gradient Loss (GL) candidates
-        # Return format: list of (layer_name, i_in, j_out, gl_value)
-        candidates = []
-        allowed_layer_names = set(self.target_layer) if self.target_layer else None
-        for name, module in model.named_modules():
-            # A wrapper may register the complete network for forward evaluation.
-            # Only explicitly requested layers may contribute repair candidates.
-            if allowed_layer_names is not None and name not in allowed_layer_names:
-                continue
-            if hasattr(module, 'weight') and module.weight is not None and module.weight.grad is not None:
-                grad = module.weight.grad.detach().cpu().numpy()
-                
-                # For Linear layers (and similar), weight.grad is typically 2D: [Out, In]
-                if grad.ndim == 2:
-                    out_dim, in_dim = grad.shape
-                    for j in range(out_dim):      # output index
-                        for i in range(in_dim):   # input index
-                            gl = float(abs(grad[j, i]))
-                            candidates.append((name, i, j, gl))
-                else:
-                    # Fallback for other shapes: flatten and assign a synthetic index
-                    flat = np.abs(grad).reshape(-1)
-                    for idx, gl in enumerate(flat):
-                        candidates.append((name, idx, 0, float(gl)))
-        
-        # Sort candidates by GL descending so that _compute_forward_impact
-        # can simply take candidates[:num_grad]
-        candidates.sort(key=lambda x: x[3], reverse=True)
-        
-        return candidates
+        return self._collect_target_gradient_candidates(model)
 
     def _compute_forward_impact(self, model, input_neg, candidates, num_grad):
         """
@@ -541,37 +513,6 @@ class ArachnePyTorch:
         
         handle.remove()
         return activations
-    
-    def _find_target_layers(self, model):
-        """Find target layers to repair (supports multiple layers)."""
-        if self.target_layer is not None and len(self.target_layer) > 0:
-            # Use specified layers
-            target_layers = []
-            named_modules = dict(model.named_modules())
-            for layer_name in self.target_layer:
-                if layer_name in named_modules:
-                    target_layers.append((layer_name, named_modules[layer_name]))
-                else:
-                    print(f"Warning: Layer '{layer_name}' not found in model")
-            
-            if not target_layers:
-                raise ValueError("None of the specified layers found in model")
-            
-            return target_layers
-        
-        # Find last Linear layer as default
-        linear_layers = []
-        for name, module in model.named_modules():
-            if isinstance(module, nn.Linear):
-                linear_layers.append((name, module))
-        
-        if not linear_layers:
-            raise ValueError("No Linear layer found in model")
-        
-        target_name, target_layer = linear_layers[-1]
-        self.target_layer = [target_name]
-        
-        return [(target_name, target_layer)]
     
     def _extract_pareto_front(self, pool, output_dir=None):
         """
