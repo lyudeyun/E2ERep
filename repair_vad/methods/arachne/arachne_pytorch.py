@@ -354,7 +354,12 @@ class ArachnePyTorch:
         # Collect per-weight Gradient Loss (GL) candidates
         # Return format: list of (layer_name, i_in, j_out, gl_value)
         candidates = []
+        allowed_layer_names = set(self.target_layer) if self.target_layer else None
         for name, module in model.named_modules():
+            # A wrapper may register the complete network for forward evaluation.
+            # Only explicitly requested layers may contribute repair candidates.
+            if allowed_layer_names is not None and name not in allowed_layer_names:
+                continue
             if hasattr(module, 'weight') and module.weight is not None and module.weight.grad is not None:
                 grad = module.weight.grad.detach().cpu().numpy()
                 
@@ -376,6 +381,7 @@ class ArachnePyTorch:
         candidates.sort(key=lambda x: x[3], reverse=True)
         
         return candidates
+
     def _compute_forward_impact(self, model, input_neg, candidates, num_grad):
         """
         Compute Forward Impact (FI) strictly aligning with Arachne Official Code.
