@@ -34,7 +34,8 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 arachne_path = os.path.join(script_dir, 'methods', 'arachne')
 if arachne_path not in sys.path:
     sys.path.insert(0, arachne_path)
-from arachne_pytorch import ArachnePyTorch, extract_frame_identifiers, build_frame_data_dict
+from arachne_pytorch import ArachnePyTorch, build_frame_data_dict
+from repair_common.arachne_base import extract_frame_identifiers
 
 def get_delta_traj(gt_traj):
     """Convert absolute trajectory [T, 2] to delta trajectory [T, 2]."""
@@ -868,7 +869,7 @@ def main():
     
     repaired, fitness_history = arachne.optimize(
         wrapper, weights, input_neg, input_pos, output_dir, verbose=1,
-        use_vad_eval=args.use_cached_eval,
+        use_cached_eval=args.use_cached_eval,
         frame_data_dict=frame_data_dict if args.use_cached_eval else None,
         positive_frames=positive_frames if args.use_cached_eval else None,
         negative_frames=negative_frames if args.use_cached_eval else None,

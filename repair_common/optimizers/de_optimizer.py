@@ -8,8 +8,6 @@ import numpy as np
 from pathlib import Path
 import json
 import copy
-# Note: compute_weight_ranges and initialize_weight_position are no longer used
-# (replaced with Arachne v2 initialization method)
 
 
 class DEOptimizer:
@@ -88,9 +86,7 @@ class DEOptimizer:
                     weight_min = float(np.min(layer_weights))
                     weight_max = float(np.max(layer_weights))
                     weight_range = weight_max - weight_min
-                    weight_mean = float(np.mean(layer_weights))
-                    weight_std = float(np.std(layer_weights))
-                    # Store extended bounds (larger than VAD for better exploration)
+                    # Store extended bounds (same as old PSO)
                     layer_ranges[layer_name] = {
                         'min': weight_min - weight_range * 0.5,  # Extended bound
                         'max': weight_max + weight_range * 0.5,  # Extended bound
@@ -99,24 +95,14 @@ class DEOptimizer:
                         'original_max': weight_max,
                         'original_range': weight_range
                     }
-                    # Print weight statistics for debugging
-                    print(f"\nWeight statistics for layer '{layer_name}':", flush=True)
-                    print(f"  Shape: {layer.weight.shape}", flush=True)
-                    print(f"  Min: {weight_min:.6f}", flush=True)
-                    print(f"  Max: {weight_max:.6f}", flush=True)
-                    print(f"  Range: {weight_range:.6f} (Max - Min)", flush=True)
-                    print(f"  Mean: {weight_mean:.6f}", flush=True)
-                    print(f"  Std: {weight_std:.6f}", flush=True)
-                    print(f"  Search bounds: [{weight_min - weight_range * 0.5:.6f}, {weight_max + weight_range * 0.5:.6f}] (extended by ±50%)", flush=True)
-                    print(f"  Initialization perturbation: ±{weight_range * 0.1:.6f} (10% of range, same as VAD/PSO)", flush=True)
                 else:
                     # Fallback
                     layer_ranges[layer_name] = {'min': -1.0, 'max': 1.0, 'range': 2.0, 'original_min': -1.0, 'original_max': 1.0, 'original_range': 2.0}
-                    print(f"\nWarning: Layer '{layer_name}' not found, using fallback ranges", flush=True)
         
-        # Initialize population
+        # Initialize population. The first individual keeps the original weights
+        # so the search always contains the unrepaired model as a starting point.
         individuals = []
-        for _ in range(self.num_particles):
+        for idx in range(self.num_particles):
             # Initialize near original weights with small perturbations
             position = {}
             for weight_info in weights_to_repair:
@@ -137,17 +123,12 @@ class DEOptimizer:
                 weight_max = layer_info['max']
                 weight_range = layer_info.get('range', weight_max - weight_min)
                 
-                # Use larger perturbation for better exploration: 10% of weight range (default)
-                perturbation_range = weight_range * 0.1  # Reverted to 0.1
-                
-                # First particle is exactly the original model (no perturbation)
-                if len(individuals) == 0:
+                if idx == 0:
                     initial_weight = original_weight
                 else:
+                    perturbation_range = weight_range * 0.1  # 10% of weight range
                     initial_weight = original_weight + np.random.uniform(-perturbation_range, perturbation_range)
-                
                 initial_weight = np.clip(initial_weight, weight_min, weight_max)
-                
                 
                 position[key] = float(initial_weight)
             
@@ -190,57 +171,23 @@ class DEOptimizer:
         
         # Evaluate original model
         print("\nEvaluating original model...", flush=True)
-        frame_counts_for_logging = None
         if use_cached_eval:
-            # For original model evaluation, we MUST re-compute L2/collision using the current model forward pass
-            # instead of using JSON values. This ensures that the baseline fitness is consistent with
-            # the fitness of the individuals (which are always computed).
-            # If we use JSON L2 as baseline but our computation yields a worse value (due to lack of collision optimization),
-            # DE will think all individuals are worse than original, preventing optimization.
-            print("Evaluating original model (re-computing L2/collision to ensure consistency)...", flush=True)
-            result = evaluate_fitness_openloop_fn(
+            # Recompute L2 (instead of reading it from JSON) so the baseline is
+            # measured the same way as every individual; otherwise a systematic
+            # offset between the two can make all individuals look worse.
+            original_fitness = evaluate_fitness_openloop_fn(
                 model, frame_data_dict,
                 positive_frames, negative_frames,
                 threshold_good, threshold_bad, fitness_type, rep_method,
-                use_original_l2_for_classification=False,  # CHANGED TO FALSE for consistency
                 time_horizon=time_horizon
             )
-            # Handle both return formats: (fitness, frame_counts) or just fitness
-            if isinstance(result, tuple) and len(result) == 2:
-                original_fitness, frame_counts_for_logging = result
-            else:
-                original_fitness = result
-            
         else:
             original_fitness = evaluate_fitness_fn(
                 model, X_neg, y_neg, X_pos, y_pos, loss_fn
             )
         
         print(f"Original model fitness: {original_fitness:.6f}", flush=True)
-        if frame_counts_for_logging is not None:
-            print(f"  Frame counts for fitness calculation:", flush=True)
-            print(f"    Positive (no collision): {frame_counts_for_logging['positive_no_collision']}", flush=True)
-            print(f"    Middle (no collision): {frame_counts_for_logging['middle_no_collision']}", flush=True)
-            print(f"    Negative (no collision): {frame_counts_for_logging['negative_no_collision']}", flush=True)
-            print(f"    Collision: {frame_counts_for_logging['collision']}", flush=True)
-            print(f"    Total evaluated: {frame_counts_for_logging['total_evaluated']}", flush=True)
-        
-        
         fitness_history.append(original_fitness)
-        
-        
-        # Get perturbation_range from initialize_population to check if it's zero
-        # This is used to determine if we should use JSON L2 for initial population
-        # Note: With 10% perturbation (same as VAD/PSO), weights are NOT identical to original,
-        # so we should always use computed L2 (not JSON L2) for individual evaluation
-        perturbation_range = None
-        # Check the first individual to get perturbation_range (it's set in initialize_population)
-        if len(individuals) > 0:
-            # perturbation_range is now 10% of weight range (same as VAD/PSO), not 0.0
-            # We need to compute it from the first weight's range
-            # For simplicity, we'll use a small threshold to detect near-zero perturbation
-            # Since we're using 10% perturbation now, this will be False
-            perturbation_range = 0.1  # 10% of weight range (approximate, actual value varies per layer)
         
         # Initialize global best
         global_best_fitness = original_fitness
@@ -278,39 +225,19 @@ class DEOptimizer:
         
         # Evaluate initial population
         print("Evaluating initial DE population...", flush=True)
-        import time
-        total_start_time = time.time()
         initial_fitnesses = []
         for idx, individual in enumerate(individuals):
-            
             modified_model = apply_weights_fn(
                 model, weights_to_repair, individual['position']
             )
             
-            
             if use_cached_eval:
-                # For initial population evaluation: use computed L2 to reflect actual model changes
-                # Even though initial population has only 10% perturbation, we need to use computed L2
-                # so that fitness reflects the weight changes. Using JSON L2 would make all individuals
-                # have identical fitness (6749.27) regardless of weight changes, which is incorrect.
-                # Note: Computed L2 may give different absolute values than JSON L2, but the relative
-                # differences between individuals will be correct.
-                use_json_l2_for_individual = False  # Use computed L2 for initial population to reflect weight changes
-                
-                result = evaluate_fitness_openloop_fn(
+                fitness = evaluate_fitness_openloop_fn(
                     modified_model, frame_data_dict,
                     positive_frames, negative_frames,
                     threshold_good, threshold_bad, fitness_type, rep_method,
-                    use_original_l2_for_classification=use_json_l2_for_individual,  # Use JSON L2 for initial population
                     time_horizon=time_horizon
                 )
-                # Handle both return formats: (fitness, frame_counts) or just fitness
-                if isinstance(result, tuple) and len(result) == 2:
-                    fitness, frame_counts_for_individual = result
-                else:
-                    fitness = result
-                    frame_counts_for_individual = None
-                
             else:
                 fitness = evaluate_fitness_fn(
                     modified_model, X_neg, y_neg, X_pos, y_pos, loss_fn
@@ -321,23 +248,20 @@ class DEOptimizer:
             initial_fitnesses.append(fitness)
             
             # Update global best
-            
             if fitness < global_best_fitness:
                 global_best_fitness = fitness
                 global_best_position = copy.deepcopy(individual['position'])
                 global_best_model = copy.deepcopy(modified_model)
-            
-            # Print progress every 10 individuals
-            if (idx + 1) % 10 == 0 or (idx + 1) == len(individuals):
-                elapsed = time.time() - total_start_time
-                avg_time_per_individual = elapsed / (idx + 1)
-                remaining = (len(individuals) - idx - 1) * avg_time_per_individual
-                print(f"  Progress: {idx+1}/{len(individuals)} individuals evaluated "
-                      f"(avg {avg_time_per_individual:.2f}s/individual, "
-                      f"~{remaining:.0f}s remaining)", flush=True)
         
         fitness_history.append(global_best_fitness)
         print(f"Initial population best fitness: {global_best_fitness:.6f}", flush=True)
+        if len(initial_fitnesses) > 0:
+            print(f"  Initial population fitness range: {min(initial_fitnesses):.6f} ~ {max(initial_fitnesses):.6f}", flush=True)
+            print(f"  Initial population fitness mean: {sum(initial_fitnesses)/len(initial_fitnesses):.6f}", flush=True)
+            print(f"  Initial population unique fitness count: {len(set(initial_fitnesses))}/{len(initial_fitnesses)}", flush=True)
+            # Print first 5 fitness values for debugging
+            print(f"  First 5 fitness values: {[f'{f:.2f}' for f in initial_fitnesses[:5]]}", flush=True)
+        
         # Early stopping variables
         best_fitness_so_far = global_best_fitness
         best_iteration_so_far = 0
@@ -435,13 +359,10 @@ class DEOptimizer:
                 )
                 
                 if use_cached_eval:
-                    # For optimization loop: use computed L2 to reflect actual model changes
-                    # This is different from initial population which uses JSON L2 for consistency
                     trial_fitness = evaluate_fitness_openloop_fn(
                         trial_model, frame_data_dict,
                         positive_frames, negative_frames,
                         threshold_good, threshold_bad, fitness_type, rep_method,
-                        use_original_l2_for_classification=False,  # Use computed L2 in optimization loop
                         time_horizon=time_horizon
                     )
                 else:
@@ -450,7 +371,6 @@ class DEOptimizer:
                     )
                 
                 # Selection: greedy selection
-                # improvements is relative to current individual's fitness, not original model
                 is_improvement = trial_fitness < individual['fitness']
                 if is_improvement:
                     new_individual = {
@@ -510,10 +430,9 @@ class DEOptimizer:
             delta = prev_fitness - global_best_fitness
             improvement = original_fitness - global_best_fitness
             
-            
             early_stop_msg = f", no_improvement={no_improvement_count}/{self.early_stop_patience}" if (self.early_stop_patience is not None and verbose) else ""
             print(f"Iter {iteration+1:3d}/{self.num_iterations}: fitness={global_best_fitness:7.2f}, "
-                  f"Δ={delta:+6.2f}, improvements={improvements}/{len(individuals)} (vs current individuals, not original){early_stop_msg}", flush=True)
+                  f"Δ={delta:+6.2f}, improvements={improvements}/{len(individuals)}{early_stop_msg}", flush=True)
         
         print(f"\nDE optimization complete!", flush=True)
         print(f"  Original fitness: {fitness_history[0]:.6f}", flush=True)
