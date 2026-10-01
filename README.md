@@ -261,6 +261,7 @@ For VAD-base, use the same command with `--model-type VAD`, `--model-name VAD_ba
     ├── leaderboard/
     │   └── team_code/          ← agents here (or symlink; see below)
     ├── mytools/
+    ├── repair_common/          ← Arachne core and PSO/DE optimizers shared by UniAD and VAD
     ├── repair_uniad/
     ├── repair_vad/
     ├── scenario_runner/
