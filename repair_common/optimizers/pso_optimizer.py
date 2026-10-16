@@ -199,33 +199,22 @@ class PSOOptimizer:
         
         # Evaluate original model
         print("\nEvaluating original model...", flush=True)
-        frame_counts_for_logging = None
         if use_cached_eval:
-            # For original model evaluation, use original L2 from JSON for classification consistency
-            result = evaluate_fitness_openloop_fn(
+            # Recompute L2 (instead of reading it from JSON) so the baseline is
+            # measured the same way as every particle; otherwise a systematic
+            # offset between the two can make all particles look worse.
+            original_fitness = evaluate_fitness_openloop_fn(
                 model, frame_data_dict,
                 positive_frames, negative_frames,
                 threshold_good, threshold_bad, fitness_type, rep_method,
-                use_original_l2_for_classification=True, time_horizon=time_horizon
+                time_horizon=time_horizon
             )
-            # Handle both return formats: (fitness, frame_counts) or just fitness
-            if isinstance(result, tuple) and len(result) == 2:
-                original_fitness, frame_counts_for_logging = result
-            else:
-                original_fitness = result
         else:
             original_fitness = evaluate_fitness_fn(
                 model, X_neg, y_neg, X_pos, y_pos, loss_fn
             )
         
         print(f"Original model fitness: {original_fitness:.6f}", flush=True)
-        if frame_counts_for_logging is not None:
-            print(f"  Frame counts for fitness calculation:", flush=True)
-            print(f"    Positive (no collision): {frame_counts_for_logging['positive_no_collision']}", flush=True)
-            print(f"    Middle (no collision): {frame_counts_for_logging['middle_no_collision']}", flush=True)
-            print(f"    Negative (no collision): {frame_counts_for_logging['negative_no_collision']}", flush=True)
-            print(f"    Collision: {frame_counts_for_logging['collision']}", flush=True)
-            print(f"    Total evaluated: {frame_counts_for_logging['total_evaluated']}", flush=True)
         fitness_history.append(original_fitness)
         
         # Initialize global best
