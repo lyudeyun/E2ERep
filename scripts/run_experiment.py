@@ -16,6 +16,9 @@ import tempfile
 import smtplib
 from email.message import EmailMessage
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # repo root, for repair_common
+from repair_common.ckpt_patch import materialized  # noqa: E402
+
 
 def str2bool(v):
     """
@@ -286,8 +289,9 @@ def run_repair(model_name, model_type, baseline_json, exp_dir, repo_root,
               alpha=0.5, layers=None,
               fitness_type='continuous', num_particles=200, num_iterations=100, 
               num_weights_to_repair=100, rep_method='Arachne_v1', early_stop_patience=None,
-              search_algo='PSO', cuda_device='0', time_horizon=3, collision_num_workers=None):
-    """Run repair process."""
+              search_algo='PSO', cuda_device='0', time_horizon=3, collision_num_workers=None,
+              save_full_ckpt=False):
+    """Run repair process. Returns the repaired model as a .patch.pt (or a legacy full .pth)."""
     print("\n" + "="*80)
     print("Running Repair")
     print("="*80)
@@ -309,10 +313,12 @@ def run_repair(model_name, model_type, baseline_json, exp_dir, repo_root,
     # Choose repair script based on model type
     if model_type == "VAD":
         repair_script = repo_root / "repair_vad" / "repair_ego_fut_decoder_arachne.py"
-        repaired_model_name = "VAD_repaired_both_layers.pth"
+        repaired_model_name = "VAD_repaired_both_layers.patch.pt"
+        legacy_full_name = "VAD_repaired_both_layers.pth"
     elif model_type == "UniAD":
         repair_script = repo_root / "repair_uniad" / "repair_planning_head_arachne.py"
-        repaired_model_name = "repaired_model.pth"
+        repaired_model_name = "UniAD_repaired_model.patch.pt"
+        legacy_full_name = "repaired_model.pth"  # old runs: full checkpoint under this name
     else:
         raise ValueError(f"Unknown model type: {model_type}")
     
@@ -334,6 +340,9 @@ def run_repair(model_name, model_type, baseline_json, exp_dir, repo_root,
         '--output-dir', str(output_dir),
     ]
     
+    if save_full_ckpt:
+        cmd.append('--save-full-ckpt')
+
     # Add early stop patience if enabled
     if early_stop_patience is not None and int(early_stop_patience) > 0:
         cmd.extend(['--early-stop-patience', str(early_stop_patience)])
@@ -358,6 +367,10 @@ def run_repair(model_name, model_type, baseline_json, exp_dir, repo_root,
     if repaired_model.exists():
         print(f"Repaired model already exists, reusing: {repaired_model}")
         return repaired_model
+    legacy = (output_dir / legacy_full_name).resolve()
+    if legacy.exists() and legacy.stat().st_size > 100 * 1024 * 1024:  # a full checkpoint
+        print(f"Repaired model (legacy full checkpoint) already exists, reusing: {legacy}")
+        return legacy
     
     # Use tee command to write to both file and terminal
     cmd_with_tee = f"({' '.join(cmd)}) | tee {shlex.quote(str(log_file))}"
@@ -770,11 +783,21 @@ def run_single_experiment(run_idx, model_name, model_type, repair_dataset, eval_
         search_algo=args.search_algo,
         cuda_device=args.eval_cuda_device,
         time_horizon=getattr(args, 'time_horizon', 3),
-        collision_num_workers=getattr(args, 'collision_num_workers', None)
+        collision_num_workers=getattr(args, 'collision_num_workers', None),
+        save_full_ckpt=getattr(args, 'save_full_ckpt', False),
     )
     if not repaired_model:
         return False
-    
+
+    # A patch is turned into a temporary full checkpoint on local disk for test.py and
+    # the CARLA agent, and removed afterwards (E2EREP_CKPT_TMP overrides the temp dir).
+    with materialized(repaired_model) as repaired_ckpt:
+        return _evaluate_repaired(model_name, model_type, Path(repaired_ckpt), eval_dataset,
+                                  exp_dir, repo_root, args)
+
+
+def _evaluate_repaired(model_name, model_type, repaired_model, eval_dataset, exp_dir, repo_root, args):
+    """Open-loop (and optional closed-loop) evaluation of a full repaired checkpoint."""    
     # Step 3: Run evaluation
     success = run_evaluation(
         model_name,
@@ -858,6 +881,9 @@ def main():
     parser.add_argument('--repair-early-stop-patience', type=int, default=None,
                        help='Early stopping patience for PSO: stop if fitness does not improve for N iterations (default: None, disabled). Example: --repair-early-stop-patience 10')
     parser.add_argument('--repair-num-weights', type=int, default=100)
+    parser.add_argument('--save-full-ckpt', type=str2bool, default=False,
+                       help='Also keep the full repaired checkpoint (~0.7-1 GB per run). '
+                            'Default: only a lossless patch against the original checkpoint.')
     parser.add_argument('--collision-num-workers', type=int, default=None,
                        help='Number of worker processes for collision evaluation in repair. '
                             'If omitted, repair script auto-chooses a default.')

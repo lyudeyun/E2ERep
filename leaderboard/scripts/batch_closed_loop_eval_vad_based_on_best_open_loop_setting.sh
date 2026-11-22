@@ -14,7 +14,7 @@
 #     vad_base_Arachne_v2_DE_results/VAD_base_REP_VAL_t3s_Arachne_v2_DE_w26_p52_i50_es5_CONT_1 \
 #     --version fast
 #
-#   # Mode 2: parent directory; discover children with VAD_repaired_both_layers.pth
+#   # Mode 2: parent directory; discover children with VAD_repaired_both_layers.{patch.pt,pth}
 #   bash leaderboard/scripts/batch_closed_loop_eval_vad_based_on_best_open_loop_setting.sh \
 #     vad_base_Arachne_v2_DE_results \
 #     --version fast
@@ -26,7 +26,10 @@
 #
 # Notes:
 #   - Expects repairs produced by run_experiment.py (model_type=VAD), i.e. each run contains:
-#       repair/repair_output/VAD_repaired_both_layers.pth
+#       repair/repair_output/VAD_repaired_both_layers.patch.pt   (lossless patch, current default)
+#    or repair/repair_output/VAD_repaired_both_layers.pth        (full checkpoint, older runs)
+#     A patch is rebuilt into a temporary full .pth (in $E2EREP_CKPT_TMP or /tmp) for each
+#     evaluation and removed afterwards; see repair_common/ckpt_patch.py.
 #   - Closed-loop stack uses the Bench2DriveZoo VAD agent:
 #       Bench2DriveZoo/team_code/vad_b2d_agent.py
 #     plus config:
@@ -44,7 +47,7 @@ Usage:
 Arguments:
   EXPERIMENT_PATH  实验路径，可以是：
                     - 单个实验文件夹路径
-                    - 父目录路径（自动查找所有包含 VAD_repaired_both_layers.pth 的子目录）
+                    - 父目录路径（自动查找所有包含 VAD_repaired_both_layers.patch.pt 或 .pth 的子目录）
                     - 通配符模式（例如: "vad_base_*_DE_results/VAD_base_REP_VAL_*_CONT_*"）
                    注意: 结果会保存在每个实验目录下的 closed_loop_eval_<routes_tag>/ 文件夹中
 
@@ -307,6 +310,22 @@ fi
 
 # Each experiment dir gets closed_loop_eval_<routes_tag>/
 
+# Repaired checkpoint of one experiment: patch (current) or full .pth (older runs); empty if none
+find_repaired_ckpt() {
+  local d f
+  for d in "$1/repair/repair_output" "$1/repair_vad/repair_output"; do
+    for f in "$d/VAD_repaired_both_layers.patch.pt" "$d/VAD_repaired_both_layers.pth"; do
+      if [ -f "$f" ]; then echo "$f"; return 0; fi
+    done
+  done
+  echo ""
+}
+
+# Temporary full checkpoints rebuilt from patches; removed on exit
+TMP_CKPTS=()
+cleanup_tmp_ckpts() { for f in "${TMP_CKPTS[@]:-}"; do [ -n "$f" ] && rm -f "$f"; done; }
+trap cleanup_tmp_ckpts EXIT
+
 # Resolve EXPERIMENT_PATH into concrete experiment directories
 echo "================================================================================"
 echo "查找匹配的实验目录..."
@@ -324,8 +343,8 @@ else
   input_path="${REPO_ROOT}/${EXPERIMENT_PATH}"
 fi
 
-# Case 1: user passed a .pth file → climb to experiment root
-if [ -f "${input_path}" ] && [[ "${input_path}" == *.pth ]]; then
+# Case 1: user passed a .pth / .patch.pt file → climb to experiment root
+if [ -f "${input_path}" ] && { [[ "${input_path}" == *.pth ]] || [[ "${input_path}" == *.patch.pt ]]; }; then
   exp_dir=$(dirname "$(dirname "$(dirname "${input_path}")")")
   pth_file="${input_path}"
   if [ -f "${pth_file}" ]; then
@@ -335,11 +354,8 @@ if [ -f "${input_path}" ] && [[ "${input_path}" == *.pth ]]; then
 # Case 2: directory path — single experiment vs parent of many
 elif [ -d "${input_path}" ]; then
   # Single experiment if repair/repair_output/VAD_repaired_both_layers.pth exists (run_experiment layout)
-  pth_file="${input_path}/repair/repair_output/VAD_repaired_both_layers.pth"
-  if [ ! -f "${pth_file}" ]; then
-    pth_file="${input_path}/repair_vad/repair_output/VAD_repaired_both_layers.pth"
-  fi
-  if [ -f "${pth_file}" ]; then
+  pth_file="$(find_repaired_ckpt "${input_path}")"
+  if [ -n "${pth_file}" ]; then
     # Single experiment
     MATCHED_EXPERIMENTS+=("${input_path}")
     echo "找到单个实验目录: ${input_path}"
@@ -347,9 +363,8 @@ elif [ -d "${input_path}" ]; then
     # Parent directory: search child experiments
     echo "在父目录中查找所有包含.pth文件的实验..."
     while IFS= read -r -d '' exp_dir; do
-      pth_file="${exp_dir}/repair/repair_output/VAD_repaired_both_layers.pth"
-      [ -f "${pth_file}" ] || pth_file="${exp_dir}/repair_vad/repair_output/VAD_repaired_both_layers.pth"
-      if [ -f "${pth_file}" ]; then
+      pth_file="$(find_repaired_ckpt "${exp_dir}")"
+      if [ -n "${pth_file}" ]; then
         MATCHED_EXPERIMENTS+=("${exp_dir}")
       fi
     done < <(find "${input_path}" -type d -name "VAD_base_REP_VAL_*" -print0 2>/dev/null)
@@ -386,9 +401,8 @@ elif [[ "${EXPERIMENT_PATH}" == *"*"* ]]; then
   fi
   
   while IFS= read -r -d '' exp_dir; do
-    pth_file="${exp_dir}/repair/repair_output/VAD_repaired_both_layers.pth"
-    [ -f "${pth_file}" ] || pth_file="${exp_dir}/repair_vad/repair_output/VAD_repaired_both_layers.pth"
-    if [ -f "${pth_file}" ]; then
+    pth_file="$(find_repaired_ckpt "${exp_dir}")"
+    if [ -n "${pth_file}" ]; then
       MATCHED_EXPERIMENTS+=("${exp_dir}")
     fi
   done < <(find "${search_base}" -type d -name "${pattern_part}" -print0 2>/dev/null)
@@ -480,8 +494,7 @@ FAILED_EXPERIMENTS=()
 for i in "${!MATCHED_EXPERIMENTS[@]}"; do
   exp_dir="${MATCHED_EXPERIMENTS[$i]}"
   exp_name=$(basename "${exp_dir}")
-  pth_file="${exp_dir}/repair/repair_output/VAD_repaired_both_layers.pth"
-  [ -f "${pth_file}" ] || pth_file="${exp_dir}/repair_vad/repair_output/VAD_repaired_both_layers.pth"
+  pth_file="$(find_repaired_ckpt "${exp_dir}")"
 
   task_num=$((i + 1))
   echo "[${task_num}/${TOTAL_TASKS}] 评估 VAD: ${exp_name}"
@@ -500,8 +513,21 @@ for i in "${!MATCHED_EXPERIMENTS[@]}"; do
   
   mkdir -p "${cl_dir}"
   
+  # A patch is rebuilt into a temporary full checkpoint on local disk for the agent
+  ckpt_file="${pth_file}"
+  if [[ "${pth_file}" == *.patch.pt ]]; then
+    ckpt_file="$(mktemp "${E2EREP_CKPT_TMP:-/tmp}/repaired_XXXXXX.pth")"
+    TMP_CKPTS+=("${ckpt_file}")
+    if ! "${PYTHON:-python}" "${REPO_ROOT}/repair_common/ckpt_patch.py" "${pth_file}" "${ckpt_file}" >/dev/null; then
+      echo "  ✗ 无法从补丁重建模型: ${pth_file}"
+      FAILED_COUNT=$((FAILED_COUNT + 1)); FAILED_EXPERIMENTS+=("${exp_name}")
+      rm -f "${ckpt_file}"; continue
+    fi
+    echo "  由补丁重建的临时模型: ${ckpt_file}"
+  fi
+
   # Leaderboard expects config_path+checkpoint_path
-  team_config="${BASE_CONFIG}+${pth_file}"
+  team_config="${BASE_CONFIG}+${ckpt_file}"
   
   # Ports for this task
   port=${CURRENT_PORT}
@@ -526,6 +552,8 @@ for i in "${!MATCHED_EXPERIMENTS[@]}"; do
     > "${log_file}" 2>&1
   task_exit=$?
   set -e
+  # Drop the temporary checkpoint rebuilt from a patch (TMP_CKPTS cleanup also covers early exit)
+  if [ "${ckpt_file}" != "${pth_file}" ]; then rm -f "${ckpt_file}"; fi
 
   send_vad_batch_closed_loop_email "${task_exit}" "${checkpoint_json}" "${save_path}" "${ROUTES}" "${port}"
 

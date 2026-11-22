@@ -239,6 +239,28 @@ Prerequisites: Bench2Drive-style data and info PKLs under `Bench2DriveZoo/data/`
 
 For VAD-base, use the same command with `--model-type VAD`, `--model-name VAD_base`, `--occ-output-dir baseline/VAD/vad_occ_cache`, and `--repair-layers "pts_bbox_head.ego_fut_decoder.0 pts_bbox_head.ego_fut_decoder.2"`.
 
+* **Repaired checkpoints are saved as patches.** A repair changes only a few weights, so instead of a full copy of the model (~0.7 GB for VAD, ~1 GB for UniAD) each run saves a lossless patch against the original checkpoint in `repair/repair_output/`:
+
+    | Model | Patch (default) | Full checkpoint (only with `--save-full-ckpt True`) |
+    |---|---|---|
+    | VAD | `VAD_repaired_both_layers.patch.pt` | `VAD_repaired_both_layers.pth` |
+    | UniAD | `UniAD_repaired_model.patch.pt` | `UniAD_repaired_model.pth` |
+
+    A patch stores the changed positions and their final values in the original dtype, plus the path, size and SHA-256 of the original checkpoint; rebuilding writes the values back without arithmetic, so the result is bit-identical to the repaired model (each patch is checked right after it is saved). `repaired_model.pth` in the same folder holds only the weights of the repaired sub-module. [`scripts/run_experiment.py`](./scripts/run_experiment.py), [`scripts/batch_reeval_openloop.py`](./scripts/batch_reeval_openloop.py) and the closed-loop batch script rebuild a temporary full checkpoint on local disk for `test.py` or the CARLA agent and delete it afterwards (set `E2EREP_CKPT_TMP` to choose the directory); full `.pth` files of older runs are still accepted. Keep the original checkpoints in `Bench2DriveZoo/ckpts/` unchanged: a patch refuses to apply to a checkpoint with a different hash.
+
+    ```bash
+    # Rebuild a full checkpoint, e.g. for your own evaluation script
+    python repair_common/ckpt_patch.py <run>/repair/repair_output/VAD_repaired_both_layers.patch.pt /tmp/vad_repaired.pth
+    ```
+
+    ```python
+    # Or in Python, without writing a file
+    from repair_common.ckpt_patch import load_patched
+    ckpt = load_patched('<run>/repair/repair_output/VAD_repaired_both_layers.patch.pt')  # same dict as the full .pth
+    ```
+
+    Full checkpoints saved by older runs can be converted with [`mytools/convert_full_ckpts.py`](./mytools/convert_full_ckpts.py) (writes `<name>.patch.pt` next to each file and verifies it tensor by tensor); the same script with `--delete-verified` then removes the verified full files (dry run unless `--yes`).
+
 * **CLI reference:**
 
     ```bash
@@ -261,7 +283,7 @@ For VAD-base, use the same command with `--model-type VAD`, `--model-name VAD_ba
     ├── leaderboard/
     │   └── team_code/          ← agents here (or symlink; see below)
     ├── mytools/
-    ├── repair_common/          ← Arachne core and PSO/DE optimizers shared by UniAD and VAD
+    ├── repair_common/          ← Arachne core, PSO/DE optimizers and checkpoint patches (ckpt_patch.py), shared by UniAD and VAD
     ├── repair_uniad/
     ├── repair_vad/
     ├── scenario_runner/
@@ -303,7 +325,7 @@ For VAD-base, use the same command with `--model-type VAD`, `--model-name VAD_ba
         ```bash
         bash leaderboard/scripts/batch_closed_loop_eval_vad_based_on_best_open_loop_setting.sh <EXPERIMENT_OR_PARENT_DIR>
         ```
-        For both scripts above, see the comments at the top of each file for repaired `.pth` paths, `--routes`, `--version`, and related flags (inputs come from [`scripts/run_experiment.py`](./scripts/run_experiment.py)).
+        For both scripts above, see the comments at the top of each file for the repaired-checkpoint layout, `--routes`, `--version`, and related flags (inputs come from [`scripts/run_experiment.py`](./scripts/run_experiment.py)). The VAD script accepts the patch (`VAD_repaired_both_layers.patch.pt`) or a full `.pth` of an older run; a patch is rebuilt into a temporary full checkpoint for each route set and deleted afterwards.
 
 * **Visualization:** sequential frames with canbus text for debugging.
 

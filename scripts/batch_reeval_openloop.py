@@ -29,6 +29,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # Import functions from run_experiment.py
 sys.path.insert(0, str(Path(__file__).parent))
 from run_experiment import run_evaluation
+from repair_common.ckpt_patch import materialized  # repo root is put on sys.path by run_experiment
 
 
 def parse_exp_dir_name(exp_dir_name):
@@ -56,18 +57,25 @@ def parse_exp_dir_name(exp_dir_name):
 
 
 def find_repaired_model(exp_dir, model_type):
-    """Return path to repaired weights under repair/repair_output/."""
+    """Return the repaired model under repair/repair_output/: the lossless patch
+    (current runs) or a full checkpoint (older runs)."""
     repair_dir = exp_dir / "repair" / "repair_output"
-    
+
     if model_type == "VAD":
-        model_file = repair_dir / "VAD_repaired_both_layers.pth"
+        candidates = ["VAD_repaired_both_layers.patch.pt", "VAD_repaired_both_layers.pth"]
     elif model_type == "UniAD":
-        model_file = repair_dir / "repaired_model.pth"
+        # newer runs keep only the small wrapper state dict in repaired_model.pth
+        candidates = ["UniAD_repaired_model.patch.pt", "UniAD_repaired_model.pth", "repaired_model.pth"]
     else:
         return None
-    
-    if model_file.exists():
-        return model_file.resolve()
+
+    for name in candidates:
+        f = repair_dir / name
+        if not f.exists():
+            continue
+        if name == "repaired_model.pth" and f.stat().st_size < 100 * 1024 * 1024:
+            continue  # wrapper-only weights, not a loadable full checkpoint
+        return f.resolve()
     return None
 
 
@@ -210,17 +218,19 @@ def main():
         model_type = exp_info['model_type']
         repaired_model = exp_info['repaired_model']
         try:
-            success = run_evaluation(
-                model_name=model_name,
-                model_type=model_type,
-                repaired_model=repaired_model,
-                eval_dataset=eval_dataset,
-                exp_dir=exp_dir,
-                repo_root=repo_root,
-                cuda_device=args.eval_cuda_device,
-                use_tmpfs_data=False,
-                occ_output_dir=args.occ_output_dir,
-            )
+            # a patch is rebuilt into a temporary full checkpoint and removed afterwards
+            with materialized(repaired_model) as ckpt:
+                success = run_evaluation(
+                    model_name=model_name,
+                    model_type=model_type,
+                    repaired_model=Path(ckpt),
+                    eval_dataset=eval_dataset,
+                    exp_dir=exp_dir,
+                    repo_root=repo_root,
+                    cuda_device=args.eval_cuda_device,
+                    use_tmpfs_data=False,
+                    occ_output_dir=args.occ_output_dir,
+                )
             return (exp_dir.name, success, None)
         except Exception as e:
             import traceback

@@ -36,6 +36,7 @@ if arachne_path not in sys.path:
     sys.path.insert(0, arachne_path)
 from arachne_pytorch import ArachnePyTorch, build_frame_data_dict
 from repair_common.arachne_base import extract_frame_identifiers
+from repair_common.ckpt_patch import save_repaired
 
 def get_delta_traj(gt_traj):
     """Convert absolute trajectory [T, 2] to delta trajectory [T, 2]."""
@@ -412,6 +413,8 @@ def main():
     parser.add_argument('--early-stop-patience', type=int, default=5,
                        help='Early stopping patience: stop if fitness does not improve for N iterations (default: 5, enabled). Set to 0 or None to disable. Example: --early-stop-patience 5')
     parser.add_argument('--output-dir', default='./repair_both_layers')
+    parser.add_argument('--save-full-ckpt', action='store_true',
+                        help='Also save the full repaired checkpoint (default: only a lossless patch)')
     parser.add_argument(
         '--use-cached-eval',
         action='store_true',
@@ -1120,25 +1123,21 @@ def main():
     else:
         print(f"  Verified: All {len(non_target_keys)} non-target layer keys are identical to original")
     
-    # Save: preserve original checkpoint structure (including optimizer, epoch, etc.)
-    save_path = output_dir / 'VAD_repaired_both_layers.pth'
+    # Save as a lossless patch against the original checkpoint (a few kB instead of ~700 MB).
+    # The full checkpoint (original structure incl. meta/optimizer) is rebuilt on demand with
+    # repair_common.ckpt_patch.load_patched / materialize; --save-full-ckpt also writes it.
     if isinstance(original_checkpoint, dict) and 'state_dict' in original_checkpoint:
-        # Original checkpoint has metadata structure
         repaired_checkpoint = original_checkpoint.copy()
         repaired_checkpoint['state_dict'] = vad_model.state_dict()
-        torch.save(repaired_checkpoint, save_path)
-        print(f"\nSaved repaired model to: {save_path}")
-        print(f"  Preserved original checkpoint structure with metadata")
-        print(f"  Total keys in state_dict: {len(current_state)}")
-        print(f"  Modified keys: {len(target_layer_keys)}")
-        print(f"  Unchanged keys: {len(non_target_keys)}")
     else:
-        # Original checkpoint is just state_dict
-        torch.save(vad_model.state_dict(), save_path)
-        print(f"\nSaved repaired model to: {save_path}")
-        print(f"  Total keys: {len(current_state)}")
-        print(f"  Modified keys: {len(target_layer_keys)}")
-        print(f"  Unchanged keys: {len(non_target_keys)}")
+        repaired_checkpoint = vad_model.state_dict()
+    patch_path = save_repaired(args.checkpoint, repaired_checkpoint, output_dir,
+                               'VAD_repaired_both_layers', save_full=args.save_full_ckpt)
+    print(f"\nSaved repaired model as patch: {patch_path} (verified lossless)")
+    print(f"  Base checkpoint: {os.path.abspath(args.checkpoint)}")
+    print(f"  Modified keys: {len(target_layer_keys)}, unchanged keys: {len(non_target_keys)}")
+    if args.save_full_ckpt:
+        print(f"  Also saved full checkpoint: {output_dir / 'VAD_repaired_both_layers.pth'}")
     
     # Plot fitness convergence
     if fitness_history and len(fitness_history) > 1:
