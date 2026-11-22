@@ -210,6 +210,7 @@ Prerequisites: Bench2Drive-style data and info PKLs under `Bench2DriveZoo/data/`
 
 * **Paper split ($D_{rep}$ / $D_{test}$):** pass [`b2d_infos_val_partA_25clips.pkl`](./Bench2DriveZoo/data/infos/b2d_infos_val_partA_25clips.pkl) as `--repair-dataset` and [`b2d_infos_val_partB_25clips.pkl`](./Bench2DriveZoo/data/infos/b2d_infos_val_partB_25clips.pkl) as `--eval-dataset`.
 * **Occupancy cache:** `--occ-output-dir` is required. It stores occupancy used when generating or reusing the baseline open-loop JSON; typical values are `baseline/UniAD/uniad_occ_cache` or `baseline/VAD/vad_occ_cache`.
+* **Fitness evaluation:** at the start of a repair, the decoder inputs, expert trajectories and occupancy grids of all repair frames are loaded onto the GPU once ([`repair_common/frame_cache.py`](./repair_common/frame_cache.py); about 240 KB per frame, e.g. 1.1 GB for the 4,685 VAD partA frames). Each fitness evaluation then computes L2 errors and collisions for all frames with a few GPU operations (a few milliseconds instead of reading every occupancy file again), for both VAD and UniAD; the fitness values and frame counts are identical to the earlier per-frame CPU computation.
 * **Closed-loop flag:** use `--closed-loop-eval False` for open-loop only; set `True` after CARLA is installed (Installation step 8).
 * **Fitness:** `--fitness` is `CA`, `ER`, or `ERC`; use `all` to run all three in sequence. Abbreviations are case-insensitive.
 
@@ -283,7 +284,7 @@ For VAD-base, use the same command with `--model-type VAD`, `--model-name VAD_ba
     ├── leaderboard/
     │   └── team_code/          ← agents here (or symlink; see below)
     ├── mytools/
-    ├── repair_common/          ← Arachne core, PSO/DE optimizers and checkpoint patches (ckpt_patch.py), shared by UniAD and VAD
+    ├── repair_common/          ← Arachne core, PSO/DE optimizers, GPU frame cache for the fitness (frame_cache.py) and checkpoint patches (ckpt_patch.py), shared by UniAD and VAD
     ├── repair_uniad/
     ├── repair_vad/
     ├── scenario_runner/

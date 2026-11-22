@@ -8,57 +8,11 @@ import os
 from pathlib import Path
 import json
 from tqdm import tqdm
-import multiprocessing as mp
 from mmcv.models.utils.functional import bivariate_gaussian_activation
 from repair_common.arachne_base import ArachneBase
+from repair_common.frame_cache import TIMESTEPS, UniADFrameCache
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-
-# Global collision metric instance (lazy initialization)
-_COLLISION_METRIC = None
-
-def _init_collision_worker():
-    """Initialize collision metric in worker process."""
-    global _COLLISION_METRIC
-    if _COLLISION_METRIC is None:
-        from mmcv.models.dense_heads.planning_head_plugin import UniADPlanningMetric
-        _COLLISION_METRIC = UniADPlanningMetric()
-
-
-def _compute_collision_from_occ(args):
-    """
-    Compute collision for UniAD using saved seg file.
-    
-    Args:
-        args: (occ_path, pred_abs_np, gt_abs_np, time_horizon)
-    Returns:
-        (ok: bool, result_or_error: bool|str)
-    """
-    try:
-        occ_path, pred_abs_np, gt_abs_np, time_horizon = args
-        occ_path = _resolve_occ_path(occ_path)
-        if not occ_path or not os.path.exists(occ_path):
-            return False, f"Missing occ_path for collision recomputation: {occ_path}"
-        
-        from mmcv.models.dense_heads.planning_head_plugin import UniADPlanningMetric
-        metric = UniADPlanningMetric()
-        seg_np = np.load(occ_path)['seg']  # UniAD uses 'seg' key, not 'occ'
-        seg_t = torch.from_numpy(seg_np)
-        if seg_t.dim() == 3:
-            seg_t = seg_t.unsqueeze(0)
-        pred_t = torch.from_numpy(pred_abs_np).unsqueeze(0)
-        gt_t = torch.from_numpy(gt_abs_np).unsqueeze(0)
-        _, obj_box_coll = metric.evaluate_coll(pred_t, gt_t, seg_t)
-        if time_horizon == 1:
-            col_value = float(obj_box_coll[:2].mean().item())
-        elif time_horizon == 2:
-            col_value = float(obj_box_coll[:4].mean().item())
-        else:
-            col_value = float(obj_box_coll[:6].mean().item())
-        return True, (col_value > 0)
-    except Exception as e:
-        return False, f"Failed to compute collision from occ_path={occ_path}: {e}"
-
 
 def _resolve_occ_path(occ_path):
     if not occ_path:
@@ -92,6 +46,7 @@ class ArachnePyTorch(ArachneBase):
         self.pred_traj_is_delta = True
         # Apply UniAD planning activation after cumsum (same as planning_head.forward)
         self.apply_bivariate_activation = True
+        self._eval_cache = None  # UniADFrameCache of the current frame_data_dict
     
     def set_options(self, **kwargs):
         """Set options for Arachne, including the UniAD trajectory decoding options."""
@@ -100,28 +55,6 @@ class ArachnePyTorch(ArachneBase):
             self.pred_traj_is_delta = bool(kwargs['pred_traj_is_delta'])
         if 'apply_bivariate_activation' in kwargs:
             self.apply_bivariate_activation = bool(kwargs['apply_bivariate_activation'])
-    
-    def _get_collision_pool(self):
-        """Lazily create a process pool for collision evaluation."""
-        if self.collision_num_workers is None or self.collision_num_workers <= 1:
-            return None
-        if hasattr(self, '_collision_pool') and self._collision_pool is not None:
-            if hasattr(self, '_collision_pool_workers') and self._collision_pool_workers == self.collision_num_workers:
-                return self._collision_pool
-        # Recreate pool if worker count changed
-        if hasattr(self, '_collision_pool') and self._collision_pool is not None:
-            try:
-                self._collision_pool.close()
-                self._collision_pool.join()
-            except Exception:
-                pass
-        ctx = mp.get_context("spawn")
-        self._collision_pool = ctx.Pool(
-            processes=self.collision_num_workers,
-            initializer=_init_collision_worker
-        )
-        self._collision_pool_workers = self.collision_num_workers
-        return self._collision_pool
     
     def _compute_gradient_loss(self, model, input_neg):
         """
@@ -199,678 +132,147 @@ class ArachnePyTorch(ArachneBase):
         
         return self._collect_target_gradient_candidates(model)
     
-    def _evaluate_fitness_openloop(self, repaired_layers, frame_data_dict, 
-                                        positive_frames, negative_frames,
-                                        threshold_good, threshold_bad, fitness_type='discrete',
-                                        rep_method='Arachne_v1', use_original_l2_for_classification=False, time_horizon=3):
-        """
-        Evaluate fitness using open-loop evaluation (faster).
-        
-        For discrete fitness:
-            fitness = -(w1 * N_pos - w2 * N_(neg-no col) - w3 * N_mid - lambda * N_col)
-            where:
-                N_pos: number of positive frames (L2 < threshold_good)
-                N_(neg-no col): number of negative frames without collision (L2 > threshold_bad, no collision)
-                N_mid: number of middle frames (threshold_good <= L2 <= threshold_bad)
-                N_col: number of frames with collision
-            weights: w1=1.0, w2=1.0, w3=0.5, lambda=10.0
-        
-        For continuous fitness:
-            fitness = total L2 error across all frames
-        
-        For continuous2 fitness:
-            fitness = total L2 error + lambda * N_col
-            where:
-                total L2 error: sum of L2 errors across all valid frames
-                N_col: number of frames with collision
-                lambda: penalty coefficient (default 10.0)
-        
-        Goal: Minimize fitness (maximize the score for discrete, minimize L2 for continuous)
-        
-        Note: Evaluates ALL frames in frame_data_dict, not just positive_frames and negative_frames
-        
-        Parameters
-        ----------
-        repaired_layers : nn.Module or dict
-            Repaired layer(s) (wrapper or dict of layers)
-        frame_data_dict : dict
-            Dictionary containing ALL frames to evaluate
-            Each frame should have: 'ego_features', 'gt_trajectory', 'plan_L2_3s'
-        positive_frames : list
-            List of frames used for localization (not used in evaluation)
-        negative_frames : list
-            List of frames used for localization (not used in evaluation)
-        threshold_good : float
-            L2 threshold for positive frames
-        threshold_bad : float
-            L2 threshold for negative frames
-        fitness_type : str
-            Type of fitness function ('discrete', 'continuous', 'continuous2')
-        rep_method : str
-            Repair method name
-        
-        Returns
-        -------
-        fitness : float
-            Fitness score (lower is better, negative values are good)
-        frame_counts : dict, optional
-            Dictionary containing frame counts for each category:
-            - 'positive_no_collision': number of positive frames without collision
-            - 'middle_no_collision': number of middle frames without collision
-            - 'negative_no_collision': number of negative frames without collision
-            - 'collision': number of frames with collision
-            - 'total_evaluated': total number of frames evaluated
-            Only returned when use_original_l2_for_classification=True (for logging)
-        """
-        repaired_layers.eval()
-        
-        device = repaired_layers.parameters().__next__().device if hasattr(repaired_layers, 'parameters') else self.device
-        
-        # For semSegRep: if threshold_good == threshold_bad, use median L2 from JSON as threshold
-        actual_threshold_good = threshold_good
-        actual_threshold_bad = threshold_bad
-        use_median_threshold = False
-        
-        if rep_method == 'semSegRep' and threshold_good == threshold_bad:
-            # Calculate median L2 error from original JSON data (plan_L2_Xs based on time_horizon)
-            l2_field = f'plan_L2_{time_horizon}s'
-            all_original_l2 = []
-            for frame_data in frame_data_dict.values():
-                original_l2 = frame_data.get(l2_field, None)
-                if original_l2 is not None and not np.isnan(original_l2) and not np.isinf(original_l2):
-                    all_original_l2.append(original_l2)
-            if len(all_original_l2) > 0:
-                median_l2 = float(np.median(all_original_l2))
-                actual_threshold_good = median_l2
-                actual_threshold_bad = median_l2
-                use_median_threshold = True
-            else:
-                if not use_original_l2_for_classification:
-                    print(f"  [WARNING] semSegRep: Could not compute median L2, using provided threshold {threshold_good}")
-        
-        # Count frames in each category
-        collision_count = 0
-        positive_no_collision_count = 0
-        middle_no_collision_count = 0
-        negative_no_collision_count = 0
-        
-        # Debug counters
-        error_count = 0
-        inf_count = 0
-        shape_errors = []
-        
-        # SIMPLE FIX: For original model evaluation, directly use positive_frames and negative_frames
-        # BUT: 
-        #   - For Arachne_v1 and Arachne_v2: positive_frames/negative_frames are not used (evaluates ALL frames), so disable fast path
-        #   - For semSegRep with median threshold: cannot use fast path because positive_frames/negative_frames
-        #     were extracted using a different threshold (0.5) than what we use for evaluation (median L2)
-        can_use_fast_path = (use_original_l2_for_classification and 
-                            rep_method not in ['Arachne_v1', 'Arachne_v2'] and  # Arachne_v1/v2 don't use positive_frames/negative_frames
-                            positive_frames is not None and negative_frames is not None and 
-                            len(positive_frames) > 0 and len(negative_frames) > 0 and
-                            not (rep_method == 'semSegRep' and use_median_threshold))
-        
-        if use_original_l2_for_classification:
-            if rep_method in ['Arachne_v1', 'Arachne_v2']:
-                # Arachne_v1/v2 don't use positive_frames/negative_frames, always use normal evaluation
-                pass  # Silent, no warning needed
-            elif rep_method == 'semSegRep' and use_median_threshold:
-                print(f"  [INFO] semSegRep with median threshold: Cannot use fast path (threshold mismatch), will recompute L2")
-            elif positive_frames is None or negative_frames is None:
-                print(f"  [WARNING] use_original_l2_for_classification=True but positive_frames={positive_frames is not None}, negative_frames={negative_frames is not None}, falling back to normal evaluation")
-            elif len(positive_frames) == 0 or len(negative_frames) == 0:
-                print(f"  [WARNING] use_original_l2_for_classification=True but positive_frames={len(positive_frames)}, negative_frames={len(negative_frames)}, falling back to normal evaluation")
-            else:
-                print(f"  [INFO] Using fast path: directly counting from positive_frames ({len(positive_frames)}) and negative_frames ({len(negative_frames)})")
-        
-        if can_use_fast_path:
-            # Convert to sets for fast lookup
-            positive_set = set(positive_frames)
-            negative_set = set(negative_frames)
-            
-            # Count frames directly from frame_data_dict
-            for (token, scene_name), frame_data in frame_data_dict.items():
-                frame_id = (token, scene_name)
-                has_collision = frame_data.get('has_collision', False)
-                
-                if has_collision:
-                    collision_count += 1
-                    continue
-                
-                if frame_id in positive_set:
-                    positive_no_collision_count += 1
-                elif frame_id in negative_set:
-                    negative_no_collision_count += 1
-                else:
-                    # Middle frames (between thresholds)
-                    middle_no_collision_count += 1
-            
-            # Calculate fitness based on counts
-            if fitness_type == 'discrete':
-                # Discrete fitness: use same formula as normal evaluation
-                # But keep the original sign convention that was working
-                w1, w2, w3, lambda_col = 1.0, 1.0, 0.5, 10.0
-                score = (w1 * positive_no_collision_count -
-                         w2 * negative_no_collision_count -
-                         w3 * middle_no_collision_count -
-                         lambda_col * collision_count)
-                # Keep original sign: fitness = -score (so negative score gives positive fitness)
-                fitness = -score
-                
-                # For semSegRep: calculate median if needed for display
-                display_threshold_good = threshold_good
-                display_threshold_bad = threshold_bad
-                if rep_method == 'semSegRep' and threshold_good == threshold_bad:
-                    # Calculate median for display
-                    all_original_l2 = []
-                    for frame_data in frame_data_dict.values():
-                        original_l2 = frame_data.get('plan_L2_3s', None)
-                        if original_l2 is not None and not np.isnan(original_l2) and not np.isinf(original_l2):
-                            all_original_l2.append(original_l2)
-                    if len(all_original_l2) > 0:
-                        median_l2 = float(np.median(all_original_l2))
-                        display_threshold_good = median_l2
-                        display_threshold_bad = median_l2
-                
-                # Return fitness and frame counts for logging
-                if use_original_l2_for_classification:
-                    frame_counts = {
-                        'positive_no_collision': positive_no_collision_count,
-                        'middle_no_collision': middle_no_collision_count,
-                        'negative_no_collision': negative_no_collision_count,
-                        'collision': collision_count,
-                        'total_evaluated': positive_no_collision_count + middle_no_collision_count + negative_no_collision_count + collision_count
-                    }
-                    return fitness, frame_counts
-                return fitness
-            else:
-                # For continuous fitness, still need to compute L2 errors
-                # Fall through to normal evaluation
-                pass
-        
-        # Determine batch size: use configured value or auto-detect based on GPU memory
-        # Move outside with torch.no_grad() to ensure it's in function scope
-        if self.eval_batch_size is not None:
-            batch_size = self.eval_batch_size
-        else:
-            # Auto-detect batch size based on GPU memory
-            if device.type == 'cuda':
-                # Get GPU memory info
-                gpu_memory_gb = torch.cuda.get_device_properties(device).total_memory / (1024**3)
-                # Conservative estimate: ~50MB per batch (for features + predictions + intermediates)
-                # For 80GB GPU (H100): ~1600 theoretical max, use 1024 for better utilization
-                # For 32GB GPU: ~640, but use 256 as safe default
-                # For 16GB GPU: ~320, but use 128 as safe default
-                # For 8GB GPU: ~160, but use 64 as safe default
-                if gpu_memory_gb >= 60:
-                    batch_size = 1024  # Very large GPU (H100 80GB, etc.)
-                elif gpu_memory_gb >= 24:
-                    batch_size = 256  # Large GPU (V100, A100, etc.)
-                elif gpu_memory_gb >= 12:
-                    batch_size = 128  # Medium GPU (RTX 3090, etc.)
-                else:
-                    batch_size = 64   # Small GPU or default (RTX 3080, T4, etc.)
-            else:
-                batch_size = 32  # CPU: smaller batch size
-        
-        frame_items = list(frame_data_dict.items())
-        total_frames = len(frame_items)
-        
-        # Check if frame_data_dict is empty
-        if total_frames == 0:
-            print(f"  [WARNING] frame_data_dict is empty! No frames to evaluate.")
-            if use_original_l2_for_classification:
-                frame_counts = {
-                    'positive_no_collision': 0,
-                    'middle_no_collision': 0,
-                    'negative_no_collision': 0,
-                    'collision': 0,
-                    'total_evaluated': 0
-                }
-                return float('inf'), frame_counts  # Return worst fitness
-            return float('inf')  # Return worst fitness
-        
-        # Pre-allocate lists for batch processing
-        all_ego_features = []
-        all_gt_trajectories = []
-        all_cmd_indices = []
-        all_has_collision = []
-        all_gt_masks = []  # Store GT masks for L2 calculation
-        all_original_predictions = []  # Store original predictions from JSON for comparison
-        all_frame_data = []  # Store frame_data for later lookup
-        
-        # Collect all data (same as old version)
-        for (token, scene_name), frame_data in frame_items:
-            # Convert to numpy arrays (same as old version)
-            ego_features = np.array(frame_data['ego_features'], dtype=np.float32)
-            gt_trajectory = np.array(frame_data.get('gt_future_traj', []), dtype=np.float32)
-            # Use ego_fut_cmd_idx to match old version
-            cmd_idx = frame_data.get('ego_fut_cmd_idx', 0)
-            # Get GT mask if available (for VAD rule L2 calculation)
-            # VAD rule JSON uses 'ego_fut_masks' (plural), but we save as 'ego_fut_mask' (singular) in frame_data_dict
-            gt_mask = frame_data.get('ego_fut_mask', frame_data.get('ego_fut_masks', None))
-            if gt_mask is None:
-                # If mask not available, assume all timesteps are valid (mask=1)
-                # This matches VAD rule: if mask_sum > 0, frame is valid
-                gt_mask = np.ones((6, 2), dtype=np.float32)  # Default: all valid
-            else:
-                gt_mask = np.array(gt_mask, dtype=np.float32)
-                # Handle different mask shapes (matches convert_uniad_to_vad_metrics.py logic exactly)
-                if gt_mask.ndim == 3:
-                    gt_mask = gt_mask[0, :6, :2]  # Take first batch, 6 timesteps, 2 coords
-                elif gt_mask.ndim == 2:
-                    gt_mask = gt_mask[:6, :2] if gt_mask.shape[1] >= 2 else gt_mask[:6, None]
-                elif gt_mask.ndim == 1:
-                    gt_mask = gt_mask[:6, None]  # (6, 1) - will broadcast to (6, 2) in calculation
-                else:
-                    # Invalid shape, use default
-                    gt_mask = np.ones((6, 2), dtype=np.float32)
-                
-                # Ensure final shape is (6, 2) for consistency
-                if gt_mask.shape[0] < 6:
-                    # Pad with 1.0 (valid)
-                    padded = np.ones((6, 2), dtype=np.float32)
-                    if gt_mask.ndim == 1:
-                        padded[:gt_mask.shape[0], :] = gt_mask[:gt_mask.shape[0], None]
-                    else:
-                        min_dim = min(gt_mask.shape[1] if gt_mask.ndim > 1 else 1, 2)
-                        padded[:gt_mask.shape[0], :min_dim] = gt_mask[:gt_mask.shape[0], :min_dim]
-                    gt_mask = padded
-                elif gt_mask.shape[0] >= 6:
-                    # Slice to 6 timesteps
-                    if gt_mask.ndim == 1:
-                        # Broadcast (6,) to (6, 2)
-                        gt_mask = np.column_stack([gt_mask[:6], gt_mask[:6]])
-                    elif gt_mask.ndim == 2:
-                        if gt_mask.shape[1] < 2:
-                            # Broadcast (6, 1) to (6, 2)
-                            gt_mask = np.column_stack([gt_mask[:6, 0], gt_mask[:6, 0]])
-                        else:
-                            gt_mask = gt_mask[:6, :2]
-            all_ego_features.append(ego_features)
-            all_gt_trajectories.append(gt_trajectory)
-            all_cmd_indices.append(cmd_idx)
-            all_has_collision.append(frame_data.get('has_collision', False))
-            all_gt_masks.append(gt_mask)
-            # Store original predictions from JSON for comparison (if available)
-            original_pred = frame_data.get('original_predictions', None)
-            all_original_predictions.append(original_pred)
-            all_frame_data.append(frame_data)  # Store frame_data for later lookup
-        
-        # Batch process
-        total_l2_error = 0.0
-        valid_frame_count = 0
-        
-        planning_metric = None
-        # Initialize frame count variables
-        positive_no_collision_count = 0
-        middle_no_collision_count = 0
-        negative_no_collision_count = 0
-        collision_count = 0
-        error_count = 0
-        inf_count = 0
-        shape_errors = []
-        
-        # Process batches in no_grad context
-        
-        with torch.no_grad():
-            for batch_start in range(0, total_frames, batch_size):
-                batch_end = min(batch_start + batch_size, total_frames)
-                batch_ego_features = all_ego_features[batch_start:batch_end]
-                batch_gt_trajectories = all_gt_trajectories[batch_start:batch_end]
-                batch_cmd_indices = all_cmd_indices[batch_start:batch_end]
-                batch_has_collision = all_has_collision[batch_start:batch_end]
-                
-                # Convert to tensors in batch (same as old version)
-                batch_ego_tensor = torch.tensor(np.array(batch_ego_features), dtype=torch.float32).to(device)
-                # Ensure correct shape: (batch, feature_dim)
-                if batch_ego_tensor.dim() == 1:
-                    batch_ego_tensor = batch_ego_tensor.unsqueeze(0)
-                
-                # Forward pass
-                try:
-                    
-                    # Batch forward pass (same as old version)
-                    batch_pred_traj = repaired_layers(batch_ego_tensor)  # (batch, 36) or (batch, 6, 2)
-                    batch_pred_raw = batch_pred_traj
-                    
-                    # Handle UniAD output shapes from repaired_layers
-                    # UniAD reg_branch outputs: (batch, 12) = (batch, 6 timesteps × 2 coords)
-                    if batch_pred_traj.dim() == 1:
-                        batch_pred_traj = batch_pred_traj.unsqueeze(0)
-                    elif batch_pred_traj.dim() == 2:
-                        # UniAD format: (batch, 12) -> (batch, 6, 2)
-                        if batch_pred_traj.shape[1] == 12:
-                            batch_pred_traj = batch_pred_traj.view(-1, 6, 2)
-                        else:
-                            raise RuntimeError(
-                                f"Unsupported pred_traj shape {tuple(batch_pred_traj.shape)}. "
-                                f"Expected (batch, 12) for UniAD."
-                            )
-                    elif batch_pred_traj.dim() == 3:
-                        # Already (batch, 6, 2) or (batch, timesteps, 2)
-                        if batch_pred_traj.shape[1:] != (6, 2):
-                            raise RuntimeError(
-                                f"Unsupported pred_traj shape {tuple(batch_pred_traj.shape)}. "
-                                f"Expected (batch, 6, 2) for UniAD."
-                            )
-                    
-                    # Prepare GT trajectories tensor: (batch, 6, 2)
-                    # Always use full 6 timesteps, _compute_l2_error_gpu will slice based on time_horizon
-                    batch_gt_tensor = torch.zeros(len(batch_gt_trajectories), 6, 2, dtype=torch.float32, device=device)
-                    for i, gt_traj in enumerate(batch_gt_trajectories):
-                        if len(gt_traj.shape) == 1:
-                            gt_traj = gt_traj.reshape(-1, 2)
-                        min_len = min(gt_traj.shape[0], 6)
-                        batch_gt_tensor[i, :min_len, :] = torch.tensor(gt_traj[:min_len], dtype=torch.float32, device=device)
-                    
-                    # Prepare cmd_indices tensor: (batch,)
-                    batch_cmd_tensor = torch.tensor(batch_cmd_indices, dtype=torch.long, device=device)
+    def _frame_cache(self, frame_data_dict, device):
+        key = (id(frame_data_dict), len(frame_data_dict), str(device))
+        if self._eval_cache is None or self._eval_cache.key != key:
+            from mmcv.models.dense_heads.planning_head_plugin import UniADPlanningMetric
+            self._eval_cache = None
+            self._eval_cache = UniADFrameCache(frame_data_dict, device, UniADPlanningMetric(), _resolve_occ_path)
+        return self._eval_cache
 
-                    # Convert predictions to absolute trajectories for collision evaluation
-                    batch_pred_abs = self._pred_traj_to_abs_gpu(batch_pred_raw, batch_cmd_tensor)
-                    
-                    # Always compute L2 for comparison/debugging, even if use_original_l2_for_classification=True
-                    # For original model evaluation, we use JSON values for classification but still compute L2 for comparison
-                    # For particle evaluation, compute L2 to reflect model changes
-                    # Prepare GT masks tensor: (batch, 6, 2)
-                    # gt_mask from all_gt_masks should already be (6, 2) after processing above
-                    batch_gt_masks_tensor = torch.zeros(len(batch_gt_trajectories), 6, 2, dtype=torch.float32, device=device)
-                    masks_loaded = 0
-                    masks_default = 0
-                    mask_sources = []  # Track where masks come from
-                    for i, gt_mask in enumerate(all_gt_masks[batch_start:batch_end]):
-                        # gt_mask should already be (6, 2) from processing above
-                        if gt_mask.shape == (6, 2):
-                            batch_gt_masks_tensor[i, :, :] = torch.tensor(gt_mask, dtype=torch.float32, device=device)
-                            # Check if mask is all 1.0 (default) or has actual values
-                            if np.allclose(gt_mask, 1.0):
-                                masks_default += 1
-                                # Check if mask was actually loaded from JSON or is default
-                                frame_idx = batch_start + i
-                                frame_data = all_frame_data[frame_idx] if frame_idx < len(all_frame_data) else None
-                                mask_source = frame_data.get('_mask_field_used', 'unknown') if frame_data else 'unknown'
-                                mask_sources.append(mask_source)
-                            else:
-                                masks_loaded += 1
-                                mask_sources.append('loaded_from_json')
-                        else:
-                            # Fallback: handle unexpected shapes
-                            min_len = min(gt_mask.shape[0], 6)
-                            min_dim = min(gt_mask.shape[1], 2) if gt_mask.ndim > 1 else 2
-                            if gt_mask.ndim == 1:
-                                # Broadcast (6,) to (6, 2)
-                                gt_mask_2d = np.column_stack([gt_mask[:6], gt_mask[:6]])
-                                batch_gt_masks_tensor[i, :min_len, :] = torch.tensor(gt_mask_2d[:min_len, :], dtype=torch.float32, device=device)
-                            else:
-                                batch_gt_masks_tensor[i, :min_len, :min_dim] = torch.tensor(gt_mask[:min_len, :min_dim], dtype=torch.float32, device=device)
-                            # Fill remaining with 1.0 (valid)
-                            if min_len < 6:
-                                batch_gt_masks_tensor[i, min_len:, :] = 1.0
-                            if min_dim < 2:
-                                batch_gt_masks_tensor[i, :, min_dim:] = 1.0
-                            masks_default += 1
-                            mask_sources.append('fallback_shape')
-                        
-                        
-                        # Use _compute_l2_error_gpu which handles all shape cases correctly
-                        # batch_pred_traj is delta format, _compute_l2_error_gpu will convert to absolute
-                        batch_l2_errors = self._compute_l2_error_gpu(batch_pred_traj, batch_gt_tensor, batch_cmd_tensor, time_horizon=time_horizon, gt_mask=batch_gt_masks_tensor)
-                        batch_l2_errors_np = batch_l2_errors.cpu().numpy()
-                        
-                                
+    def _evaluate_fitness_openloop(self, repaired_layers, frame_data_dict,
+                                   positive_frames, negative_frames,
+                                   threshold_good, threshold_bad, fitness_type='discrete',
+                                   rep_method='Arachne_v1', use_original_l2_for_classification=False,
+                                   time_horizon=3):
+        """
+        Fitness of the (repaired) reg_branch on ALL frames of frame_data_dict (lower is better).
 
-                    # Optional: parallel collision computation on CPU
-                    collision_flags = None
-                    if self.collision_num_workers is not None and self.collision_num_workers > 1:
-                        pool = self._get_collision_pool()
-                        tasks = []
-                        for b_idx in range(batch_end - batch_start):
-                            frame_idx = batch_start + b_idx
-                            frame_data = all_frame_data[frame_idx]
-                            occ_path = frame_data.get('occ_path', None)
-                            pred_abs_np = batch_pred_abs[b_idx:b_idx + 1, :6, :2].detach().cpu().numpy()[0]
-                            gt_abs_np = batch_gt_tensor[b_idx:b_idx + 1, :6, :2].detach().cpu().numpy()[0]
-                            tasks.append((occ_path, pred_abs_np, gt_abs_np, time_horizon))
-                        results = pool.map(_compute_collision_from_occ, tasks)
-                        bad = [r for r in results if not r[0]]
-                        if bad:
-                            error_count += 1
-                            shape_errors.append(bad[0][1])
-                            continue
-                        collision_flags = [r[1] for r in results]
-                    
-                    # Process each frame in batch for classification and statistics (same as old version)
-                    for b_idx in range(batch_end - batch_start):
-                        frame_idx = batch_start + b_idx
-                        frame_data = all_frame_data[frame_idx]
-                        
-                        # For original model evaluation, use pre-computed L2 from JSON for consistency
-                        # Use the L2 field that matches the time_horizon (plan_L2_1s, plan_L2_2s, or plan_L2_3s)
-                        if use_original_l2_for_classification:
-                            l2_field = f'plan_L2_{time_horizon}s'
-                            original_l2 = frame_data.get(l2_field, None)
-                            
-                            # Use pre-computed L2 from JSON if available and valid
-                            if original_l2 is not None and not np.isnan(original_l2) and not np.isinf(original_l2):
-                                l2_error = float(original_l2)
-                            else:
-                                # Fallback: if JSON value is missing, skip this frame
-                                print(f"  [WARNING] Missing L2 value for frame {frame_idx}, skipping...")
-                                continue
-                        else:
-                            # For particle evaluation, use computed L2 error so fitness reflects model changes
-                            if batch_l2_errors_np is None:
-                                raise RuntimeError("batch_l2_errors_np is None but use_original_l2_for_classification is False")
-                            l2_error = float(batch_l2_errors_np[b_idx])
-                        
-                        # Note: frame_l2_comparison is populated in the accumulation section below
-                        
-                        # Check collision: use saved collision info from JSON if use_original_l2_for_classification
-                        if use_original_l2_for_classification:
-                            # For original model evaluation, use pre-computed collision from JSON for consistency
-                            col_field = f'plan_obj_box_col_{time_horizon}s'
-                            col_value = frame_data.get(col_field, 0.0)
-                            has_collision = (col_value > 0)
-                        elif collision_flags is not None:
-                            has_collision = collision_flags[b_idx]
-                        else:
-                            # Recompute collision from occ/seg for particle evaluation
-                            occ_path = _resolve_occ_path(frame_data.get('occ_path', None))
-                            if not occ_path or not os.path.exists(occ_path):
-                                raise ValueError(
-                                    f"Missing occ_path for collision recomputation: {occ_path}. "
-                                    "Please regenerate JSON with --occ-output-dir."
-                                )
-                            try:
-                                if planning_metric is None:
-                                    from mmcv.models.dense_heads.planning_head_plugin import UniADPlanningMetric
-                                    planning_metric = UniADPlanningMetric().to(device)
-                                seg_np = np.load(occ_path)['seg']
-                                seg_t = torch.from_numpy(seg_np).to(device)
-                                if seg_t.dim() == 3:
-                                    seg_t = seg_t.unsqueeze(0)
-                                pred_abs = batch_pred_abs[b_idx:b_idx + 1, :6, :2]
-                                gt_abs = batch_gt_tensor[b_idx:b_idx + 1, :6, :2]
-                                _, obj_box_col = planning_metric.evaluate_coll(pred_abs, gt_abs, seg_t)
-                                if time_horizon == 1:
-                                    col_value = float(obj_box_col[:2].mean().item())
-                                elif time_horizon == 2:
-                                    col_value = float(obj_box_col[:4].mean().item())
-                                else:
-                                    col_value = float(obj_box_col[:6].mean().item())
-                                has_collision = (col_value > 0)
-                            except Exception as e:
-                                raise RuntimeError(f"Failed to compute collision from occ_path={occ_path}: {e}")
-                        
-                        # Track inf values
-                        if np.isinf(l2_error) or l2_error == float('inf'):
-                            inf_count += 1
-                        
-                        # Accumulate L2 error for continuous fitness
-                        # Only accumulate valid L2 errors (not NaN or Inf)
-                        # Note: We only process frames with fut_valid_flag=True, so all frames here are valid
-                        if not np.isnan(l2_error) and not np.isinf(l2_error):
-                            valid_frame_count += 1
-                            total_l2_error += l2_error
-                            
-                            
-                            
-                        
-                        # For semSegRep: classify first, then handle collisions
-                        # For Arachne_v1: check collision first, skip classification if collision
-                        if rep_method == 'semSegRep' and actual_threshold_good == actual_threshold_bad:
-                            # Fixed/median threshold: L2 < threshold = positive, L2 >= threshold = negative
-                            # Classify first regardless of collision
-                            if l2_error < actual_threshold_good:
-                                positive_no_collision_count += 1
-                            else:
-                                negative_no_collision_count += 1
-                            
-                            # Then handle collision: subtract from corresponding count and add to collision_count
-                            if has_collision:
-                                if l2_error < actual_threshold_good:
-                                    positive_no_collision_count -= 1
-                                else:
-                                    negative_no_collision_count -= 1
-                                collision_count += 1
-                        else:
-                            # For Arachne_v1: check collision first, skip classification if collision
-                            if has_collision:
-                                collision_count += 1
-                                continue
-                            
-                            # Classify frame based on L2 error (same logic as localization for non-collision frames)
-                            # For original model: uses plan_L2_{time_horizon}s from JSON
-                            # For particles: uses computed L2 error (reflects model changes)
-                            if l2_error < actual_threshold_good:
-                                positive_no_collision_count += 1
-                            elif l2_error <= actual_threshold_bad:
-                                middle_no_collision_count += 1
-                            else:
-                                negative_no_collision_count += 1
-                
-                except Exception as e:
-                    error_count += 1
-                    shape_errors.append(str(e))
-                    print(f"  [ERROR] Batch processing failed: {e}", flush=True)
-                    import traceback
-                    traceback.print_exc()
-                    continue
-        
-        
-        # Compute fitness based on type (after all batches are processed)
-        total_frames_evaluated = positive_no_collision_count + middle_no_collision_count + negative_no_collision_count + collision_count
-        
-        # Debug: print counts if all are zero
-        if total_frames_evaluated == 0 and total_frames > 0:
-            print(f"  [WARNING] No frames were evaluated! Total frames: {total_frames}, Error count: {error_count}", flush=True)
-            if shape_errors:
-                print(f"  [WARNING] Shape errors: {shape_errors[:5]}", flush=True)  # Print first 5 errors
-            # If use_original_l2_for_classification and all frames failed, try to classify directly from JSON
-            if use_original_l2_for_classification and error_count > 0:
-                print(f"  [INFO] Attempting fallback: classifying frames directly from JSON data...", flush=True)
-                # Fallback: classify directly from JSON without forward pass
-                for (token, scene_name), frame_data in frame_items:
-                    l2_field = f'plan_L2_{time_horizon}s'
-                    col_field = f'plan_obj_box_col_{time_horizon}s'
-                    original_l2 = frame_data.get(l2_field, None)
-                    col_value = frame_data.get(col_field, 0.0)
-                    has_collision = (col_value > 0)
-                    
-                    if original_l2 is None or np.isnan(original_l2) or np.isinf(original_l2):
-                        continue
-                    
-                    l2_error = float(original_l2)
-                    
-                    if rep_method == 'semSegRep' and actual_threshold_good == actual_threshold_bad:
-                        if l2_error < actual_threshold_good:
-                            positive_no_collision_count += 1
-                        else:
-                            negative_no_collision_count += 1
-                        if has_collision:
-                            if l2_error < actual_threshold_good:
-                                positive_no_collision_count -= 1
-                            else:
-                                negative_no_collision_count -= 1
-                            collision_count += 1
-                    else:
-                        if has_collision:
-                            collision_count += 1
-                        else:
-                            if l2_error < actual_threshold_good:
-                                positive_no_collision_count += 1
-                            elif l2_error <= actual_threshold_bad:
-                                middle_no_collision_count += 1
-                            else:
-                                negative_no_collision_count += 1
-                
-                # Recalculate total after fallback
-                total_frames_evaluated = positive_no_collision_count + middle_no_collision_count + negative_no_collision_count + collision_count
-                print(f"  [INFO] Fallback classification complete: {total_frames_evaluated} frames evaluated", flush=True)
-        
-        # Compute fitness based on type (always compute, regardless of total_frames_evaluated)
-        if fitness_type == 'discrete':
-            # Discrete fitness definition:
-            # fitness = -(w1 * N_pos - w2 * N_(neg-no col) - w3 * N_mid - lambda * N_col)
-            # We want to maximize this value, but PSO minimizes, so we negate it
-            w1 = 1.0
-            w2 = 1.0
-            w3 = 0.5
-            lambda_col = 10.0
-            
-            score = (w1 * positive_no_collision_count -
-                     w2 * negative_no_collision_count -
-                     w3 * middle_no_collision_count -
-                     lambda_col * collision_count)
-            
-            fitness = -score  # Negate because PSO minimizes (we want to maximize score)
-            
-        elif fitness_type == 'continuous':
-            # Continuous fitness: total L2 error across all frames
-            # Lower L2 error is better, PSO minimizes directly
-            # Note: Only frames with fut_valid_flag=True are included in total_l2_error
-            score = total_l2_error
-            
-            
-            # BUG FIX: If total_l2_error is 0.0 but no valid L2 errors were accumulated,
-            # this means all frames had NaN/Inf errors (model is broken), not perfect fitness!
-            # Return a large penalty value instead of 0.0
-            if score == 0.0 and valid_frame_count == 0:
-                fitness = float('inf')  # Worst possible fitness (will be rejected by PSO)
-            else:
-                fitness = score  # Direct minimization of L2 error
-            
-        elif fitness_type == 'continuous2':
-            # Continuous2 fitness: total L2 error + lambda * collision count
-            lambda_col = 10.0
-            
-            if valid_frame_count > 0:
-                fitness = total_l2_error + lambda_col * collision_count
-            else:
-                # No valid L2 errors: model is broken, use penalty fitness
-                fitness = float('inf')  # Worst possible fitness (will be rejected by PSO)
-        else:
+        discrete:    fitness = -(N_pos - N_neg - 0.5 * N_mid - 10 * N_col)
+        continuous:  fitness = sum of L2 errors
+        continuous2: fitness = sum of L2 errors + 10 * N_col
+
+        N_col counts frames whose plan collides (within the time horizon) at a step where
+        the expert does not; the other frames are positive (L2 < threshold_good), middle
+        (L2 <= threshold_bad) or negative. L2 uses the expert's step mask (VAD rule). For
+        semSegRep with threshold_good == threshold_bad, the threshold is the median of the
+        original L2 in the JSON and there are no middle frames.
+
+        All frames are evaluated at once on the GPU (see repair_common/frame_cache.py); the
+        decoder runs in chunks of _eval_batch_size frames.
+
+        With use_original_l2_for_classification=True, L2 and collisions are read from the
+        JSON (frames without a stored L2 are skipped) and the model is not run.
+        """
+        if fitness_type not in ('discrete', 'continuous', 'continuous2'):
             raise ValueError(f"Unknown fitness_type: {fitness_type}")
-        
-        # Return fitness and frame counts for logging (only for original model evaluation)
+        repaired_layers.eval()
+        device = next(repaired_layers.parameters()).device if hasattr(repaired_layers, 'parameters') \
+            else self.device
+        n_steps = TIMESTEPS.get(time_horizon, 6)
+
+        def discrete(n_pos, n_mid, n_neg, n_col):
+            return -(1.0 * n_pos - 1.0 * n_neg - 0.5 * n_mid - 10.0 * n_col)
+
+        def counts_dict(n_pos, n_mid, n_neg, n_col):
+            return {'positive_no_collision': n_pos, 'middle_no_collision': n_mid,
+                    'negative_no_collision': n_neg, 'collision': n_col,
+                    'total_evaluated': n_pos + n_mid + n_neg + n_col}
+
+        if len(frame_data_dict) == 0:
+            print("  [WARNING] frame_data_dict is empty! No frames to evaluate.")
+            if use_original_l2_for_classification:
+                return float('inf'), counts_dict(0, 0, 0, 0)
+            return float('inf')
+        cache = self._frame_cache(frame_data_dict, device)
+
+        # semSegRep with one threshold: the median of the original L2 in the JSON
+        th_good, th_bad = threshold_good, threshold_bad
+        single_threshold = rep_method == 'semSegRep' and threshold_good == threshold_bad
+        median_found = False
+        if single_threshold:
+            stored = cache.field(f'plan_L2_{time_horizon}s')
+            stored = stored[np.isfinite(stored)]
+            if len(stored):
+                th_good = th_bad = float(np.median(stored))
+                median_found = True
+            elif not use_original_l2_for_classification:
+                print(f"  [WARNING] semSegRep: Could not compute median L2, using provided threshold {threshold_good}")
+
+        # Original model, methods other than Arachne: classes from the localisation lists
+        # and the collision flags stored in the JSON (discrete fitness needs no L2)
+        if (use_original_l2_for_classification and fitness_type == 'discrete'
+                and rep_method not in ('Arachne_v1', 'Arachne_v2')
+                and positive_frames and negative_frames and not (single_threshold and median_found)):
+            pos_set, neg_set = set(positive_frames), set(negative_frames)
+            keys = list(frame_data_dict.keys())
+            col = cache.has_collision
+            in_pos = np.array([k in pos_set for k in keys])
+            in_neg = np.array([k in neg_set for k in keys])
+            n_col = int(col.sum())
+            n_pos = int((~col & in_pos).sum())
+            n_neg = int((~col & ~in_pos & in_neg).sum())
+            n_mid = cache.n - n_col - n_pos - n_neg
+            return discrete(n_pos, n_mid, n_neg, n_col), counts_dict(n_pos, n_mid, n_neg, n_col)
+
         if use_original_l2_for_classification:
-            frame_counts = {
-                'positive_no_collision': positive_no_collision_count,
-                'middle_no_collision': middle_no_collision_count,
-                'negative_no_collision': negative_no_collision_count,
-                'collision': collision_count,
-                'total_evaluated': total_frames_evaluated
-            }
-            
-        # Add debug logging similar to VAD (for individual evaluation)
+            # Original model: L2 and collisions as stored in the JSON
+            l2 = cache.field(f'plan_L2_{time_horizon}s')
+            keep = np.isfinite(l2)
+            l2 = l2[keep]
+            col = (np.nan_to_num(cache.field(f'plan_obj_box_col_{time_horizon}s'), nan=0.0) > 0)[keep]
+        else:
+            batch_size = self._eval_batch_size(device)
+            l2_parts, col_parts = [], []
+            with torch.no_grad():
+                for s in range(0, cache.n, batch_size):
+                    e = min(s + batch_size, cache.n)
+                    raw = repaired_layers(cache.feats[s:e])            # (B, 12): 6 steps x 2
+                    if raw.dim() == 1:
+                        raw = raw.unsqueeze(0)
+                    if raw.dim() == 2 and raw.shape[1] != 12:
+                        raise RuntimeError(f"Unsupported pred_traj shape {tuple(raw.shape)}. "
+                                           f"Expected (batch, 12) for UniAD.")
+                    pred = raw.view(-1, 6, 2) if raw.dim() == 2 else raw
+                    cmd = cache.cmd[s:e]
+                    l2_parts.append(self._compute_l2_error_gpu(pred, cache.gt[s:e], cmd, time_horizon=time_horizon,
+                                                               gt_mask=cache.gt_mask[s:e]))
+                    pred_abs = self._pred_traj_to_abs_gpu(raw, cmd)[:, :6, :2]
+                    col_parts.append(cache.collision(pred_abs, s, n_steps))
+            l2 = torch.cat(l2_parts).double().cpu().numpy()
+            col = torch.cat(col_parts).cpu().numpy()
+
+        finite = np.isfinite(l2)
+        valid_frame_count = int(finite.sum())
+        # Sequential float64 sum in frame order (a Python sum over the list), so that the
+        # value does not depend on how the frames are chunked
+        total_l2_error = float(sum(l2[finite].tolist()))
+
+        below = l2 < th_good                                           # NaN/inf L2 -> negative
+        if single_threshold:
+            n_pos = int((~col & below).sum())
+            n_mid = 0
+            n_neg = int((~col & ~below).sum())
+        else:
+            within = l2 <= th_bad
+            n_pos = int((~col & below).sum())
+            n_mid = int((~col & ~below & within).sum())
+            n_neg = int((~col & ~below & ~within).sum())
+        n_col = int(col.sum())
+
+        if fitness_type == 'discrete':
+            fitness = discrete(n_pos, n_mid, n_neg, n_col)
+        elif fitness_type == 'continuous':
+            fitness = float('inf') if valid_frame_count == 0 else total_l2_error
+        else:
+            fitness = float('inf') if valid_frame_count == 0 else total_l2_error + 10.0 * n_col
+
         if not use_original_l2_for_classification:
             mean_l2 = total_l2_error / valid_frame_count if valid_frame_count > 0 else float('inf')
             print(f"[fitness-debug] fitness={fitness:.6f} total_l2={total_l2_error:.6f} mean_l2={mean_l2:.6f} "
-                  f"collision_count={collision_count} valid_frames={valid_frame_count}", flush=True)
-
+                  f"collision_count={n_col} valid_frames={valid_frame_count}", flush=True)
         return float(fitness)
-    
+
     def _compute_l2_error(self, pred_traj, gt_traj, cmd_idx=0):
         """
         Compute L2 error between predicted and ground truth trajectories.

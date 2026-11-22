@@ -55,7 +55,6 @@ python3 run_experiment.py \
   --closed-loop-is-bench2drive True \
   --time-horizon 3 \
   --occ-output-dir baseline/VAD/vad_occ_cache \
-  --collision-num-workers 13 \
   > logs/run_openloop_repair_1.out 2>&1 &
 
 CUDA_VISIBLE_DEVICES=0 \
@@ -87,7 +86,6 @@ python3 run_experiment.py \
   --closed-loop-is-bench2drive True \
   --time-horizon 3 \
   --occ-output-dir baseline/VAD/vad_occ_cache \
-  --collision-num-workers 13 \
   > logs/run_openloop_repair_2.out 2>&1 &
 
 CUDA_VISIBLE_DEVICES=0 \
@@ -119,7 +117,6 @@ python3 run_experiment.py \
   --closed-loop-is-bench2drive True \
   --time-horizon 3 \
   --occ-output-dir baseline/VAD/vad_occ_cache \
-  --collision-num-workers 13 \
   > logs/run_openloop_repair_3.out 2>&1 &
 
 CUDA_VISIBLE_DEVICES=0 \
@@ -151,7 +148,6 @@ python3 run_experiment.py \
   --closed-loop-is-bench2drive True \
   --time-horizon 3 \
   --occ-output-dir baseline/VAD/vad_occ_cache \
-  --collision-num-workers 13 \
   > logs/run_openloop_repair_4.out 2>&1 &
 
 CUDA_VISIBLE_DEVICES=0 \
@@ -183,7 +179,6 @@ python3 run_experiment.py \
   --closed-loop-is-bench2drive True \
   --time-horizon 3 \
   --occ-output-dir baseline/VAD/vad_occ_cache \
-  --collision-num-workers 13 \
   > logs/run_openloop_repair_5.out 2>&1 &
 
 CUDA_VISIBLE_DEVICES=0 \
@@ -215,7 +210,6 @@ python3 run_experiment.py \
   --closed-loop-is-bench2drive True \
   --time-horizon 3 \
   --occ-output-dir baseline/VAD/vad_occ_cache \
-  --collision-num-workers 13 \
   > logs/run_openloop_repair_6.out 2>&1 &
 
 wait

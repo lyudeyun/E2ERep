@@ -293,9 +293,6 @@ def main():
     parser.add_argument('--fitness-type', type=str, default='discrete',
                        choices=['discrete', 'continuous', 'continuous2'])
     parser.add_argument('--time-horizon', type=int, choices=[1, 2, 3], default=3)
-    parser.add_argument('--collision-num-workers', type=int, default=None,
-                       help='Number of worker processes for collision evaluation. '
-                            'If omitted, auto-choose a safe default.')
     parser.add_argument(
         '--use-cached-eval',
         action='store_true',
@@ -472,13 +469,6 @@ def main():
 
     # Build Arachne
     arachne = ArachnePyTorch()
-    if args.collision_num_workers is None:
-        print("[WARN] --collision-num-workers not set; defaulting to 1 (serial). "
-              "This may be slow. Consider setting it explicitly, e.g. --collision-num-workers 8.")
-        args.collision_num_workers = 1
-    if args.collision_num_workers < 1:
-        parser.error("--collision-num-workers must be >= 1")
-    
     arachne.set_options(
         num_particles=args.num_particles,
         num_iterations=args.num_iterations,
@@ -488,7 +478,6 @@ def main():
         optimization_algorithm=args.search_algo,
         pred_traj_is_delta=True,
         apply_bivariate_activation=True,
-        collision_num_workers=args.collision_num_workers,
     )
 
     output_dir = Path(args.output_dir)

@@ -45,9 +45,6 @@ class ArachneBase:
         self.de_crossover_rate = 0.9  # CR in [0, 1], typically 0.9
         self.de_mutation_factor = 0.8  # F in [0, 2], typically 0.5-1.0
         self.de_strategy = 'rand/1/bin'  # DE strategy: 'rand/1/bin', 'best/1/bin', 'rand/2/bin', etc.
-        self.collision_num_workers = 0  # 0/1 = serial, >1 = parallel collision evaluation
-        self._collision_pool = None
-        self._collision_pool_workers = None
 
     def set_options(self, **kwargs):
         """Set options for Arachne."""
@@ -96,8 +93,21 @@ class ArachneBase:
         if 'de_strategy' in kwargs:
             # DE strategy: 'rand/1/bin', 'best/1/bin', 'rand/2/bin', etc.
             self.de_strategy = kwargs['de_strategy']
-        if 'collision_num_workers' in kwargs:
-            self.collision_num_workers = int(kwargs['collision_num_workers'])
+
+    def _eval_batch_size(self, device):
+        """Frames per decoder forward pass: the configured value, else by GPU memory."""
+        if self.eval_batch_size is not None:
+            return self.eval_batch_size
+        if device.type != 'cuda':
+            return 32
+        gpu_memory_gb = torch.cuda.get_device_properties(device).total_memory / (1024 ** 3)
+        if gpu_memory_gb >= 60:
+            return 1024
+        if gpu_memory_gb >= 24:
+            return 256
+        if gpu_memory_gb >= 12:
+            return 128
+        return 64
 
     def _find_target_layers(self, model):
         if self.target_layer:

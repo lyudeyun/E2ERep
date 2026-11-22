@@ -289,7 +289,7 @@ def run_repair(model_name, model_type, baseline_json, exp_dir, repo_root,
               alpha=0.5, layers=None,
               fitness_type='continuous', num_particles=200, num_iterations=100, 
               num_weights_to_repair=100, rep_method='Arachne_v1', early_stop_patience=None,
-              search_algo='PSO', cuda_device='0', time_horizon=3, collision_num_workers=None,
+              search_algo='PSO', cuda_device='0', time_horizon=3,
               save_full_ckpt=False):
     """Run repair process. Returns the repaired model as a .patch.pt (or a legacy full .pth)."""
     print("\n" + "="*80)
@@ -350,9 +350,6 @@ def run_repair(model_name, model_type, baseline_json, exp_dir, repo_root,
     # Add time horizon parameter
     cmd.extend(['--time-horizon', str(time_horizon)])
 
-    # Optional: collision worker parallelism
-    if collision_num_workers is not None:
-        cmd.extend(['--collision-num-workers', str(collision_num_workers)])
     
     # Always use cached evaluation for VAD repair
     if model_type == "VAD":
@@ -783,7 +780,6 @@ def run_single_experiment(run_idx, model_name, model_type, repair_dataset, eval_
         search_algo=args.search_algo,
         cuda_device=args.eval_cuda_device,
         time_horizon=getattr(args, 'time_horizon', 3),
-        collision_num_workers=getattr(args, 'collision_num_workers', None),
         save_full_ckpt=getattr(args, 'save_full_ckpt', False),
     )
     if not repaired_model:
@@ -884,9 +880,6 @@ def main():
     parser.add_argument('--save-full-ckpt', type=str2bool, default=False,
                        help='Also keep the full repaired checkpoint (~0.7-1 GB per run). '
                             'Default: only a lossless patch against the original checkpoint.')
-    parser.add_argument('--collision-num-workers', type=int, default=None,
-                       help='Number of worker processes for collision evaluation in repair. '
-                            'If omitted, repair script auto-chooses a default.')
     parser.add_argument('--time-horizon', type=int, choices=[1, 2, 3], default=3,
                        help='Time horizon for L2 error and collision: 1s (2 timesteps), 2s (4 timesteps), or 3s (6 timesteps, default). '
                             'This affects both L2 error computation and collision detection.')
