@@ -300,13 +300,18 @@ For VAD-base, use the same command with `--model-type VAD`, `--model-name VAD_ba
     ln -sf ../Bench2DriveZoo/team_code/* ./team_code/
     ```
 
-* **Faster VAD agent:** [`Bench2DriveZoo/team_code/vad_b2d_agent_gpu.py`](./Bench2DriveZoo/team_code/vad_b2d_agent_gpu.py) is a faster version of [`vad_b2d_agent.py`](./Bench2DriveZoo/team_code/vad_b2d_agent.py) in the same folder (which stays unchanged). It processes each camera image as soon as CARLA sends it (the cameras arrive about 8 ms apart) and runs the image pre-processing on the GPU, with the per-tick constants (mean, 1/std, resize indices and weights) prepared once. Select it with `AGENT_IMPL=gpu` in the VAD closed-loop batch script (`--version normal` only):
+* **Faster agents (GPU pre-processing):** [`vad_b2d_agent_gpu.py`](./Bench2DriveZoo/team_code/vad_b2d_agent_gpu.py) and [`uniad_b2d_agent_gpu.py`](./Bench2DriveZoo/team_code/uniad_b2d_agent_gpu.py) in `Bench2DriveZoo/team_code/` are faster versions of `vad_b2d_agent.py` and `uniad_b2d_agent.py` (which stay unchanged), with the same camera resolution. They share [`gpu_preproc.py`](./Bench2DriveZoo/team_code/gpu_preproc.py): each camera image is processed as soon as CARLA sends it (the cameras arrive about 8 ms apart), and the image pre-processing runs on the GPU, with the per-tick constants (mean, 1/std, resize indices and weights) prepared once.
+
+    | Agent | Select with | Outputs vs. the original agent |
+    |---|---|---|
+    | `vad_b2d_agent_gpu.py` | `AGENT_IMPL=gpu` in the VAD closed-loop batch script (`--version normal` only) | the GPU resize is not bit-identical to cv2: planned waypoints differ by up to ~1.5 cm |
+    | `uniad_b2d_agent_gpu.py` | `TEAM_AGENT=Bench2DriveZoo/team_code/uniad_b2d_agent_gpu.py` at the top of the UniAD evaluation scripts | identical (the UniAD pipeline has no resize) |
 
     ```bash
     AGENT_IMPL=gpu bash leaderboard/scripts/batch_closed_loop_eval_vad_based_on_best_open_loop_setting.sh ...
     ```
 
-    On a Town12 route of Bench2Drive220 (one instance, RTX PRO 6000) one tick takes about 205-215 ms instead of 442 ms; the rest is mostly VAD inference (~100 ms) and the rendering of the six cameras (~50 ms). Normalisation, padding and stacking are bit-identical to the original agent; the GPU resize is not bit-identical to cv2, so planned waypoints differ by up to ~1.5 cm.
+    For VAD on a Town12 route of Bench2Drive220 (one instance, RTX PRO 6000) one tick takes about 210 ms instead of 442 ms; the rest is mostly VAD inference (~100 ms) and the rendering of the six cameras (~50 ms).
 
 * **Run evaluations:**
 
