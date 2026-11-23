@@ -300,6 +300,14 @@ For VAD-base, use the same command with `--model-type VAD`, `--model-name VAD_ba
     ln -sf ../Bench2DriveZoo/team_code/* ./team_code/
     ```
 
+* **Faster VAD agent:** [`Bench2DriveZoo/team_code/vad_b2d_agent_gpu.py`](./Bench2DriveZoo/team_code/vad_b2d_agent_gpu.py) is a faster version of [`vad_b2d_agent.py`](./Bench2DriveZoo/team_code/vad_b2d_agent.py) in the same folder (which stays unchanged). It processes each camera image as soon as CARLA sends it (the cameras arrive about 8 ms apart) and runs the image pre-processing on the GPU, with the per-tick constants (mean, 1/std, resize indices and weights) prepared once. Select it with `AGENT_IMPL=gpu` in the VAD closed-loop batch script (`--version normal` only):
+
+    ```bash
+    AGENT_IMPL=gpu bash leaderboard/scripts/batch_closed_loop_eval_vad_based_on_best_open_loop_setting.sh ...
+    ```
+
+    On a Town12 route of Bench2Drive220 (one instance, RTX PRO 6000) one tick takes about 205-215 ms instead of 442 ms; the rest is mostly VAD inference (~100 ms) and the rendering of the six cameras (~50 ms). Normalisation, padding and stacking are bit-identical to the original agent; the GPU resize is not bit-identical to cv2, so planned waypoints differ by up to ~1.5 cm.
+
 * **Run evaluations:**
 
     Multi-GPU: set `TASK_NUM`, `GPU_RANK_LIST`, `TASK_LIST`, `TEAM_AGENT`, and `TEAM_CONFIG`. Single GPU: run `run_evaluation_single_*.sh` and edit `BASE_ROUTES`, `TEAM_*`, and related variables at the top (for `Dev10`, point `BASE_ROUTES` at `leaderboard/data/drivetransformer_bench2drive_dev10` instead of `Bench2Drive220`; see comments in those scripts). Debug images can use a lot of disk space.

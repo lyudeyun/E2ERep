@@ -298,6 +298,24 @@ else
   exit 1
 fi
 
+# Optional faster agent (Bench2DriveZoo/team_code/vad_b2d_agent_gpu.py):
+#   AGENT_IMPL=gpu    image pre-processing on the GPU, each camera image processed on arrival.
+#                     About twice as fast; the GPU resize is not bit-identical to cv2, so planned
+#                     waypoints differ from the original agent by up to ~1.5 cm.
+AGENT_IMPL="${AGENT_IMPL:-original}"
+if [ "${AGENT_IMPL}" != "original" ]; then
+  if [ "${AGENT_IMPL}" != "gpu" ]; then
+    echo "ERROR: Unknown AGENT_IMPL: ${AGENT_IMPL} (original | gpu)" 1>&2
+    exit 1
+  fi
+  if [ "${VERSION_NAME}" != "normal" ]; then
+    echo "ERROR: AGENT_IMPL=gpu requires --version normal" 1>&2
+    exit 1
+  fi
+  TEAM_AGENT="${REPO_ROOT}/Bench2DriveZoo/team_code/vad_b2d_agent_gpu.py"
+  echo "INFO: using ${TEAM_AGENT}"
+fi
+
 # Sanity-check paths
 if [ ! -f "${TEAM_AGENT}" ]; then
   echo "ERROR: Team agent not found: ${TEAM_AGENT}" 1>&2
