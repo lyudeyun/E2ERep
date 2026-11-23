@@ -482,7 +482,7 @@ class UniadAgent(autonomous_agent.AutonomousAgent):
         self.pid_metadata['plan'] = out_truck.tolist()
         metric_info = self.get_metric_info()
         self.metric_info[self.step] = metric_info
-        if SAVE_PATH is not None and self.step % 1 == 0:
+        if SAVE_PATH is not None and self.step % 10 == 0:  # files are numbered step // 10
             self.save(tick_data)
         self.prev_control = control
         return control
