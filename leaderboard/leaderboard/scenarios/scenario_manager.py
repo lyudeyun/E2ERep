@@ -58,6 +58,7 @@ class ScenarioManager(object):
         self._debug_mode = debug_mode
         self._agent_wrapper = None
         self._running = False
+        self.time_limit = None  # game time (s) at which the route is ended, see leaderboard_evaluator.py
         self._timestamp_last_run = 0.0
         self._timeout = float(timeout)
 
@@ -159,6 +160,8 @@ class ScenarioManager(object):
 
         while self._running:
             self._tick_scenario()
+            if self.time_limit is not None and GameTime.get_time() >= self.time_limit:
+                self._running = False  # same exit as a finished scenario tree
 
     def _tick_scenario(self):
         """

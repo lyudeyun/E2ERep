@@ -19,6 +19,7 @@ from distutils.version import LooseVersion
 import importlib
 import os
 import pkg_resources
+import json
 import shlex
 import sys
 
@@ -215,7 +216,16 @@ class LeaderboardEvaluator(object):
         print(f"Starting CARLA server pid={self.server.pid}: {cmd1}", flush=True)
         print(f"CARLA server log: {server_log_path}", flush=True)
         atexit.register(os.killpg, self.server.pid, signal.SIGKILL)
-        time.sleep(30)
+        # Wait until the server answers: its start-up takes longer than 30 s when the GPU is busy, and a
+        # client that connects too early waits for the full client time-out (600 s) in get_world().
+        for _ in range(600):
+            try:
+                probe = carla.Client(args.host, args.port)
+                probe.set_timeout(5.0)
+                probe.get_server_version()
+                break
+            except RuntimeError:
+                time.sleep(1)
             
         attempts = 0
         num_max_restarts = 20
@@ -420,7 +430,15 @@ class LeaderboardEvaluator(object):
                 self.client.start_recorder("{}/{}_rep{}.log".format(args.record, config.name, config.repetition_index))
             self.manager.load_scenario(self.route_scenario, self.agent_instance, config.index, config.repetition_index)
             self.manager.tick_count = 0
+            # Routes on which CARLA crashed twice at about the same game time get a time limit 5 s before the
+            # earliest crash (written by leaderboard/scripts/run_closed_loop_eval.sh into route_time_limits.json next
+            # to the checkpoint); the route is ended there and its driving score is the one reached by then.
+            limits = os.path.join(os.path.dirname(os.path.abspath(args.checkpoint)), 'route_time_limits.json')
+            self.manager.time_limit = json.load(open(limits))['limits'].get(route_name) if os.path.exists(limits) else None
             self.manager.run_scenario()
+            if self.manager.time_limit is not None and GameTime.get_time() >= self.manager.time_limit:
+                print(f"{route_name}: stopped at the time limit {self.manager.time_limit} s", flush=True)
+                crash_message = "Stopped at the time limit"  # a bare 'Failed' would be run again on resume
 
         except AgentError:
             # The agent has failed -> stop the route
@@ -509,11 +527,12 @@ class LeaderboardEvaluator(object):
             self.statistics_manager.validate_and_write_statistics(self.sensors_initialized, crashed)
         
         if crashed:
-            # Pattern starts with '-'; use 'grep -F --' so grep does not treat it as options.
+            # Kill only this run's CARLA server (by its port), not every server on the GPU, which would also
+            # stop the other evaluations running in parallel. 'grep -F --': the pattern starts with '-'.
             cmd2 = (
-                "ps -ef | grep -F -- '-graphicsadapter="
-                + str(args.gpu_rank)
-                + "' | grep -v grep | awk '{print $2}' | xargs -r kill -9"
+                "ps -ef | grep -F -- '-carla-rpc-port="
+                + str(args.port)
+                + " ' | grep -v grep | awk '{print $2}' | xargs -r kill -9"
             )
             server = subprocess.Popen(cmd2, shell=True, preexec_fn=os.setsid)
             atexit.register(os.killpg, server.pid, signal.SIGKILL)

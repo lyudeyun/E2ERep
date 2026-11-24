@@ -152,19 +152,63 @@ echo "SAVE_PATH=${SAVE_PATH}"
 echo "PLANNER_TYPE=${PLANNER_TYPE}"
 echo "GPU_RANK=${GPU_RANK}"
 
-CUDA_VISIBLE_DEVICES="${GPU_RANK}" python "${LEADERBOARD_ROOT}/leaderboard/leaderboard_evaluator.py" \
-  --routes="${ROUTES}" \
-  --repetitions=1 \
-  --track="${CHALLENGE_TRACK_CODENAME}" \
-  --checkpoint="${CHECKPOINT_ENDPOINT}" \
-  --debug-checkpoint="${SAVE_PATH}/live_results.txt" \
-  --agent="${TEAM_AGENT}" \
-  --agent-config="${TEAM_CONFIG}" \
-  --debug=0 \
-  --record="${RECORD_PATH:-}" \
-  --resume=True \
-  --port="${PORT}" \
-  --traffic-manager-port="${TM_PORT}" \
-  --gpu-rank="${GPU_RANK}"
-
-
+# Restart after a CARLA crash. A crashed CARLA either makes the evaluator exit or leaves it waiting
+# forever; either way the evaluator prints one of the leaderboard's simulator time-out messages. Its
+# output is checked every 30 s; on such a message the evaluator and its CARLA are killed and the
+# evaluator is started again, which resumes from the checkpoint at the interrupted route (that route
+# starts over). Some routes crash CARLA at the same game time on every run, so at every crash the
+# route and the game time it had reached are recorded in route_time_limits.json next to the
+# checkpoint; once a route has crashed twice it gets a time limit 5 s before its earliest crash, at
+# which leaderboard_evaluator.py ends it (status 'Failed - Stopped at the time limit').
+# At most EVAL_MAX_RESTARTS (default 10) restarts.
+TIMEOUT_MSGS='time-out of 600000ms while waiting for the simulator|The simulation took longer than 600.0s to update|Watchdog exception - Timeout of 601.0 seconds occured'
+OUT=$(mktemp)
+for n in $(seq 0 "${EVAL_MAX_RESTARTS:-10}"); do
+  : > "${OUT}"
+  CUDA_VISIBLE_DEVICES="${GPU_RANK}" setsid python "${LEADERBOARD_ROOT}/leaderboard/leaderboard_evaluator.py" \
+    --routes="${ROUTES}" \
+    --repetitions=1 \
+    --track="${CHALLENGE_TRACK_CODENAME}" \
+    --checkpoint="${CHECKPOINT_ENDPOINT}" \
+    --debug-checkpoint="${SAVE_PATH}/live_results.txt" \
+    --agent="${TEAM_AGENT}" \
+    --agent-config="${TEAM_CONFIG}" \
+    --debug=0 \
+    --record="${RECORD_PATH:-}" \
+    --resume=True \
+    --port="${PORT}" \
+    --traffic-manager-port="${TM_PORT}" \
+    --gpu-rank="${GPU_RANK}" > >(tee "${OUT}") 2>&1 &
+  PID=$!
+  while kill -0 "${PID}" 2>/dev/null; do
+    sleep 30
+    if grep -qE "${TIMEOUT_MSGS}" "${OUT}"; then kill -9 -- -"${PID}" || true; break; fi
+  done
+  wait "${PID}" && CODE=0 || CODE=$?
+  grep -qE "${TIMEOUT_MSGS}" "${OUT}" || break
+  # this run's CARLA server (in its own process group; the evaluator may have moved it to another port)
+  CARLA_PID=$(grep -oE 'Starting CARLA server pid=[0-9]+' "${OUT}" | tail -n 1 | cut -d= -f2 || true)
+  if [ -n "${CARLA_PID}" ]; then kill -9 -- -"${CARLA_PID}" || true; fi
+  sleep 5
+  python - "${OUT}" "$(dirname "${CHECKPOINT_ENDPOINT}")/route_time_limits.json" <<'PY2'
+import json, os, re, sys
+out, path = sys.argv[1:]
+text = open(out, errors='ignore').read()
+runs = list(re.finditer(r'Preparing (\S+) \(repetition (\d+)\)', text))
+times = re.findall(r'Game time = ([0-9.]+)', text[runs[-1].end():]) if runs else []
+if not times:
+    sys.exit()                                   # the crash came between two routes
+route, t = f'{runs[-1][1]}_rep{runs[-1][2]}', float(times[-1])
+d = json.load(open(path)) if os.path.exists(path) else {'crashes': {}, 'limits': {}}
+crashes = d['crashes'].setdefault(route, [])
+crashes.append(t)
+if len(crashes) >= 2:
+    d['limits'][route] = round(max(min(crashes) - 5.0, 0.0), 2)
+json.dump(d, open(path, 'w'), indent=1)
+print(f"[restart] {route} crashed at game time {t} s (crashes: {crashes})"
+      + (f", time limit {d['limits'][route]} s" if route in d['limits'] else ''))
+PY2
+  echo "[restart] CARLA timed out; restart $((n + 1)), resuming from the checkpoint"
+done
+rm -f "${OUT}"
+exit "${CODE}"
