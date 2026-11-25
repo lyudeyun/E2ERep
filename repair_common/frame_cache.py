@@ -289,7 +289,7 @@ def uniad_gt_mask(frame_data):
 if __name__ == '__main__':
     import argparse
     ap = argparse.ArgumentParser(description='Pack the occupancy grids of baseline JSONs into <name>.occ.npz.')
-    ap.add_argument('jsons', nargs='+', help='baseline JSONs, e.g. baseline/VAD/vad_base_baseline_b2d_infos_val.json')
+    ap.add_argument('jsons', nargs='+', help='baseline JSONs, e.g. baseline/VAD/b2d_val/vad_base_baseline_b2d_infos_val.json')
     ap.add_argument('--key', default='occ', help="array name in the per-frame files: 'occ' (VAD) or 'seg' (UniAD)")
     ap.add_argument('--delete', action='store_true', help='remove the per-frame files once the pack is verified')
     args = ap.parse_args()

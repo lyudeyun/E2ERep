@@ -513,7 +513,7 @@ def main():
         # Legacy code scaled plan_obj_box_col_3s mean * 6121 * 6 to #colls, which
         # mis-represented valid frames with collisions; now taken from baseline JSON.
         BASELINE_L2_3S = 1.4262655224607823
-        # baseline/VAD/vad_base_baseline_b2d_infos_val_partB_25clips.json:
+        # baseline/VAD/b2d_val/vad_base_baseline_b2d_infos_val_partB_25clips.json:
         # - collision_frames (valid & plan_obj_box_col_3s>0) = 80
         # - collision_events (sum plan_obj_box_col_3s*6) ≈ 85
         BASELINE_COLLISION_FRAME_COUNT = 80
