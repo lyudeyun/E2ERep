@@ -44,7 +44,6 @@ python3 run_experiment.py \
   --repair-num-iterations 50 \
   --repair-early-stop-patience 5 \
   --eval-cuda-device 0 \
-  --regenerate-baseline True \
   --closed-loop-eval False \
   --closed-loop-routes leaderboard/data/drivetransformer_bench2drive_dev10.xml \
   --closed-loop-team-agent Bench2DriveZoo/team_code/vad_b2d_agent.py \
@@ -75,7 +74,6 @@ python3 run_experiment.py \
   --repair-num-iterations 50 \
   --repair-early-stop-patience 5 \
   --eval-cuda-device 0 \
-  --regenerate-baseline True \
   --closed-loop-eval False \
   --closed-loop-routes leaderboard/data/drivetransformer_bench2drive_dev10.xml \
   --closed-loop-team-agent Bench2DriveZoo/team_code/vad_b2d_agent.py \
@@ -106,7 +104,6 @@ python3 run_experiment.py \
   --repair-num-iterations 50 \
   --repair-early-stop-patience 5 \
   --eval-cuda-device 0 \
-  --regenerate-baseline True \
   --closed-loop-eval False \
   --closed-loop-routes leaderboard/data/drivetransformer_bench2drive_dev10.xml \
   --closed-loop-team-agent Bench2DriveZoo/team_code/vad_b2d_agent.py \
@@ -137,7 +134,6 @@ python3 run_experiment.py \
   --repair-num-iterations 50 \
   --repair-early-stop-patience 5 \
   --eval-cuda-device 0 \
-  --regenerate-baseline True \
   --closed-loop-eval False \
   --closed-loop-routes leaderboard/data/drivetransformer_bench2drive_dev10.xml \
   --closed-loop-team-agent Bench2DriveZoo/team_code/vad_b2d_agent.py \
@@ -168,7 +164,6 @@ python3 run_experiment.py \
   --repair-num-iterations 50 \
   --repair-early-stop-patience 5 \
   --eval-cuda-device 0 \
-  --regenerate-baseline True \
   --closed-loop-eval False \
   --closed-loop-routes leaderboard/data/drivetransformer_bench2drive_dev10.xml \
   --closed-loop-team-agent Bench2DriveZoo/team_code/vad_b2d_agent.py \
@@ -199,7 +194,6 @@ python3 run_experiment.py \
   --repair-num-iterations 50 \
   --repair-early-stop-patience 5 \
   --eval-cuda-device 0 \
-  --regenerate-baseline True \
   --closed-loop-eval False \
   --closed-loop-routes leaderboard/data/drivetransformer_bench2drive_dev10.xml \
   --closed-loop-team-agent Bench2DriveZoo/team_code/vad_b2d_agent.py \

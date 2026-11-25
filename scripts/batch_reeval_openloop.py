@@ -132,7 +132,7 @@ def main():
 
     args = parser.parse_args()
     
-    repo_root = Path(__file__).parent.absolute()
+    repo_root = Path(__file__).resolve().parents[1]  # the script lives in scripts/
     exp_base_dir = Path(args.exp_dir).resolve()
     
     if not exp_base_dir.exists():

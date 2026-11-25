@@ -170,8 +170,18 @@ def generate_experiment_name(model_name, rep_method, search_algo, search_algo_pa
     return f"{model_name}_REP_VAL_{time_horizon_str}_{rep_method}_{search_algo}_{search_params}_{fitness_str}_{run_idx}"
 
 
+def shared_baseline_json(model_name, model_type, dataset, repo_root):
+    """baseline/<model type>/<source>/<model>_baseline_<dataset>.json: the original model's frames
+    on an info pkl. <source> is b2d_full for datasets built from Bench2Drive-Full (b2d_infos_full_*),
+    b2d_val for those from the official Bench2Drive val split."""
+    dataset_name = Path(dataset).stem
+    source = "b2d_full" if dataset_name.startswith("b2d_infos_full_") else "b2d_val"
+    return (repo_root / "baseline" / model_type / source /
+            f"{model_name.lower()}_baseline_{dataset_name}.json").resolve()
+
+
 def generate_baseline_json(model_name, model_type, repair_dataset, base_dir, repo_root,
-                           cuda_device='0', regenerate=False,
+                           cuda_device='0',
                            target_filename=None, cfg_options=None,
                            occ_output_dir=None):
     """
@@ -184,7 +194,6 @@ def generate_baseline_json(model_name, model_type, repair_dataset, base_dir, rep
         base_dir: Base experiments directory (baseline JSON will be stored here)
         repo_root: Repository root directory
         cuda_device: CUDA device ID
-        regenerate: If True, regenerate even if file exists
     Returns:
         Path to baseline JSON file, or None if failed
     """
@@ -202,10 +211,9 @@ def generate_baseline_json(model_name, model_type, repair_dataset, base_dir, rep
         log_file = (base_dir / f"{model_lower}_baseline_{dataset_name}.log").resolve()
     
     # Check if baseline already exists
-    # If file exists, always reuse it (ignore regenerate flag to avoid unnecessary recomputation)
+    # An existing baseline is always reused
     if baseline_json.exists():
         print(f"\nBaseline JSON already exists: {baseline_json}")
-        print("Reusing existing baseline (regenerate flag is ignored if file exists).")
         return baseline_json
     
     print("\n" + "="*80)
@@ -402,8 +410,13 @@ def run_repair(model_name, model_type, baseline_json, exp_dir, repo_root,
 
 
 def run_evaluation(model_name, model_type, repaired_model, eval_dataset, exp_dir, repo_root,
-                   cuda_device='0', use_tmpfs_data=False, occ_output_dir=None):
-    """Run evaluation process."""
+                   cuda_device='0', use_tmpfs_data=False, occ_output_dir=None, eval_mode='cached'):
+    """Open-loop evaluation of a full repaired checkpoint on eval_dataset.
+
+    eval_mode 'cached' (VAD): only the planning head changes in a repair, so it is run on the
+    decoder inputs cached in the original model's baseline JSON of eval_dataset (generated once
+    if missing) and scored as test.py scores it; same per-frame results as 'full' (collisions
+    identical, L2 within 1e-5 m) in seconds. 'full': test.py on the camera images."""
     print("\n" + "="*80)
     print("Running Open-loop Evaluation")
     print("="*80)
@@ -417,6 +430,12 @@ def run_evaluation(model_name, model_type, repaired_model, eval_dataset, exp_dir
     eval_dir.mkdir(exist_ok=True)
     model_lower = model_name.lower()
     output_json = (eval_dir / f"{model_lower}_rep_val.json").resolve()
+
+    if eval_mode == 'cached':
+        if model_type == "VAD":
+            return run_cached_evaluation(model_name, model_type, repaired_model, eval_dataset,
+                                         output_json, repo_root, cuda_device)
+        print("Cached evaluation is implemented for VAD only; running test.py.")
     
     # Build cfg-options string
     ann_file = str(eval_dataset)
@@ -518,6 +537,44 @@ def run_evaluation(model_name, model_type, repaired_model, eval_dataset, exp_dir
         # test.py writes one occupancy file per frame; pack them into <output>.occ.npz
         from repair_common.frame_cache import pack_occ
         pack_occ(output_json, 'occ' if model_type == "VAD" else 'seg', delete=True)
+    return True
+
+
+def run_cached_evaluation(model_name, model_type, repaired_model, eval_dataset, output_json, repo_root,
+                          cuda_device='0'):
+    """eval_mode 'cached' of run_evaluation (VAD): writes output_json in test.py's format."""
+    import json
+    import torch
+    from repair_common.frame_cache import evaluate_vad_planner, load_vad_decoder, occ_pack_path
+
+    baseline_json = shared_baseline_json(model_name, model_type, eval_dataset, repo_root)
+    if not baseline_json.exists():
+        print(f"No baseline of the original model on {Path(eval_dataset).name} yet; generating it once.")
+        baseline_json.parent.mkdir(parents=True, exist_ok=True)
+        if not generate_baseline_json(model_name, model_type, str(eval_dataset), baseline_json.parent, repo_root,
+                                      cuda_device, target_filename=baseline_json.name,
+                                      occ_output_dir=str(baseline_json.parent / "occ_tmp")):
+            return False
+    pack = occ_pack_path(baseline_json)
+    if not Path(pack).exists():
+        print(f"ERROR: occupancy pack {pack} missing (python repair_common/frame_cache.py {baseline_json})")
+        return False
+    print(f"Cached evaluation of {repaired_model} on {baseline_json}")
+    state = torch.load(str(repaired_model), map_location='cpu')
+    device = f"cuda:{cuda_device}"
+    decoder = load_vad_decoder(state.get('state_dict', state), device)
+    records = evaluate_vad_planner(decoder, json.load(open(baseline_json)), pack, device)
+    with open(output_json, 'w') as f:
+        json.dump(records, f, indent=2)
+    valid = [r for r in records if r.get('fut_valid_flag')]
+    summary = {k: sum(r[k] for r in valid) / len(valid) for k in
+               ('plan_L2_1s', 'plan_L2_2s', 'plan_L2_3s', 'plan_obj_box_col_1s', 'plan_obj_box_col_2s', 'plan_obj_box_col_3s')}
+    with open(output_json.with_suffix('.log'), 'w') as f:
+        f.write(f"cached evaluation (planning head on the cached decoder inputs)\n"
+                f"run: {output_json.parent.parent}\nframes: {baseline_json}\noccupancy: {pack}\n"
+                f"{len(records)} frames, {len(valid)} with a full expert future; their means:\n"
+                + "".join(f"  {k}: {v:.6f}\n" for k, v in summary.items()))
+    print(f"Evaluation results: {output_json}")
     return True
 
 
@@ -639,7 +696,7 @@ def run_single_experiment(run_idx, model_name, model_type, repair_dataset, eval_
     """Run a single experiment."""
     # Helper to build cfg-options string for Bench2Drive data.
     def _build_cfg_options(ann_file: str) -> str:
-        if getattr(args, "use_tmpfs_data", False):
+        if args.use_tmpfs_data:
             tmpfs_base = "/mnt/bench2drive_ram"
             print("\nUsing tmpfs dataset for baseline/evaluation:")
             if model_type == "VAD":
@@ -674,7 +731,7 @@ def run_single_experiment(run_idx, model_name, model_type, repair_dataset, eval_
     exp_name = generate_experiment_name(
         model_name, args.rep_method, args.search_algo, search_algo_params,
         args.fitness, run_idx, base_dir,
-        time_horizon=getattr(args, 'time_horizon', 3)
+        time_horizon=args.time_horizon
     )
     exp_dir = base_dir / exp_name
     exp_dir.mkdir(exist_ok=True)
@@ -685,11 +742,10 @@ def run_single_experiment(run_idx, model_name, model_type, repair_dataset, eval_
     
     # Step 1: Get baseline JSON
     # If user provides a precomputed baseline JSON, prefer it:
-    # - If the file exists: use it directly (regenerate flag is ignored).
+    # - If the file exists: use it directly.
     # - If it does NOT exist: generate it into the same folder at the specified path.
     # Otherwise, use a shared "baseline" folder under repo_root to cache/reuse baselines.
-    # Note: If baseline JSON exists, it is always reused (regenerate flag is ignored).
-    if getattr(args, 'baseline_json', None):
+    if args.baseline_json:
         user_baseline = Path(args.baseline_json)
         if not user_baseline.is_absolute():
             user_baseline = repo_root / user_baseline
@@ -711,26 +767,18 @@ def run_single_experiment(run_idx, model_name, model_type, repair_dataset, eval_
                 baseline_dir,
                 repo_root,
                 args.eval_cuda_device,
-                regenerate=True,
                 target_filename=baseline_name,
                 cfg_options=_build_cfg_options(str(repair_dataset)),
-                occ_output_dir=args.occ_output_dir,
+                occ_output_dir=args.occ_output_dir or str(baseline_dir / "occ_tmp"),
             )
     else:
         # Use a shared "baseline" folder under repo_root
-        model_lower = model_name.lower()
-        dataset_name = Path(repair_dataset).stem
-        # baseline/<model type>/<source>/: b2d_full for datasets built from Bench2Drive-Full
-        # (b2d_infos_full_*), b2d_val for those from the official Bench2Drive val split
-        source = "b2d_full" if dataset_name.startswith("b2d_infos_full_") else "b2d_val"
-        baseline_dir = repo_root / "baseline" / model_type / source
+        baseline_json = shared_baseline_json(model_name, model_type, repair_dataset, repo_root)
+        baseline_dir, baseline_filename = baseline_json.parent, baseline_json.name
         baseline_dir.mkdir(parents=True, exist_ok=True)
-        baseline_filename = f"{model_lower}_baseline_{dataset_name}.json"
-        baseline_json = (baseline_dir / baseline_filename).resolve()
 
         if baseline_json.exists():
             print(f"\nBaseline JSON already exists in shared baseline folder: {baseline_json}")
-            print("Reusing existing baseline (regenerate flag is ignored if file exists).")
         else:
             baseline_json = generate_baseline_json(
                 model_name,
@@ -739,10 +787,9 @@ def run_single_experiment(run_idx, model_name, model_type, repair_dataset, eval_
                 baseline_dir,
                 repo_root,
                 args.eval_cuda_device,
-                regenerate=False,
                 target_filename=baseline_filename,
                 cfg_options=_build_cfg_options(str(repair_dataset)),
-                occ_output_dir=args.occ_output_dir,
+                occ_output_dir=args.occ_output_dir or str(baseline_dir / "occ_tmp"),
             )
     
     if not baseline_json:
@@ -775,7 +822,7 @@ def run_single_experiment(run_idx, model_name, model_type, repair_dataset, eval_
     repaired_model = run_repair(
         model_name, model_type, baseline_json, exp_dir, repo_root,
         alpha=args.repair_alpha,
-        layers=getattr(args, 'repair_layers', None),
+        layers=args.repair_layers,
         fitness_type=args.fitness,
         num_particles=args.repair_num_particles,
         num_iterations=args.repair_num_iterations,
@@ -784,8 +831,8 @@ def run_single_experiment(run_idx, model_name, model_type, repair_dataset, eval_
         early_stop_patience=args.repair_early_stop_patience,
         search_algo=args.search_algo,
         cuda_device=args.eval_cuda_device,
-        time_horizon=getattr(args, 'time_horizon', 3),
-        save_full_ckpt=getattr(args, 'save_full_ckpt', False),
+        time_horizon=args.time_horizon,
+        save_full_ckpt=args.save_full_ckpt,
     )
     if not repaired_model:
         return False
@@ -808,15 +855,16 @@ def _evaluate_repaired(model_name, model_type, repaired_model, eval_dataset, exp
         exp_dir,
         repo_root,
         cuda_device=args.eval_cuda_device,
-        use_tmpfs_data=getattr(args, "use_tmpfs_data", False),
+        use_tmpfs_data=args.use_tmpfs_data,
         occ_output_dir=args.eval_occ_output_dir,
+        eval_mode=args.eval_mode,
     )
 
     if not success:
         return False
 
     # Step 4 (optional): Run closed-loop evaluation
-    if getattr(args, 'closed_loop_eval', False):
+    if args.closed_loop_eval:
         success = run_closed_loop_evaluation(
             model_name, model_type, repaired_model, exp_dir, repo_root, args
         )
@@ -942,24 +990,22 @@ def main():
     )
     # Baseline generation (only used when --baseline-json is not provided)
     parser.add_argument(
-        '--regenerate-baseline',
-        type=str2bool,
-        default=False,
-        help='[DEPRECATED] This flag is ignored if baseline JSON already exists. '
-             'Baseline JSON is always reused if found to avoid unnecessary recomputation. '
-             'Only used when baseline JSON does not exist yet.'
-    )
-    parser.add_argument(
         '--occ-output-dir',
         type=str,
-        required=True,
-        help='Directory to save per-frame occupancy/segmentation for baseline JSON generation.'
+        default=None,
+        help='Where test.py writes the per-frame occupancy while a missing baseline JSON is generated '
+             '(packed into <baseline>.occ.npz afterwards and removed). Default: occ_tmp next to the baseline.'
     )
     parser.add_argument(
         '--eval-occ-output-dir',
         type=str,
         default=None,
         help='Optional directory to save occupancy during open-loop evaluation.'
+    )
+    parser.add_argument(
+        '--eval-mode', choices=['cached', 'full'], default='cached',
+        help="Open-loop evaluation: 'cached' (VAD; planning head on the cached decoder inputs of the "
+             "original model's baseline of --eval-dataset, seconds) or 'full' (test.py on the images)."
     )
     
     args = parser.parse_args()
@@ -983,10 +1029,6 @@ def main():
     # Calculate repair_num_particles from multiplier and num_weights
     args.repair_num_particles = args.repair_particles_multiplier * args.repair_num_weights
 
-    # Decide occ output dirs (baseline vs eval)
-    baseline_occ_output_dir = args.occ_output_dir
-    eval_occ_output_dir = args.eval_occ_output_dir
-    
     # Auto-generate exp_dir if not specified
     if args.exp_dir is None:
         model_lower = args.model_name.lower()
@@ -1000,7 +1042,7 @@ def main():
     base_dir.mkdir(parents=True, exist_ok=True)  # Create parents if missing
 
     # If using tmpfs data, sanity-check that the in-memory dataset exists.
-    if getattr(args, "use_tmpfs_data", False):
+    if args.use_tmpfs_data:
         tmpfs_base = Path("/mnt/bench2drive_ram")
         data_root = tmpfs_base / "bench2drive"
         info_root = tmpfs_base / "infos"
@@ -1106,29 +1148,25 @@ def main():
         exit_code = 0 if total_success_count == total_experiments else 1
 
         # Optional email notification
-        try:
-            script_path = Path(__file__).resolve()
-            cmd_line = " ".join(sys.argv)
-            subj = f"[E2ERep] Experiments finished (model={args.model_name}, fitness=all)"
-            body_lines = [
-                f"Script: {script_path}",
-                f"Command line: {cmd_line}",
-                "",
-                f"Model type: {args.model_type}",
-                f"Model name: {args.model_name}",
-                f"Rep method: {args.rep_method}",
-                f"Search algo: {args.search_algo}",
-                f"Fitness types: {fitness_types}",
-                f"Num runs per type: {args.num_runs}",
-                f"Exp dir: {base_dir}",
-                "",
-                f"Overall successful: {total_success_count}/{total_experiments}",
-                f"Exit code: {exit_code}",
-            ]
-            send_email_notification(subj, "\n".join(body_lines))
-        except Exception as _e:
-            # Email failures must not fail the job
-            pass
+        script_path = Path(__file__).resolve()
+        cmd_line = " ".join(sys.argv)
+        subj = f"[E2ERep] Experiments finished (model={args.model_name}, fitness=all)"
+        body_lines = [
+            f"Script: {script_path}",
+            f"Command line: {cmd_line}",
+            "",
+            f"Model type: {args.model_type}",
+            f"Model name: {args.model_name}",
+            f"Rep method: {args.rep_method}",
+            f"Search algo: {args.search_algo}",
+            f"Fitness types: {fitness_types}",
+            f"Num runs per type: {args.num_runs}",
+            f"Exp dir: {base_dir}",
+            "",
+            f"Overall successful: {total_success_count}/{total_experiments}",
+            f"Exit code: {exit_code}",
+        ]
+        send_email_notification(subj, "\n".join(body_lines))
 
         return exit_code
     else:
@@ -1161,28 +1199,25 @@ def main():
         exit_code = 0 if success_count == args.num_runs else 1
 
         # Optional email notification
-        try:
-            script_path = Path(__file__).resolve()
-            cmd_line = " ".join(sys.argv)
-            subj = f"[E2ERep] Experiments finished (model={args.model_name}, fitness={args.fitness})"
-            body_lines = [
-                f"Script: {script_path}",
-                f"Command line: {cmd_line}",
-                "",
-                f"Model type: {args.model_type}",
-                f"Model name: {args.model_name}",
-                f"Rep method: {args.rep_method}",
-                f"Search algo: {args.search_algo}",
-                f"Fitness type: {args.fitness}",
-                f"Num runs: {args.num_runs}",
-                f"Exp dir: {base_dir}",
-                "",
-                f"Successful runs: {success_count}/{args.num_runs}",
-                f"Exit code: {exit_code}",
-            ]
-            send_email_notification(subj, "\n".join(body_lines))
-        except Exception as _e:
-            pass
+        script_path = Path(__file__).resolve()
+        cmd_line = " ".join(sys.argv)
+        subj = f"[E2ERep] Experiments finished (model={args.model_name}, fitness={args.fitness})"
+        body_lines = [
+            f"Script: {script_path}",
+            f"Command line: {cmd_line}",
+            "",
+            f"Model type: {args.model_type}",
+            f"Model name: {args.model_name}",
+            f"Rep method: {args.rep_method}",
+            f"Search algo: {args.search_algo}",
+            f"Fitness type: {args.fitness}",
+            f"Num runs: {args.num_runs}",
+            f"Exp dir: {base_dir}",
+            "",
+            f"Successful runs: {success_count}/{args.num_runs}",
+            f"Exit code: {exit_code}",
+        ]
+        send_email_notification(subj, "\n".join(body_lines))
 
         return exit_code
 

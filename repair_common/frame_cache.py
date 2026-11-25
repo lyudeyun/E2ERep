@@ -242,6 +242,61 @@ class UniADFrameCache(FrameCache):
         return r, c
 
 
+VAD_DECODER_PREFIX = 'pts_bbox_head.ego_fut_decoder.'
+
+
+def load_vad_decoder(state_dict, device):
+    """VAD's planning MLP (ego_fut_decoder: 512 -> 512 -> 512 -> 6 commands x 6 steps x 2) with the
+    weights of a checkpoint's state_dict."""
+    import torch.nn as nn
+    dec = nn.Sequential(nn.Linear(512, 512), nn.ReLU(), nn.Linear(512, 512), nn.ReLU(), nn.Linear(512, 72))
+    dec.load_state_dict({k[len(VAD_DECODER_PREFIX):]: v for k, v in state_dict.items()
+                         if k.startswith(VAD_DECODER_PREFIX)})
+    return dec.to(device).eval()
+
+
+def evaluate_vad_planner(decoder, records, pack_file, device, batch=4096):
+    """Open-loop planning metrics of a VAD planning head on the frames of a baseline JSON.
+
+    records: the frames of the JSON written by adzoo/vad/test.py --collect-data for the original
+    model (its cached decoder inputs ego_features, commands, expert trajectories, occupancy);
+    pack_file: the JSON's occupancy pack. Only the planning head changes in a repair, so its
+    output on these inputs is the repaired model's plan, and the metrics are computed as
+    VAD.compute_planner_metric_stp3 does: per horizon k s, plan_L2_ks is the mean distance to
+    the expert over the first 2k steps and plan_obj_box_col_ks the fraction of those steps at
+    which the ego box hits an occupied cell where the expert's does not (0 / -1 for frames
+    without a full expert future). Returns copies of the records with predictions (all
+    commands, cumulated to positions) and these metrics replaced."""
+    from mmcv.models.dense_heads.planning_head_plugin.metric_stp3 import PlanningMetric
+    feats = torch.tensor(np.array([r['ego_features'] for r in records], dtype=np.float32), device=device)
+    with torch.no_grad():
+        out = torch.cat([decoder(feats[s:s + batch]) for s in range(0, len(records), batch)])
+    plans = torch.cumsum(out.view(-1, 6, 6, 2), dim=2)              # (N, command, step, xy)
+
+    valid = [i for i, r in enumerate(records) if r.get('fut_valid_flag')]
+    frames = [{'ego_features': records[i]['ego_features'], 'gt_future_traj': records[i]['ground_truth'],
+               'ego_fut_cmd_idx': records[i].get('ego_fut_cmd_idx', 0), 'occ_path': records[i]['occ_path'],
+               'occ_pack': pack_file} for i in valid]
+    resolve = lambda p: p if os.path.isabs(p) else os.path.join(REPO_ROOT, p)
+    cache = VADFrameCache({i: f for i, f in enumerate(frames)}, device, PlanningMetric(), resolve)
+    idx = torch.tensor(valid, device=device, dtype=torch.long)
+    plan = plans[idx, cache.cmd.clamp(0, 5)]                        # (V, 6, 2), each frame's command
+    dist = torch.sqrt(((plan - cache.gt) ** 2).sum(-1))             # (V, 6)
+    hit = torch.cat([cache._occupied(plan[s:s + batch], s) for s in range(0, cache.n, batch)]) & ~cache.gt_occupied
+
+    preds = plans.cpu().numpy().tolist()
+    out_records = [dict(r, predictions=preds[i], plan_L2_1s=0.0, plan_L2_2s=0.0, plan_L2_3s=0.0,
+                        plan_obj_box_col_1s=-1.0, plan_obj_box_col_2s=-1.0, plan_obj_box_col_3s=-1.0)
+                   for i, r in enumerate(records)]
+    for k in (1, 2, 3):
+        l2 = dist[:, :2 * k].mean(1).tolist()
+        col = hit[:, :2 * k].float().mean(1).tolist()
+        for j, i in enumerate(valid):
+            out_records[i][f'plan_L2_{k}s'] = l2[j]
+            out_records[i][f'plan_obj_box_col_{k}s'] = col[j]
+    return out_records
+
+
 def uniad_gt_mask(frame_data):
     """(6, 2) float32 L2 mask of the expert trajectory, as the UniAD evaluation built it
     (the same shape handling as convert_uniad_to_vad_metrics.py; all ones if missing)."""

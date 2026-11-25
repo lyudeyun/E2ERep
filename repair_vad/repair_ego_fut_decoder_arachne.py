@@ -749,7 +749,13 @@ def main():
         weights = arachne.localize(wrapper, input_neg, output_dir=output_dir)
     
     print(f"\nFound {len(weights)} weights to repair")
-    
+    # Save the localized weights with their real layer names (used by the gradient-based techniques)
+    real_name = dict(zip(wrapper.layer_names, wrapper.target_layer_names))
+    with open(output_dir / 'localized_weights.json', 'w') as f:
+        json.dump({'rep_method': args.rep_method, 'repair_json': str(args.json),
+                   'weights': [{'layer': real_name[w[0]], 'i': int(w[1]), 'j': int(w[2])} for w in weights]},
+                  f, indent=1)
+
     # Build frame data for evaluation
     frame_data_dict = None
     positive_frames = None
@@ -1162,9 +1168,9 @@ def main():
     print("="*70)
     print(f"Repaired {len(weights)} weights across {len(args.layers)} layer(s)")
     print(f"Layers: {', '.join(args.layers)}")
-    print(f"Saved to: {save_path}")
+    print(f"Saved to: {patch_path}")
     print(f"\nOutput files:")
-    print(f"  - {save_path}")
+    print(f"  - {patch_path}")
     print(f"  - {output_dir / 'pareto_front.png'}")
     print(f"  - {output_dir / 'fitness_history.json'}")
     print(f"  - {output_dir / 'fitness_convergence.png'}")
