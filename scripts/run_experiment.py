@@ -282,6 +282,10 @@ def generate_baseline_json(model_name, model_type, repair_dataset, base_dir, rep
         return None
     
     print(f"Baseline JSON generated: {baseline_json}")
+    if occ_output_dir:
+        # test.py writes one occupancy file per frame; pack them into <baseline>.occ.npz
+        from repair_common.frame_cache import pack_occ
+        pack_occ(baseline_json, 'occ' if model_type == "VAD" else 'seg', delete=True)
     return baseline_json
 
 
@@ -510,6 +514,10 @@ def run_evaluation(model_name, model_type, repaired_model, eval_dataset, exp_dir
         return False
 
     print(f"Evaluation results: {output_json}")
+    if occ_output_dir:
+        # test.py writes one occupancy file per frame; pack them into <output>.occ.npz
+        from repair_common.frame_cache import pack_occ
+        pack_occ(output_json, 'occ' if model_type == "VAD" else 'seg', delete=True)
     return True
 
 

@@ -10,7 +10,7 @@ import json
 from tqdm import tqdm
 from mmcv.models.dense_heads.planning_head_plugin.metric_stp3 import PlanningMetric
 from repair_common.arachne_base import ArachneBase
-from repair_common.frame_cache import TIMESTEPS, VADFrameCache
+from repair_common.frame_cache import occ_pack_path, TIMESTEPS, VADFrameCache
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -477,6 +477,9 @@ def build_frame_data_dict(json_file, frame_identifiers=None):
         - 'gt_future_traj': np.ndarray, ground truth trajectory
         - 'plan_L2_3s': float, original L2 error
     """
+    # occupancy grids of this JSON, packed into one file (repair_common.frame_cache.pack_occ)
+    occ_pack = occ_pack_path(json_file)
+    occ_pack = occ_pack if os.path.exists(occ_pack) else None
     print(f"Building frame data dictionary from {json_file}...")
     print(f"  frame_identifiers: {type(frame_identifiers)}, count={len(frame_identifiers) if frame_identifiers else 'None'}")
     
@@ -541,6 +544,8 @@ def build_frame_data_dict(json_file, frame_identifiers=None):
         occ_path = frame.get('occ_path', None)
         if occ_path:
             frame_data['occ_path'] = str(occ_path)
+            if occ_pack:
+                frame_data['occ_pack'] = occ_pack
         
         # Add ground truth trajectory if available
         gt_traj = None
