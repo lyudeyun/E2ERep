@@ -749,11 +749,12 @@ def main():
         weights = arachne.localize(wrapper, input_neg, output_dir=output_dir)
     
     print(f"\nFound {len(weights)} weights to repair")
-    # Save the localized weights with their real layer names (used by the gradient-based techniques)
+    # Save the localized weights with their real layer names (used by the gradient-based techniques).
+    # Arachne indexes a weight as (input, output); i, j here index the PyTorch weight[out, in].
     real_name = dict(zip(wrapper.layer_names, wrapper.target_layer_names))
     with open(output_dir / 'localized_weights.json', 'w') as f:
         json.dump({'rep_method': args.rep_method, 'repair_json': str(args.json),
-                   'weights': [{'layer': real_name[w[0]], 'i': int(w[1]), 'j': int(w[2])} for w in weights]},
+                   'weights': [{'layer': real_name[w[0]], 'i': int(w[2]), 'j': int(w[1])} for w in weights]},
                   f, indent=1)
 
     # Build frame data for evaluation
