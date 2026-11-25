@@ -23,13 +23,7 @@ def _resolve_occ_path(occ_path):
     repo_root = Path(__file__).resolve().parents[3]
 
     path_str = str(occ_path)
-    
-    # Fix legacy path structure: insert /VAD/ if missing (UniAD might use similar structure?)
-    if "baseline/vad_occ_cache" in path_str and "/VAD/" not in path_str:
-        path_str = path_str.replace("baseline/vad_occ_cache", "baseline/VAD/vad_occ_cache")
-    if "baseline/uniad_occ_cache" in path_str and "/UniAD/" not in path_str:
-        path_str = path_str.replace("baseline/uniad_occ_cache", "baseline/UniAD/uniad_occ_cache")
-    
+
     if os.path.isabs(path_str):
         return path_str
     

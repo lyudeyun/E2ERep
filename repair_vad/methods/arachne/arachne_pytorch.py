@@ -19,11 +19,7 @@ def _resolve_occ_path(occ_path):
         return occ_path
     
     path_str = str(occ_path)
-    
-    # Fix legacy path structure: insert /VAD/ if missing
-    if "baseline/vad_occ_cache" in path_str and "/VAD/" not in path_str:
-        path_str = path_str.replace("baseline/vad_occ_cache", "baseline/VAD/vad_occ_cache")
-    
+
     # If absolute, return as is
     if os.path.isabs(path_str):
         return path_str
