@@ -11,6 +11,7 @@ It must not be modified and is for reference only!
 """
 
 from __future__ import print_function
+import math
 import signal
 import sys
 import time
@@ -26,6 +27,78 @@ from srunner.scenariomanager.watchdog import Watchdog
 from leaderboard.autoagents.agent_wrapper import AgentWrapperFactory, AgentError, TickRuntimeError
 from leaderboard.envs.sensor_interface import SensorReceivedNoData
 from leaderboard.utils.result_writer import ResultOutputProvider
+
+# Standing-still rule (early termination, off unless ScenarioManager.still_limit is set): every
+# STILL_EVERY ticks the ego counts as standing still if its speed is below STILL_SPEED; the time it
+# has been standing still without a traffic reason (waiting_exempt) is accumulated, and the route
+# is ended once it reaches still_limit seconds of game time.
+STILL_EVERY = 10        # ticks (0.5 s at 20 Hz)
+STILL_SPEED = 0.1       # m/s
+NEAR_RADIUS = 60.0      # m, actors considered for "traffic moving nearby"
+_TL_RANK = {'Red': 3, 'Yellow': 2, 'Green': 1}
+
+
+class StillSignals(object):
+    """Per-route signals of the standing-still rule, from the simulator (map, lights, actors)."""
+
+    def __init__(self):
+        self.prev = {}     # actor id -> (x, y) at the previous update
+        self.types = {}    # vehicle / walker actor ids -> type id
+
+    def update(self, ego, tick_count):
+        """
+        v                 ego speed (m/s)
+        tl_at, tl_state   ego at a traffic light / its state (Red, Yellow, Green, Off, Unknown)
+        tl_ahead          worst state of the traffic lights on the lane ahead within 30 m (or None)
+        junction          0 in a junction, 5/10/15/20 = junction that many m ahead, None = none within 20 m
+        n_near            vehicles + walkers within NEAR_RADIUS m of the ego
+        max_disp          largest displacement of those actors since the previous update (m)
+        near_moving       distance to the nearest of them that moved > 0.25 m since then (or None)
+        front_moving      the same, only actors within 25 m in front (within 60 deg of the heading)
+        """
+        world = CarlaDataProvider.get_world()
+        if tick_count % 40 == 0 or not self.types:
+            self.types = {a.id: a.type_id for a in world.get_actors() if a.type_id.startswith(('vehicle.', 'walker.'))}
+        et = ego.get_transform()
+        el, yaw = et.location, math.radians(et.rotation.yaw)
+        vel = ego.get_velocity()
+        cur, max_disp, near_moving, front_moving, n_near = {}, 0.0, None, None, 0
+        for a in world.get_snapshot():
+            if a.id == ego.id or a.id not in self.types:
+                continue
+            loc = a.get_transform().location
+            cur[a.id] = (loc.x, loc.y)
+            dx, dy = loc.x - el.x, loc.y - el.y
+            d = math.hypot(dx, dy)
+            if d > NEAR_RADIUS:
+                continue
+            n_near += 1
+            if a.id in self.prev:
+                disp = math.hypot(loc.x - self.prev[a.id][0], loc.y - self.prev[a.id][1])
+                max_disp = max(max_disp, disp)
+                if disp > 0.25:
+                    near_moving = d if near_moving is None else min(near_moving, d)
+                    bearing = (math.atan2(dy, dx) - yaw + math.pi) % (2 * math.pi) - math.pi
+                    if d < 25 and abs(bearing) < math.radians(60):
+                        front_moving = d if front_moving is None else min(front_moving, d)
+        self.prev = cur
+
+        wp = CarlaDataProvider.get_map().get_waypoint(el)
+        lights = [str(tl.get_state()) for tl in world.get_traffic_lights_from_waypoint(wp, 30.0)]
+        junction = 0 if wp.is_junction else next(
+            (d for d in (5, 10, 15, 20) if any(w.is_junction for w in wp.next(d))), None)
+        return dict(v=math.hypot(vel.x, vel.y), tl_at=bool(ego.is_at_traffic_light()),
+                    tl_state=str(ego.get_traffic_light_state()),
+                    tl_ahead=max(lights, key=lambda x: _TL_RANK.get(x, 0)) if lights else None,
+                    junction=junction, n_near=n_near, max_disp=max_disp,
+                    near_moving=near_moving, front_moving=front_moving)
+
+
+def waiting_exempt(s):
+    """Standing still for a traffic reason: a red/yellow light ahead or at the ego, or in or near
+    (<= 20 m) a junction while traffic moves within NEAR_RADIUS m."""
+    red = s['tl_ahead'] in ('Red', 'Yellow') or (s['tl_at'] and s['tl_state'] in ('Red', 'Yellow'))
+    return red or (s['junction'] is not None and s['near_moving'] is not None)
 
 
 class ScenarioManager(object):
@@ -59,6 +132,8 @@ class ScenarioManager(object):
         self._agent_wrapper = None
         self._running = False
         self.time_limit = None  # game time (s) at which the route is ended, see leaderboard_evaluator.py
+        self.still_limit = None  # standing-still rule: seconds without a traffic reason; None = off
+        self.stopped_still = False
         self._timestamp_last_run = 0.0
         self._timeout = float(timeout)
 
@@ -158,10 +233,22 @@ class ScenarioManager(object):
         self._scenario_thread = threading.Thread(target=self.build_scenarios_loop, args=(self._debug_mode > 0, ))
         self._scenario_thread.start()
 
+        self.stopped_still = False
+        still, still_s, last_tick, last_t = StillSignals(), 0.0, None, GameTime.get_time()
         while self._running:
             self._tick_scenario()
             if self.time_limit is not None and GameTime.get_time() >= self.time_limit:
                 self._running = False  # same exit as a finished scenario tree
+            if self.still_limit and self._running and self.tick_count % STILL_EVERY == 0 \
+                    and self.tick_count != last_tick:
+                now = GameTime.get_time()
+                s = still.update(self.ego_vehicles[0], self.tick_count)
+                standing = s['v'] < STILL_SPEED and not waiting_exempt(s)
+                still_s = still_s + (now - last_t) if standing else 0.0
+                last_tick, last_t = self.tick_count, now
+                if still_s >= self.still_limit:
+                    self.stopped_still = True
+                    self._running = False
 
     def _tick_scenario(self):
         """

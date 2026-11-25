@@ -128,6 +128,7 @@ else
   fi
 fi
 export PYTHONPATH=$PYTHONPATH:"${REPO_ROOT}"
+export PYTHONPATH=$PYTHONPATH:"${REPO_ROOT}/Bench2DriveZoo"  # mmcv, adzoo (Bench2DriveZoo's own, not installed)
 export PYTHONPATH=$PYTHONPATH:leaderboard
 export PYTHONPATH=$PYTHONPATH:leaderboard/team_code
 export PYTHONPATH=$PYTHONPATH:scenario_runner

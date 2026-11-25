@@ -129,7 +129,8 @@ class RouteParser(object):
                 scenario_config.name = scenario.attrib.get('name')
                 scenario_config.type = scenario.attrib.get('type')
 
-                for elem in scenario.getchildren():
+                # Element.getchildren() was removed in Python 3.9+
+                for elem in list(scenario):
                     if elem.tag == 'trigger_point':
                         scenario_config.trigger_points.append(convert_elem_to_transform(elem))
                     elif elem.tag == 'other_actor':

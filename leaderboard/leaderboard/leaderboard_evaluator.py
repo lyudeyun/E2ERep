@@ -435,10 +435,16 @@ class LeaderboardEvaluator(object):
             # to the checkpoint); the route is ended there and its driving score is the one reached by then.
             limits = os.path.join(os.path.dirname(os.path.abspath(args.checkpoint)), 'route_time_limits.json')
             self.manager.time_limit = json.load(open(limits))['limits'].get(route_name) if os.path.exists(limits) else None
+            # Optional early termination: end the route once the ego has stood still for EARLY_STOP_STILL_S s
+            # of game time without a traffic reason (scenario_manager.waiting_exempt); off when unset or 0.
+            self.manager.still_limit = float(os.environ.get('EARLY_STOP_STILL_S', 0)) or None
             self.manager.run_scenario()
             if self.manager.time_limit is not None and GameTime.get_time() >= self.manager.time_limit:
                 print(f"{route_name}: stopped at the time limit {self.manager.time_limit} s", flush=True)
                 crash_message = "Stopped at the time limit"  # a bare 'Failed' would be run again on resume
+            elif self.manager.stopped_still:
+                print(f"{route_name}: stopped after standing still for {self.manager.still_limit} s", flush=True)
+                crash_message = "Stopped after standing still"
 
         except AgentError:
             # The agent has failed -> stop the route
