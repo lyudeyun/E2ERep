@@ -3,7 +3,7 @@
 Hyperparameter sensitivity: ART-ANOVA (Type III) of the 2x3x3 full factorial design.
 
 Non-parametric variance decomposition over method, fitness and weight and their interactions.
-The implementation follows the local ARTool sources: mytools/ARTool/R/ (art.R, internal.R, anova.art.R).
+The implementation follows the local ARTool sources: mytools/sensitivity/ARTool/R/ (art.R, internal.R, anova.art.R).
 
 By default it writes 4 separate ANOVA tables (not one combined table):
   - vad_l2_3s_anova_art.csv
@@ -16,11 +16,10 @@ By default it writes 4 separate ANOVA tables (not one combined table):
 
 Usage:
   conda activate b2d_zoo
-  cd mytools
-  python hyperparam_sensitivity_anova.py [--time-horizon 3s] [--out-dir DIR] [--pooled] [--data-root DIR]
+  python mytools/sensitivity/hyperparam_sensitivity_anova.py [--time-horizon 3s] [--out-dir DIR] [--pooled] [--data-root DIR]
 
 The data are read as in calculate_cohensd.py; the collision metric is #colls (collision frames) for both models.
---validate-r cross-checks against the official ARTool R package in mytools/ARTool if R is installed.
+--validate-r cross-checks against the official ARTool R package in mytools/sensitivity/ARTool if R is installed.
 --parametric uses a Type III OLS ANOVA of the raw responses (not ART; for comparison only).
 """
 
@@ -40,7 +39,8 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-# Reuse the parsing and metric extraction of calculate_cohensd
+# Reuse the parsing and metric extraction of calculate_cohensd (mytools/stats)
+sys.path[:0] = [str(Path(__file__).resolve().parent), str(Path(__file__).resolve().parents[1] / "stats")]
 from art_transform import anova_art
 from calculate_cohensd import (
     DATA_ROOT,
@@ -113,7 +113,7 @@ def collect_experiment_data(
     """Scan the experiment folders and return a long-format DataFrame."""
     cfg = get_model_config(model_type, data_root)
     converter_script = (
-        Path(__file__).resolve().parent.parent / "baseline" / "convert_uniad_to_vad_metrics.py"
+        Path(__file__).resolve().parents[2] / "baseline" / "convert_uniad_to_vad_metrics.py"
     )
     records = []
 
@@ -469,7 +469,7 @@ def main():
         "--out-dir",
         type=str,
         default=None,
-        help="output directory (default mytools/)",
+        help="output directory (default mytools/sensitivity/)",
     )
     parser.add_argument(
         "--parametric",
@@ -479,7 +479,7 @@ def main():
     parser.add_argument(
         "--validate-r",
         action="store_true",
-        help="if R is installed, also run the official mytools/ARTool implementation and write *_anova_r.csv for comparison",
+        help="if R is installed, also run the official mytools/sensitivity/ARTool implementation and write *_anova_r.csv for comparison",
     )
     parser.add_argument(
         "--combined",

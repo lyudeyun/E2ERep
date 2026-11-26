@@ -11,13 +11,13 @@ Input
 Typical usage (6 metrics -> 6x6 matrix)
 --------------------------------------
 # 1) Embedded data -> heatmap
-python3 mytools/corr_heatmap.py --out-fig corr_heatmap.pdf
+python3 mytools/stats/corr_heatmap.py --out-fig corr_heatmap.pdf
 
 # 2) Embedded data -> heatmap + upper-triangle scatter/fit (pairgrid)
-python3 mytools/corr_heatmap.py --pairgrid --out-fig corr_pairgrid.pdf
+python3 mytools/stats/corr_heatmap.py --pairgrid --out-fig corr_pairgrid.pdf
 
 # 3) External table
-python3 mytools/corr_heatmap.py \
+python3 mytools/stats/corr_heatmap.py \
   --input metrics.tsv --sep $'\\t' \
   --metrics "Avg. L2 Error,Collision,Driving Score,Success Rate,Efficiency,Comfortness" \
   --out-csv corr_matrix.csv \

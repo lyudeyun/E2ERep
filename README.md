@@ -260,7 +260,7 @@ For VAD-base, use the same command with `--model-type VAD`, `--model-name VAD_ba
     ckpt = load_patched('<run>/repair/repair_output/VAD_repaired_both_layers.patch.pt')  # same dict as the full .pth
     ```
 
-    Full checkpoints saved by older runs can be converted with [`mytools/convert_full_ckpts.py`](./mytools/convert_full_ckpts.py) (writes `<name>.patch.pt` next to each file and verifies it tensor by tensor); the same script with `--delete-verified` then removes the verified full files (dry run unless `--yes`).
+    Full checkpoints saved by older runs can be converted with [`mytools/ckpt/convert_full_ckpts.py`](./mytools/ckpt/convert_full_ckpts.py) (writes `<name>.patch.pt` next to each file and verifies it tensor by tensor); the same script with `--delete-verified` then removes the verified full files (dry run unless `--yes`).
 
 * **CLI reference:**
 

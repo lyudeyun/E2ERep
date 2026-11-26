@@ -2,10 +2,10 @@
 Python port of ARTool alignment / ranking (Wobbrock et al. 2011; Kay et al. ARTool).
 
 Reference implementation:
-  mytools/ARTool/R/art.R           — art(), residuals + aligned + rank
-  mytools/ARTool/R/internal.R      — art.estimated.effects()
-  mytools/ARTool/R/anova.art.R     — per-term Type III ANOVA on art(Y)
-  mytools/ARTool/R/flat.anova.R    — Type III via car::Anova (default)
+  mytools/sensitivity/ARTool/R/art.R           — art(), residuals + aligned + rank
+  mytools/sensitivity/ARTool/R/internal.R      — art.estimated.effects()
+  mytools/sensitivity/ARTool/R/anova.art.R     — per-term Type III ANOVA on art(Y)
+  mytools/sensitivity/ARTool/R/flat.anova.R    — Type III via car::Anova (default)
 
 Procedure (mirrors art.R lines 216–226):
   1. cell means for each model term
@@ -173,5 +173,5 @@ def anova_art(
 
     out = pd.DataFrame(rows)
     if not out.empty:
-        out["method_ref"] = "ARTool (Python port); see mytools/ARTool/R/"
+        out["method_ref"] = "ARTool (Python port); see mytools/sensitivity/ARTool/R/"
     return out

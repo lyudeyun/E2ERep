@@ -12,7 +12,7 @@ from pathlib import Path
 # Placeholder defaults only; pass --ids for a real slice.
 DEFAULT_ROUTE_IDS = [2086, 2129]
 
-_REPO_ROOT = Path(__file__).resolve().parents[1]
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 def _indent_compat(elem, level=0, space="   "):
     """Indent XML for pretty printing.

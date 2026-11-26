@@ -4,9 +4,9 @@
 
 set -e
 
-# Resolve repo root from this script's location (mytools/ -> repo root)
+# Resolve repo root from this script's location (mytools/dataset/ -> repo root)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 echo "=========================================="
 echo "Loading Bench2Drive data into memory (tmpfs)"

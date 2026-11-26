@@ -14,12 +14,12 @@ Input JSON format (list of frames) is expected to contain:
 
 Example (minimal — ``--model`` is required; omit ``--output_dir`` to auto-name under repo root from ``len(predictions)``):
 
-  conda run -n b2d_zoo python mytools/visualize_openloop.py --input Bench2DriveZoo/data/infos/b2d_repair_collect_tiny_traj.json --model vad --vad-pred-draw all
+  conda run -n b2d_zoo python mytools/visualization/visualize_openloop.py --input Bench2DriveZoo/data/infos/b2d_repair_collect_tiny_traj.json --model vad --vad-pred-draw all
 
 Example (VAD baseline + ``--compare_input`` UniAD JSON, ``--vad-pred-draw selected``, one frame; run from repository root).
 Below, ``\\`` at line end is one backslash in this file (bash line continuation)::
 
-  python mytools/visualize_openloop.py \\
+  python mytools/visualization/visualize_openloop.py \\
     --input baseline/VAD/vad_base_baseline_b2d_infos_val_partB_25clips.json \\
     --compare_input /home/deyun/git/E2ERep/E2ERep_Data/vad_base_Arachne_v2_DE_results/middle/VAD_base_REP_VAL_t3s_Arachne_v2_DE_w52_p104_i50_es5_CONT2_9/open_loop_eval/vad_base_rep_val.json \\
     --model vad \\
@@ -30,7 +30,7 @@ Below, ``\\`` at line end is one backslash in this file (bash line continuation)
     --only_scene_token 'v1/OppositeVehicleTakingPriority_Town04_Route214_Weather6' \\
     --only_frame_idx 20
   
-  python mytools/visualize_openloop.py \\
+  python mytools/visualization/visualize_openloop.py \\
     --input baseline/UniAD/uniad_base_baseline_b2d_infos_val_partB_25clips.json \\
     --compare_input /home/deyun/git/E2ERep/E2ERep_Data/uniad_base_Arachne_v2_DE_results/large/UniAD_base_REP_VAL_t3s_Arachne_v2_DE_w26_p52_i50_es5_CONT2_7/open_loop_eval/uniad_base_rep_val.json \\
     --model uniad \\
@@ -42,7 +42,7 @@ Below, ``\\`` at line end is one backslash in this file (bash line continuation)
 
 Example (UniAD only, no ``--compare_input``; no ``--vad-pred-draw``). Replace ``--input`` with your UniAD open-loop JSON path::
 
-  python mytools/visualize_openloop.py \\
+  python mytools/visualization/visualize_openloop.py \\
     --input E2ERep_Data/uniad_base_Arachne_v2_DE_results/large/UniAD_base_REP_VAL_t3s_Arachne_v2_DE_w26_p52_i50_es5_CONT2_7/open_loop_eval/uniad_base_rep_val.json \\
     --model uniad \\
     --scene \\
@@ -52,7 +52,7 @@ Example (UniAD only, no ``--compare_input``; no ``--vad-pred-draw``). Replace ``
 
 Example (VAD only, no ``--compare_input``; ``--vad-pred-draw`` is still required for ``--model vad``)::
 
-  python mytools/visualize_openloop.py \\
+  python mytools/visualization/visualize_openloop.py \\
     --input baseline/VAD/vad_base_baseline_b2d_infos_val_partB_25clips.json \\
     --model vad \\
     --vad-pred-draw all \\
@@ -62,13 +62,13 @@ Example (VAD only, no ``--compare_input``; ``--vad-pred-draw`` is still required
     --only_scene_token 'v1/OppositeVehicleTakingPriority_Town04_Route214_Weather6' \\
     --only_frame_idx 0
 
-With lane map, other agents (GT boxes), and ``mytools/ego.png`` when data exists, add ``--scene``
+With lane map, other agents (GT boxes), and ``mytools/visualization/ego.png`` when data exists, add ``--scene``
 (map polylines load from ``Bench2DriveZoo/data/infos/b2d_map_infos_by_town/{Town}.pkl``).
 
 Parameter meanings and defaults: each flag is documented in ``main()`` via
 ``parser.add_argument(..., help=...)`` (see around the ``ArgumentParser`` block), or run:
 
-  python mytools/visualize_openloop.py --help
+  python mytools/visualization/visualize_openloop.py --help
 """
 
 import argparse
@@ -391,7 +391,7 @@ class _LazyTownMapStore:
 
 
 def _default_ego_icon_path() -> str:
-    """``mytools/ego.png`` or ``mytools/ego.jpg`` next to this script."""
+    """``mytools/visualization/ego.png`` or ``ego.jpg`` next to this script."""
     mytools = Path(__file__).resolve().parent
     for name in ("ego.png", "ego.jpg"):
         cand = mytools / name
@@ -529,7 +529,7 @@ def _box_corners_xy(cx, cy, length, width, yaw):
 
 def _resolve_ego_icon_path(icon_path):
     """
-    Resolve relative paths like ego.png: absolute path, then cwd, then this script's directory (``mytools/``).
+    Resolve relative paths like ego.png: absolute path, then cwd, then this script's directory (``mytools/visualization/``).
     """
     p = Path(icon_path).expanduser()
     if p.is_file():
@@ -1513,7 +1513,7 @@ def infer_default_output_dir(frames, repo_root: Path) -> Path:
 
 def main():
     script_dir = Path(__file__).resolve().parent
-    repo_root = script_dir.parent
+    repo_root = script_dir.parents[1]
     b2d_root = repo_root / "Bench2DriveZoo"
 
     parser = argparse.ArgumentParser()
@@ -1527,7 +1527,7 @@ def main():
         default="",
         help="Output directory. If omitted or empty, auto: <repo>/trajectory_visualizations_vad_6traj "
         "(len(predictions)==6), ..._uniad_1traj (len==1), or ..._preds_<N>. "
-        "Relative paths are resolved under the repository root (parent of mytools/); absolute paths unchanged.",
+        "Relative paths are resolved under the repository root; absolute paths unchanged.",
     )
     parser.add_argument(
         "--compare_input",
@@ -1613,7 +1613,7 @@ def main():
     parser.add_argument(
         "--ego_icon",
         default="",
-        help="Ego car icon (png/jpg). Relative paths are under repo root. If empty, uses mytools/ego.png or mytools/ego.jpg when present; else vector silhouette.",
+        help="Ego car icon (png/jpg). Relative paths are under repo root. If empty, uses mytools/visualization/ego.png or ego.jpg when present; else vector silhouette.",
     )
     parser.add_argument(
         "--ego_anchor",

@@ -945,7 +945,7 @@ def main():
         default=False,
         help=(
             'If true, assume Bench2Drive data has been copied to tmpfs at '
-            '/mnt/bench2drive_ram (see mytools/COPY_TO_TMPFS.sh) and override '
+            '/mnt/bench2drive_ram (see mytools/dataset/COPY_TO_TMPFS.sh) and override '
             'data_root/info_root/map_root/map_file to use that path for both '
             'baseline generation and evaluation.'
         ),
@@ -1066,7 +1066,7 @@ def main():
                 print(f"  - {p}")
             print("\nPlease first load the Bench2Drive dataset into memory, e.g.:")
             print("  cd", repo_root)
-            print("  sudo bash mytools/COPY_TO_TMPFS.sh")
+            print("  sudo bash mytools/dataset/COPY_TO_TMPFS.sh")
             print("Then re-run this script with --use-tmpfs-data=True.")
             return 1
         else:

@@ -9,12 +9,12 @@ Convert (never deletes) -- for each full .pth listed in --list:
      full file (every state_dict tensor bitwise, plus meta/optimizer);
   4. append one JSON line to --manifest (ok, sizes, base, n changed values).
 
-  python mytools/convert_full_ckpts.py --list full_ckpts.txt --manifest manifest.jsonl
+  python mytools/ckpt/convert_full_ckpts.py --list full_ckpts.txt --manifest manifest.jsonl
 
 Delete -- remove full files with ok=true in the manifest, after re-checking that
 the patch and base still exist and the full file is unchanged. Dry run unless --yes:
 
-  python mytools/convert_full_ckpts.py --manifest manifest.jsonl --delete-verified [--yes]
+  python mytools/ckpt/convert_full_ckpts.py --manifest manifest.jsonl --delete-verified [--yes]
 """
 import argparse
 import json
@@ -25,7 +25,7 @@ import time
 
 import torch
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 from repair_common.ckpt_patch import (_split, deep_equal, file_sha256, load_patched,  # noqa: E402
                                       make_patch, save_patch)
 

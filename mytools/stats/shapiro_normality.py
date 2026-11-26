@@ -5,7 +5,7 @@ Shapiro–Wilk normality test for the 6 metrics in UniAD / VAD embedded datasets
 
 Usage
 -----
-python3 mytools/shapiro_normality.py
+python3 mytools/stats/shapiro_normality.py
 
 Notes
 -----
@@ -33,9 +33,9 @@ def _require_scipy():
 def main() -> None:
     # Import embedded data from corr_heatmap.py
     try:
-        from mytools.corr_heatmap import EMBEDDED_DATASETS, EMBEDDED_METRICS  # type: ignore
+        from mytools.stats.corr_heatmap import EMBEDDED_DATASETS, EMBEDDED_METRICS  # type: ignore
     except Exception as e:
-        raise SystemExit(f"cannot import the embedded data of mytools/corr_heatmap.py: {e}") from e
+        raise SystemExit(f"cannot import the embedded data of mytools/stats/corr_heatmap.py: {e}") from e
 
     shapiro = _require_scipy()
 

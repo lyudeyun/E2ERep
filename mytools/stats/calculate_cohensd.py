@@ -4,7 +4,7 @@ Compare experiment configurations: Wilcoxon signed-rank test and paired Cohen's 
 
 Usage:
 conda activate b2d_zoo
-python calculate_cohensd.py [--model-type vad|uniad] [--data-root DIR]
+python mytools/stats/calculate_cohensd.py [--model-type vad|uniad] [--data-root DIR]
 
 Each factor (method, fitness, weight count) is compared level by level: the configurations that
 agree in the other two factors are paired, each represented by the mean of its repetitions. A pair
@@ -316,7 +316,7 @@ def main():
         print(f"  Found {len(exp_folders)} experiment folders")
 
         # UniAD: convert JSON to VAD-style summary via convert_uniad_to_vad_metrics.py
-        converter_script = Path(__file__).resolve().parent.parent / 'baseline' / 'convert_uniad_to_vad_metrics.py'
+        converter_script = Path(__file__).resolve().parents[2] / 'baseline' / 'convert_uniad_to_vad_metrics.py'
 
         for exp_folder in exp_folders:
             log_name = get_log_name(exp_folder.name)
