@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 """
-Compute Cohen's d to compare experiment configurations.
+Compare experiment configurations: Wilcoxon signed-rank test and paired Cohen's d.
 
 Usage:
 conda activate b2d_zoo
-python calculate_cohensd.py [--model-type vad|uniad]
+python calculate_cohensd.py [--model-type vad|uniad] [--data-root DIR]
+
+Each factor (method, fitness, weight count) is compared level by level: the configurations that
+agree in the other two factors are paired, each represented by the mean of its repetitions. A pair
+of levels differs if the Wilcoxon signed-rank test gives p < ALPHA; its effect size is then the
+paired Cohen's d with Cohen's thresholds (negligible < 0.2 <= small < 0.5 <= medium < 0.8 <= large).
 
 - VAD: read plan_L2_* / plan_obj_box_col_* from open_loop_eval/<model>_rep_val.log.
 - UniAD: convert open_loop_eval/<model>_rep_val.json with baseline/convert_uniad_to_vad_metrics.py
@@ -19,6 +24,8 @@ Experiment layout:
 Metrics extracted:
 - plan_L2_1s, plan_L2_2s, plan_L2_3s (L2 error)
 - plan_obj_box_col_1s, plan_obj_box_col_2s, plan_obj_box_col_3s (collision rate)
+- collision_frame_count (#colls: valid frames that collide within 3 s)
+The tests use plan_L2_3s and #colls.
 """
 
 import os
@@ -47,6 +54,10 @@ except ImportError:
 
 from pathlib import Path
 from collections import defaultdict
+
+# Experiment results of the conference version on this machine (--data-root overrides it)
+DATA_ROOT = "/data1/deyun/E2ERep_Data"
+ALPHA = 0.05
 
 def extract_metrics_from_log(log_file):
     """
@@ -217,32 +228,33 @@ def cohens_d(group1, group2, paired=False):
 
     return d
 
-def interpret_cohens_d(d):
+def wilcoxon_p(group1, group2):
+    """Two-sided Wilcoxon signed-rank test of paired samples (p = 1 if all differences are 0)."""
+    from scipy.stats import wilcoxon
+    diffs = np.asarray(group1, dtype=np.float64) - np.asarray(group2, dtype=np.float64)
+    if not np.any(diffs):
+        return 1.0
+    return float(wilcoxon(group1, group2).pvalue)
+
+
+def effect_magnitude(d):
+    """Cohen's thresholds for |d|: negligible < 0.2 <= small < 0.5 <= medium < 0.8 <= large."""
+    a = abs(d)
+    return "negligible" if a < 0.2 else "small" if a < 0.5 else "medium" if a < 0.8 else "large"
+
+
+def interpret_cohens_d(d, p=None):
     """
-    Map Cohen's d to qualitative labels (group2 better when d > 0).
-    Rules:
-    - large_worse = d > 0.8        (group2 much better)
-    - medium_worse = 0.2 <= d <= 0.8 (group2 moderately better)
-    - small_worse = 0 < d < 0.2      (group2 slightly better)
-    - small_better = -0.2 < d < 0   (group1 slightly better)
-    - medium_better = -0.8 <= d <= -0.2 (group1 moderately better)
-    - large_better = d < -0.8       (group1 much better)
+    Label of group1 vs group2 (lower metric values are better):
+    - no_difference          if the Wilcoxon p >= ALPHA (when p is given)
+    - <magnitude>_better     if d < 0 (group1 lower)
+    - <magnitude>_worse      if d > 0 (group2 lower)
     """
     if d is None:
         return "N/A"
-    
-    if d > 0.8:
-        return "large_worse"
-    elif d >= 0.2:
-        return "medium_worse"
-    elif d > 0:
-        return "small_worse"
-    elif d > -0.2:
-        return "small_better"
-    elif d >= -0.8:
-        return "medium_better"
-    else:  # d < -0.8
-        return "large_better"
+    if p is not None and p >= ALPHA:
+        return "no_difference"
+    return f"{effect_magnitude(d)}_{'better' if d < 0 else 'worse'}"
 
 def main():
     # CLI
@@ -250,11 +262,12 @@ def main():
     # NOTE: Only 3s metrics are kept; 1s/2s/3s time-horizon CLI options were removed
     parser.add_argument('--model-type', type=str, choices=['vad', 'uniad'], default='vad',
                         help='Model type: vad or uniad (default: vad)')
+    parser.add_argument('--data-root', type=str, default=DATA_ROOT,
+                        help=f'root of the experiment results (default: {DATA_ROOT})')
     args = parser.parse_args()
 
     # Experiment roots per model type
-    # NOTE: Hard-coded data root for this machine's disk layout
-    data_root = "/data1/deyun/E2ERep_Data"
+    data_root = args.data_root
     if args.model_type == 'vad':
         base_dirs = [
             str(Path(data_root) / "vad_base_Arachne_v2_DE_results"),
@@ -461,9 +474,10 @@ def main():
     weight_labels = [f"w{w}" for w in weight_counts]
     
     # Keep 3s metrics only (drop 1s/2s comparisons)
+    # (#colls, as in the paper, rather than the collision rate plan_obj_box_col_3s)
     metrics_to_analyze = [
         'plan_L2_3s',
-        'plan_obj_box_col_3s',
+        'collision_frame_count',
     ]
     
     # Per-configuration means (3s only)
@@ -837,6 +851,7 @@ def main():
                 'weight_count': None,
                 'metric': metric,
                 'cohens_d': d,
+                'p_value': wilcoxon_p(m1_array, m2_array),
                 'mean1': float(np.mean(m1_array)),
                 'mean2': float(np.mean(m2_array)),
                 'std1': float(np.std(m1_array, ddof=1)) if len(m1_array) > 1 else 0.0,
@@ -906,6 +921,7 @@ def main():
                             'weight_count': None,
                             'metric': metric,
                             'cohens_d': d,
+                            'p_value': wilcoxon_p(vec1, vec2),
                             'mean1': float(np.mean(vec1)),
                             'mean2': float(np.mean(vec2)),
                             'std1': float(np.std(vec1, ddof=1)) if len(vec1) > 1 else 0.0,
@@ -971,6 +987,7 @@ def main():
                             'fitness_type': None,
                             'metric': metric,
                             'cohens_d': d,
+                            'p_value': wilcoxon_p(vec1, vec2),
                             'mean1': float(np.mean(vec1)),
                             'mean2': float(np.mean(vec2)),
                             'std1': float(np.std(vec1, ddof=1)) if len(vec1) > 1 else 0.0,
@@ -1008,7 +1025,7 @@ def main():
                     for _, row in metric_subset.iterrows():
                         if pd.notna(row['cohens_d']):
                             d = row['cohens_d']
-                            effect_size = interpret_cohens_d(d)
+                            effect_size = interpret_cohens_d(d, row['p_value'])
                             key = (row['group1'], row['group2'])
                             matrix[key] = effect_size
                     
@@ -1042,7 +1059,7 @@ def main():
                     for _, row in metric_subset.iterrows():
                         if pd.notna(row['cohens_d']):
                             d = row['cohens_d']
-                            effect_size = interpret_cohens_d(d)
+                            effect_size = interpret_cohens_d(d, row['p_value'])
                             key = (row['group1'], row['group2'])
                             matrix[key] = effect_size
                     
@@ -1067,9 +1084,10 @@ def main():
                         if pd.notna(row['cohens_d']):
                             d = row['cohens_d']
                             # Map d to qualitative label
-                            effect_size = interpret_cohens_d(d)
+                            effect_size = interpret_cohens_d(d, row['p_value'])
                             
-                            print(f"Metric: {metric}; {row['group1']} vs {row['group2']}: {effect_size}")
+                            print(f"Metric: {metric}; {row['group1']} vs {row['group2']}: {effect_size} "
+                                  f"(p={row['p_value']:.4f}, d={d:+.2f})")
     
     # NOTE: Only 3s metrics remain; cross-horizon (1s/2s/3s) comparisons were removed.
     print("\n" + "=" * 80)

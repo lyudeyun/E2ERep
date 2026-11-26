@@ -1,25 +1,27 @@
 #!/usr/bin/env python3
 """
-超参数敏感性分析：2×3×3 全因子设计的 ART-ANOVA（Type III）
+Hyperparameter sensitivity: ART-ANOVA (Type III) of the 2x3x3 full factorial design.
 
-对 method、fitness、weight 三个因素及其交互效应做非参数方差分解。
-实现参考本地 ARTool 源码：mytools/ARTool/R/（art.R, internal.R, anova.art.R）。
+Non-parametric variance decomposition over method, fitness and weight and their interactions.
+The implementation follows the local ARTool sources: mytools/ARTool/R/ (art.R, internal.R, anova.art.R).
 
-默认输出 4 张独立 ANOVA 表（不是 1 张合并表）：
+By default it writes 4 separate ANOVA tables (not one combined table):
   - vad_l2_3s_anova_art.csv
   - vad_collision_3s_anova_art.csv
   - uniad_l2_3s_anova_art.csv
   - uniad_collision_3s_anova_art.csv
 
-可选 --combined 额外生成 hyperparam_sensitivity_anova_all.csv（把上述 4 表纵向拼成一张，便于 Excel 查看）。
+--combined also writes hyperparam_sensitivity_anova_all.csv (the 4 tables stacked, for Excel).
+--pooled also runs a 2x2x3x3 (model x method x fitness x weight_tier) ART-ANOVA on VAD + UniAD.
 
-使用方法：
+Usage:
   conda activate b2d_zoo
-  python hyperparam_sensitivity_anova.py [--time-horizon 3s] [--out-dir DIR]
+  cd mytools
+  python hyperparam_sensitivity_anova.py [--time-horizon 3s] [--out-dir DIR] [--pooled] [--data-root DIR]
 
-数据读取逻辑与 calculate_cohensd.py 一致。
-加 --validate-r 时若已安装 R，会与 mytools/ARTool 官方 R 包结果交叉验证。
-加 --parametric 时使用原始数据的 Type III OLS（非 ART，仅作对照）。
+The data are read as in calculate_cohensd.py; the collision metric is #colls (collision frames) for both models.
+--validate-r cross-checks against the official ARTool R package in mytools/ARTool if R is installed.
+--parametric uses a Type III OLS ANOVA of the raw responses (not ART; for comparison only).
 """
 
 from __future__ import annotations
@@ -38,24 +40,40 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-# 复用 calculate_cohensd 的解析与指标提取
+# Reuse the parsing and metric extraction of calculate_cohensd
 from art_transform import anova_art
 from calculate_cohensd import (
+    DATA_ROOT,
     count_collision_frames_vad_rule,
+    count_vad_collision_from_json,
     extract_metrics_from_log,
     parse_experiment_name,
 )
 
 FACTORS = ["method", "fitness", "weight"]
+POOLED_FACTORS = ["model", "method", "fitness", "weight_tier"]
 METRIC_L2 = "plan_L2_3s"
+METRIC_COLLISION = "collision_frame_count"
+
+WEIGHT_TIER_BY_MODEL: dict[str, dict[int, str]] = {
+    "VAD": {26: "small", 52: "medium", 105: "large"},
+    "UniAD": {7: "small", 13: "medium", 26: "large"},
+}
 
 
-def get_model_config(model_type: str):
+def get_data_root(data_root: Path | None = None) -> Path:
+    if data_root is not None:
+        return data_root
+    return Path(DATA_ROOT)
+
+
+def get_model_config(model_type: str, data_root: Path | None = None):
+    root = get_data_root(data_root)
     if model_type == "vad":
         return {
             "base_dirs": [
-                "/data1/vad_base_Arachne_v2_DE_results",
-                "/data1/vad_base_semSegRep_DE_results",
+                str(root / "vad_base_Arachne_v2_DE_results"),
+                str(root / "vad_base_semSegRep_DE_results"),
             ],
             "folder_patterns": ["VAD_base_REP_VAL_*"],
             "log_name": lambda _name: "vad_base_rep_val.log",
@@ -64,8 +82,8 @@ def get_model_config(model_type: str):
         }
     return {
         "base_dirs": [
-            "/data1/uniad_base_Arachne_v2_DE_results",
-            "/data1/uniad_base_semSegRep_DE_results",
+            str(root / "uniad_base_Arachne_v2_DE_results"),
+            str(root / "uniad_base_semSegRep_DE_results"),
         ],
         "folder_patterns": ["UniAD_base_REP_VAL_*", "UniAD_tiny_REP_VAL_*"],
         "log_name": lambda name: (
@@ -78,9 +96,22 @@ def get_model_config(model_type: str):
     }
 
 
-def collect_experiment_data(model_type: str, time_horizon: str | None) -> pd.DataFrame:
-    """扫描实验目录，返回长表 DataFrame。"""
-    cfg = get_model_config(model_type)
+def _folder_time_horizon(folder_name: str) -> str | None:
+    match = re.search(r"_t([123])s_", folder_name)
+    return f"{match.group(1)}s" if match else None
+
+
+def assign_weight_tier(model_label: str, weight_count: int) -> str | None:
+    return WEIGHT_TIER_BY_MODEL.get(model_label, {}).get(int(weight_count))
+
+
+def collect_experiment_data(
+    model_type: str,
+    time_horizon: str | None,
+    data_root: Path | None = None,
+) -> pd.DataFrame:
+    """Scan the experiment folders and return a long-format DataFrame."""
+    cfg = get_model_config(model_type, data_root)
     converter_script = (
         Path(__file__).resolve().parent.parent / "baseline" / "convert_uniad_to_vad_metrics.py"
     )
@@ -93,10 +124,7 @@ def collect_experiment_data(model_type: str, time_horizon: str | None) -> pd.Dat
             continue
 
         exp_folders = []
-        search_root = base_path / time_horizon if time_horizon else base_path
-        if time_horizon and not search_root.exists():
-            print(f"Warning: {search_root} not found")
-            continue
+        search_root = base_path
         for pat in cfg["folder_patterns"]:
             for exp_folder in search_root.rglob(pat):
                 if exp_folder.is_dir():
@@ -113,6 +141,16 @@ def collect_experiment_data(model_type: str, time_horizon: str | None) -> pd.Dat
                 if not log_file.exists():
                     continue
                 metrics = extract_metrics_from_log(log_file)
+                open_loop_dir = exp_folder / "open_loop_eval"
+                vad_json = json_file
+                if not vad_json.exists() and open_loop_dir.exists():
+                    json_candidates = sorted(open_loop_dir.glob("*.json"))
+                    if len(json_candidates) == 1:
+                        vad_json = json_candidates[0]
+                if vad_json.exists() and metrics is not None:
+                    _valid, cframes, _events = count_vad_collision_from_json(vad_json)
+                    if cframes is not None:
+                        metrics["collision_frame_count"] = cframes
             else:
                 if not json_file.exists():
                     open_loop_dir = exp_folder / "open_loop_eval"
@@ -163,10 +201,10 @@ def collect_experiment_data(model_type: str, time_horizon: str | None) -> pd.Dat
                 except Exception:
                     continue
 
-            folder_path_str = str(exp_folder)
-            horizon_match = re.search(r"/([123])s/", folder_path_str)
-            folder_horizon = f"{horizon_match.group(1)}s" if horizon_match else None
+            folder_horizon = _folder_time_horizon(exp_folder.name)
             if time_horizon and folder_horizon and folder_horizon != time_horizon:
+                continue
+            if time_horizon and folder_horizon is None and f"_t{time_horizon[0]}s_" not in exp_folder.name:
                 continue
 
             method, weight_count, fitness_type, repetition = parse_experiment_name(
@@ -179,10 +217,12 @@ def collect_experiment_data(model_type: str, time_horizon: str | None) -> pd.Dat
 
             records.append(
                 {
+                    "model": cfg["label"],
                     "method": method,
                     "fitness": fitness_type,
                     "weight": str(weight_count),
                     "weight_count": int(weight_count),
+                    "weight_tier": assign_weight_tier(cfg["label"], int(weight_count)),
                     "repetition": int(repetition),
                     "folder": exp_folder.name,
                     **metrics,
@@ -192,8 +232,26 @@ def collect_experiment_data(model_type: str, time_horizon: str | None) -> pd.Dat
     return pd.DataFrame(records)
 
 
+def collect_pooled_data(time_horizon: str | None, data_root: Path | None = None) -> pd.DataFrame:
+    """Pool the VAD and UniAD observations for the model x method x fitness x weight_tier analysis."""
+    frames = []
+    for model_type in ("vad", "uniad"):
+        df = collect_experiment_data(model_type, time_horizon, data_root)
+        if not df.empty:
+            frames.append(df)
+    if not frames:
+        return pd.DataFrame()
+    pooled = pd.concat(frames, ignore_index=True)
+    missing_tier = pooled[pooled["weight_tier"].isna()]
+    if not missing_tier.empty:
+        bad = sorted(missing_tier["weight_count"].unique())
+        print(f"  Warning: dropping {len(missing_tier)} rows with unmapped weight counts: {bad}")
+        pooled = pooled[pooled["weight_tier"].notna()].copy()
+    return pooled
+
+
 def _sum_contrast_matrix(values: pd.Series) -> tuple[np.ndarray, list]:
-    """Sum-to-zero contrasts (R contr.sum)，k 水平 → k-1 列。"""
+    """Sum-to-zero contrasts (R contr.sum): k levels -> k-1 columns."""
     levels = sorted(values.unique(), key=lambda x: str(x))
     k = len(levels)
     level_to_idx = {lv: i for i, lv in enumerate(levels)}
@@ -215,8 +273,8 @@ def build_factorial_design(
     df: pd.DataFrame, factors: list[str]
 ) -> tuple[np.ndarray, dict[str, list[int]], int]:
     """
-    构建全交互模型设计矩阵（sum contrasts，无截距）。
-    返回 X, term_col_indices, n_obs
+    Design matrix of the full interaction model (sum contrasts, no intercept).
+    Returns X, term_col_indices, n_obs.
     """
     n = len(df)
     term_cols: dict[str, list[int]] = {}
@@ -257,7 +315,7 @@ def build_factorial_design(
 
 
 def _ols_sse(y: np.ndarray, X: np.ndarray) -> tuple[float, int, int]:
-    """最小二乘拟合，返回 SSE, df_model(rank), df_resid。"""
+    """Least-squares fit; returns SSE, df_model (rank), df_resid."""
     if X.size == 0:
         mean_y = float(np.mean(y))
         sse = float(np.sum((y - mean_y) ** 2))
@@ -275,8 +333,8 @@ def anova_type3(
     factors: list[str] | None = None,
 ) -> pd.DataFrame:
     """
-    Type III ANOVA（与 R car::Anova type=III + contr.sum 一致的主效应/交互检验思路）。
-    每个效应：在全模型中剔除该效应列后 SSE 增加量 / 其 df。
+    Type III ANOVA (main effects and interactions as R car::Anova(type=III) with contr.sum).
+    Each effect: the increase of SSE when its columns are dropped from the full model, divided by its df.
     """
     factors = factors or FACTORS
     sub = df[factors + [response]].dropna().copy()
@@ -289,7 +347,7 @@ def anova_type3(
     ms_error = sse_full / df_resid
 
     rows = []
-    # 按阶次输出：主效应 → 二阶交互 → 三阶交互
+    # Order of output: main effects -> two-way -> three-way interactions
     for r in range(1, len(factors) + 1):
         for combo in combinations(factors, r):
             term = _term_name(list(combo))
@@ -325,19 +383,26 @@ def anova_type3(
     return result
 
 
-def cell_count_table(df: pd.DataFrame) -> pd.DataFrame:
-    """每格重复次数（不平衡设计诊断）。"""
+def cell_count_table(df: pd.DataFrame, factors: list[str] | None = None) -> pd.DataFrame:
+    """Repetitions per cell (diagnoses an unbalanced design)."""
+    factors = factors or FACTORS
     ct = (
-        df.groupby(["method", "fitness", "weight"], dropna=False)
+        df.groupby(factors, dropna=False)
         .size()
         .reset_index(name="n")
-        .sort_values(["method", "fitness", "weight"])
+        .sort_values(factors)
     )
     return ct
 
 
-def run_art_anova_r(df: pd.DataFrame, response: str, out_csv: Path) -> bool:
-    """若 R + ARTool 可用，运行 ART-ANOVA 并写出 CSV。"""
+def run_art_anova_r(
+    df: pd.DataFrame,
+    response: str,
+    out_csv: Path,
+    factors: list[str] | None = None,
+) -> bool:
+    """If R + ARTool are available, run the ART-ANOVA in R and write a CSV."""
+    factors = factors or FACTORS
     rscript = _find_rscript()
     if rscript is None:
         return False
@@ -348,7 +413,7 @@ def run_art_anova_r(df: pd.DataFrame, response: str, out_csv: Path) -> bool:
 
     with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False, encoding="utf-8") as f:
         csv_path = f.name
-        df[["method", "fitness", "weight", response]].dropna().to_csv(f, index=False)
+        df[factors + [response]].dropna().to_csv(f, index=False)
 
     try:
         cmd = [
@@ -393,58 +458,71 @@ def format_anova_table(result: pd.DataFrame, model_label: str, metric_label: str
 
 
 def main():
-    parser = argparse.ArgumentParser(description="超参数敏感性分析（ART-ANOVA, Type III）")
+    parser = argparse.ArgumentParser(description="Hyperparameter sensitivity analysis (ART-ANOVA, Type III)")
     parser.add_argument(
         "--time-horizon",
         type=str,
         default="3s",
-        help="只读取该 time horizon 目录（默认 3s）",
+        help="read only this time horizon (default 3s)",
     )
     parser.add_argument(
         "--out-dir",
         type=str,
         default=None,
-        help="输出目录（默认 mytools/）",
+        help="output directory (default mytools/)",
     )
     parser.add_argument(
         "--parametric",
         action="store_true",
-        help="使用原始响应的 Type III OLS ANOVA（默认使用 ART-ANOVA，参考 ARTool）",
+        help="Type III OLS ANOVA of the raw responses (default: ART-ANOVA, as ARTool)",
     )
     parser.add_argument(
         "--validate-r",
         action="store_true",
-        help="若已安装 R，额外运行 mytools/ARTool 官方实现并写出 *_anova_r.csv 用于对照",
+        help="if R is installed, also run the official mytools/ARTool implementation and write *_anova_r.csv for comparison",
     )
     parser.add_argument(
         "--combined",
         action="store_true",
-        help="额外生成 hyperparam_sensitivity_anova_all.csv（4 表合并；默认只输出 4 张独立表）",
+        help="also write hyperparam_sensitivity_anova_all.csv (the 4 tables combined; default: 4 separate tables)",
+    )
+    parser.add_argument(
+        "--pooled",
+        action="store_true",
+        help="also run the model x method x fitness x weight_tier ART-ANOVA on VAD + UniAD pooled",
+    )
+    parser.add_argument(
+        "--data-root",
+        type=str,
+        default=None,
+        help=f"root of the experiment results (default: {DATA_ROOT}, as calculate_cohensd.py)",
     )
     args = parser.parse_args()
 
     out_dir = Path(args.out_dir) if args.out_dir else Path(__file__).resolve().parent
     out_dir.mkdir(parents=True, exist_ok=True)
+    data_root = Path(args.data_root) if args.data_root else None
 
     analyses = [
         ("vad", METRIC_L2, "l2_3s", "L2 error 3s"),
-        ("vad", "plan_obj_box_col_3s", "collision_3s", "collision rate 3s"),
+        ("vad", METRIC_COLLISION, "collision_3s", "collision frames 3s"),
         ("uniad", METRIC_L2, "l2_3s", "L2 error 3s"),
-        ("uniad", "collision_frame_count", "collision_3s", "collision frames 3s"),
+        ("uniad", METRIC_COLLISION, "collision_3s", "collision frames 3s"),
     ]
 
     print("=" * 80)
     mode = "parametric Type III OLS" if args.parametric else "ART-ANOVA Type III (ARTool port)"
     print(f"Hyperparameter sensitivity analysis ({mode})")
     print(f"time_horizon={args.time_horizon}")
+    print(f"data_root={get_data_root(data_root)}")
     print("=" * 80)
 
     all_tables = []
 
     for model_type, metric_col, short_name, metric_label in analyses:
-        cfg = get_model_config(model_type)
+        cfg = get_model_config(model_type, data_root)
         print(f"\n--- {cfg['label']} / {metric_label} ---")
-        df = collect_experiment_data(model_type, args.time_horizon)
+        df = collect_experiment_data(model_type, args.time_horizon, data_root)
         if df.empty:
             print("  No data; skip.")
             continue
@@ -489,7 +567,7 @@ def main():
         formatted = format_anova_table(table, cfg["label"], metric_label)
         all_tables.append(formatted)
 
-        # 主效应排序（按 partial eta²）
+        # Main effects sorted by partial eta^2
         main_effects = formatted[formatted["term"].isin(FACTORS)].copy()
         if not main_effects.empty:
             main_effects = main_effects.sort_values("partial_eta_sq", ascending=False)
@@ -505,6 +583,75 @@ def main():
                     f"p={row['p_value']:.4g}  eta²_p={row['partial_eta_sq']:.4f} {sig}"
                 )
 
+    if args.pooled:
+        print("\n" + "=" * 80)
+        print("Pooled analysis (VAD + UniAD): model × method × fitness × weight_tier")
+        print("=" * 80)
+        pooled_df = collect_pooled_data(args.time_horizon, data_root)
+        if pooled_df.empty:
+            print("  No pooled data; skip.")
+        else:
+            pooled_analyses = [
+                (METRIC_L2, "l2_3s", "L2 error 3s"),
+                (METRIC_COLLISION, "collision_3s", "collision frames 3s"),
+            ]
+            for metric_col, short_name, metric_label in pooled_analyses:
+                print(f"\n--- Pooled / {metric_label} ---")
+                if metric_col not in pooled_df.columns:
+                    print(f"  Column {metric_col} missing; skip.")
+                    continue
+
+                counts_path = out_dir / f"pooled_{short_name}_cell_counts.csv"
+                cell_count_table(pooled_df, POOLED_FACTORS).to_csv(counts_path, index=False)
+                print(f"  Cell counts: {counts_path}")
+
+                sub = pooled_df[POOLED_FACTORS + [metric_col]].dropna()
+                print(
+                    f"  Observations: {len(sub)} "
+                    f"(unique cells: {sub.groupby(POOLED_FACTORS).ngroups})"
+                )
+
+                if args.parametric:
+                    out_csv = out_dir / f"pooled_{short_name}_anova_type3.csv"
+                    try:
+                        table = anova_type3(sub, metric_col, POOLED_FACTORS)
+                    except ValueError as e:
+                        print(f"  Skip: {e}")
+                        continue
+                    table.to_csv(out_csv, index=False)
+                    print(f"  Parametric Type III table: {out_csv}")
+                else:
+                    out_csv = out_dir / f"pooled_{short_name}_anova_art.csv"
+                    try:
+                        table = anova_art(
+                            sub, metric_col, POOLED_FACTORS, anova_type3_fn=anova_type3
+                        )
+                    except ValueError as e:
+                        print(f"  Skip: {e}")
+                        continue
+                    table.to_csv(out_csv, index=False)
+                    print(f"  ART-ANOVA table: {out_csv}")
+
+                formatted = format_anova_table(table, "VAD+UniAD", metric_label)
+                all_tables.append(formatted)
+
+                main_effects = formatted[
+                    formatted["term"].isin(POOLED_FACTORS)
+                ].copy()
+                if not main_effects.empty:
+                    main_effects = main_effects.sort_values("partial_eta_sq", ascending=False)
+                    print("  Main effects (by partial eta²):")
+                    for _, row in main_effects.iterrows():
+                        sig = "***" if row["p_value"] < 0.001 else (
+                            "**" if row["p_value"] < 0.01 else (
+                                "*" if row["p_value"] < 0.05 else ""
+                            )
+                        )
+                        print(
+                            f"    {row['term']:20s}  F={row['F']:.4f}  "
+                            f"p={row['p_value']:.4g}  eta²_p={row['partial_eta_sq']:.4f} {sig}"
+                        )
+
     if all_tables and args.combined:
         combined = pd.concat(all_tables, ignore_index=True)
         combined_path = out_dir / "hyperparam_sensitivity_anova_all.csv"
@@ -517,7 +664,7 @@ def main():
         print(f"Done: {len(all_tables)} ANOVA table(s) written (use --combined for one merged CSV).")
         print("=" * 80)
     else:
-        print("\nNo ANOVA tables generated. Check data paths under /data1/...")
+        print("\nNo ANOVA tables generated. Check the data paths under --data-root.")
         sys.exit(1)
 
 
