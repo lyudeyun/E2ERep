@@ -2,7 +2,11 @@
 import numba
 import numpy as np
 import warnings
-from numba.errors import NumbaPerformanceWarning
+try:
+    # numba>=0.57 moved errors under numba.core
+    from numba.core.errors import NumbaPerformanceWarning
+except Exception:  # pragma: no cover
+    from numba.errors import NumbaPerformanceWarning
 
 from mmcv.core.bbox import box_np_ops
 
