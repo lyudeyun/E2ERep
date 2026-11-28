@@ -209,7 +209,9 @@ Open-loop repair, baseline JSON generation, and open-loop evaluation on the held
 Prerequisites: Bench2Drive-style data and info PKLs under `Bench2DriveZoo/data/` (Dataset above), checkpoints under `Bench2DriveZoo/ckpts/`, and the conda environment from Installation.
 
 * **Paper split ($D_{rep}$ / $D_{test}$):** pass [`b2d_infos_val_partA_25clips.pkl`](./Bench2DriveZoo/data/infos/b2d_infos_val_partA_25clips.pkl) as `--repair-dataset` and [`b2d_infos_val_partB_25clips.pkl`](./Bench2DriveZoo/data/infos/b2d_infos_val_partB_25clips.pkl) as `--eval-dataset`.
-* **Occupancy cache:** `--occ-output-dir` is required. It stores occupancy used when generating or reusing the baseline open-loop JSON; typical values are `baseline/UniAD/uniad_occ_cache` or `baseline/VAD/vad_occ_cache`.
+* **Baselines and occupancy:** the open-loop baseline of the original model on a dataset is a JSON under `baseline/<model>/` (e.g. `baseline/VAD/b2d_val/vad_base_baseline_b2d_infos_val_partA_25clips.json`), generated once by `test.py --collect-data` if missing. Its occupancy grids, used for the collision check, are packed into one file next to it, `<baseline>.occ.npz`; test.py writes them frame by frame to `--occ-output-dir` (default: `occ_tmp` next to the baseline), and they are packed and the per-frame files removed afterwards. The grids hold the objects that the official planning metric sees, i.e. those left by the test pipeline's range and class filters.
+* **Open-loop evaluation of the repaired model:** `--eval-mode cached` (default, VAD) runs only the repaired planning head on the decoder inputs cached in the baseline of `--eval-dataset` and computes the same metrics as `test.py` in seconds; `--eval-mode full` runs `test.py` on the images. `--skip-eval` repairs without evaluating on `--eval-dataset`.
+* **Seeds:** `--repair-seed s` seeds run k with `s + k - 1` (random, NumPy and PyTorch), so that repeated runs can be reproduced; without it the runs are unseeded, as before.
 * **Fitness evaluation:** at the start of a repair, the decoder inputs, expert trajectories and occupancy grids of all repair frames are loaded onto the GPU once ([`repair_common/frame_cache.py`](./repair_common/frame_cache.py); about 240 KB per frame, e.g. 1.1 GB for the 4,685 VAD partA frames). Each fitness evaluation then computes L2 errors and collisions for all frames with a few GPU operations (a few milliseconds instead of reading every occupancy file again), for both VAD and UniAD; the fitness values and frame counts are identical to the earlier per-frame CPU computation.
 * **Closed-loop flag:** use `--closed-loop-eval False` for open-loop only; set `True` after CARLA is installed (Installation step 8).
 * **Fitness:** `--fitness` is `CA`, `ER`, or `ERC`; use `all` to run all three in sequence. Abbreviations are case-insensitive.
@@ -233,12 +235,11 @@ Prerequisites: Bench2Drive-style data and info PKLs under `Bench2DriveZoo/data/`
       --repair-num-iterations 20 \
       --repair-early-stop-patience 5 \
       --time-horizon 3 \
-      --occ-output-dir baseline/UniAD/uniad_occ_cache \
       --eval-cuda-device 0 \
       --closed-loop-eval False
     ```
 
-For VAD-base, use the same command with `--model-type VAD`, `--model-name VAD_base`, `--occ-output-dir baseline/VAD/vad_occ_cache`, and `--repair-layers "pts_bbox_head.ego_fut_decoder.0 pts_bbox_head.ego_fut_decoder.2"`.
+For VAD-base, use the same command with `--model-type VAD`, `--model-name VAD_base`, and `--repair-layers "pts_bbox_head.ego_fut_decoder.0 pts_bbox_head.ego_fut_decoder.2"`.
 
 * **Repaired checkpoints are saved as patches.** A repair changes only a few weights, so instead of a full copy of the model (~0.7 GB for VAD, ~1 GB for UniAD) each run saves a lossless patch against the original checkpoint in `repair/repair_output/`:
 
@@ -300,7 +301,7 @@ For VAD-base, use the same command with `--model-type VAD`, `--model-name VAD_ba
     ln -sf ../Bench2DriveZoo/team_code/* ./team_code/
     ```
 
-* **Faster agents (GPU pre-processing):** [`vad_b2d_agent_gpu.py`](./Bench2DriveZoo/team_code/vad_b2d_agent_gpu.py) and [`uniad_b2d_agent_gpu.py`](./Bench2DriveZoo/team_code/uniad_b2d_agent_gpu.py) in `Bench2DriveZoo/team_code/` are faster versions of `vad_b2d_agent.py` and `uniad_b2d_agent.py` (which stay unchanged), with the same camera resolution. They share [`gpu_preproc.py`](./Bench2DriveZoo/team_code/gpu_preproc.py): each camera image is processed as soon as CARLA sends it (the cameras arrive about 8 ms apart), and the image pre-processing runs on the GPU, with the per-tick constants (mean, 1/std, resize indices and weights) prepared once.
+* **Faster agents (GPU pre-processing):** [`vad_b2d_agent_gpu.py`](./Bench2DriveZoo/team_code/vad_b2d_agent_gpu.py) and [`uniad_b2d_agent_gpu.py`](./Bench2DriveZoo/team_code/uniad_b2d_agent_gpu.py) in `Bench2DriveZoo/team_code/` are faster versions of `vad_b2d_agent.py` and `uniad_b2d_agent.py` (whose driving stays unchanged), with the same camera resolution. They share [`gpu_preproc.py`](./Bench2DriveZoo/team_code/gpu_preproc.py): each camera image is processed as soon as CARLA sends it (the cameras arrive about 8 ms apart), and the image pre-processing runs on the GPU, with the per-tick constants (mean, 1/std, resize indices and weights) prepared once.
 
     | Agent | Select with | Outputs vs. the original agent |
     |---|---|---|
@@ -312,6 +313,8 @@ For VAD-base, use the same command with `--model-type VAD`, `--model-name VAD_ba
     ```
 
     For VAD on a Town12 route of Bench2Drive220 (one instance, RTX PRO 6000) one tick takes about 210 ms instead of 442 ms; the rest is mostly VAD inference (~100 ms) and the rendering of the six cameras (~50 ms).
+
+* **Saved images:** with `SAVE_PATH` set, the VAD and UniAD agents save the camera images and the BEV every 10 ticks as JPEG (quality 85; about 5x smaller than PNG). `SAVE_IMAGES` chooses the views: `all` (default: six cameras and BEV), `front` (front camera only) or `0` (no images); the per-frame `meta/` JSON is always saved. Images do not affect driving.
 
 * **Run evaluations:**
 
