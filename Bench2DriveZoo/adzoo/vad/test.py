@@ -290,6 +290,10 @@ def main():
 
         # Optional: collect per-frame info (planning metrics etc.) into a JSON list
         if args.collect_data:
+            from mmcv.utils import build_from_cfg
+            from mmcv.datasets.builder import PIPELINES
+            object_filters = [build_from_cfg(t, PIPELINES) for t in cfg.data.test.pipeline
+                              if t['type'] in ('VADObjectRangeFilter', 'VADObjectNameFilter')]
             if not args.data_output:
                 print('WARNING: --collect-data set but --data-output not provided; skip saving JSON.')
             else:
@@ -455,9 +459,15 @@ def main():
                     occ_path = None
                     if args.occ_output_dir:
                         try:
+                            # the objects of the official metric: get_ann_info returns all annotated
+                            # objects, the metric sees those left by the test pipeline's filters
                             anns = dataset.get_ann_info(batch_idx)
-                            gt_bboxes_3d = anns.get('gt_bboxes_3d', None)
-                            attr_labels = anns.get('attr_labels', None)
+                            boxes = {'gt_bboxes_3d': anns['gt_bboxes_3d'], 'gt_labels_3d': anns['gt_labels_3d'],
+                                     'attr_labels': anns['attr_labels']}
+                            for f in object_filters:
+                                boxes = f(boxes)
+                            gt_bboxes_3d = boxes['gt_bboxes_3d']
+                            attr_labels = boxes['gt_attr_labels']
                             if gt_bboxes_3d is not None and attr_labels is not None:
                                 pm = PlanningMetric()
                                 attr_t = torch.as_tensor(attr_labels, dtype=torch.float32).unsqueeze(0)
