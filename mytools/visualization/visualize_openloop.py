@@ -20,7 +20,7 @@ Example (VAD baseline + ``--compare_input`` UniAD JSON, ``--vad-pred-draw select
 Below, ``\\`` at line end is one backslash in this file (bash line continuation)::
 
   python mytools/visualization/visualize_openloop.py \\
-    --input baseline/VAD/vad_base_baseline_b2d_infos_val_partB_25clips.json \\
+    --input baseline/VAD/b2d_val/vad_base_baseline_b2d_infos_val_partB_25clips.json \\
     --compare_input /home/deyun/git/E2ERep/E2ERep_Data/vad_base_Arachne_v2_DE_results/middle/VAD_base_REP_VAL_t3s_Arachne_v2_DE_w52_p104_i50_es5_CONT2_9/open_loop_eval/vad_base_rep_val.json \\
     --model vad \\
     --vad-pred-draw selected \\
@@ -31,7 +31,7 @@ Below, ``\\`` at line end is one backslash in this file (bash line continuation)
     --only_frame_idx 20
   
   python mytools/visualization/visualize_openloop.py \\
-    --input baseline/UniAD/uniad_base_baseline_b2d_infos_val_partB_25clips.json \\
+    --input baseline/UniAD/b2d_val/uniad_base_baseline_b2d_infos_val_partB_25clips.json \\
     --compare_input /home/deyun/git/E2ERep/E2ERep_Data/uniad_base_Arachne_v2_DE_results/large/UniAD_base_REP_VAL_t3s_Arachne_v2_DE_w26_p52_i50_es5_CONT2_7/open_loop_eval/uniad_base_rep_val.json \\
     --model uniad \\
     --scene \\
@@ -53,7 +53,7 @@ Example (UniAD only, no ``--compare_input``; no ``--vad-pred-draw``). Replace ``
 Example (VAD only, no ``--compare_input``; ``--vad-pred-draw`` is still required for ``--model vad``)::
 
   python mytools/visualization/visualize_openloop.py \\
-    --input baseline/VAD/vad_base_baseline_b2d_infos_val_partB_25clips.json \\
+    --input baseline/VAD/b2d_val/vad_base_baseline_b2d_infos_val_partB_25clips.json \\
     --model vad \\
     --vad-pred-draw all \\
     --scene \\
@@ -814,11 +814,24 @@ def _draw_gt_boxes(ax, info, max_boxes=80, alpha=0.85):
     return n
 
 
+_OCC_READER = None
+
+
+def _occ_reader():
+    global _OCC_READER
+    if _OCC_READER is None:
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root, for repair_common
+        from repair_common.frame_cache import OccupancyReader
+        _OCC_READER = OccupancyReader('occ')
+    return _OCC_READER
+
+
 def _load_occ_npz(occ_root, scene_token, frame_idx, version_prefix="v1", reduce_mode="max"):
     """
     Load VAD occ cache (.npz) saved by Bench2DriveZoo/adzoo/vad/test.py.
-    Path layout observed in this repo:
-      {occ_root}/{version_prefix}/{scene_name}/{frame_idx:06d}.npz
+    occ_root: the occupancy pack of the JSON (<baseline>.occ.npz, repair_common.frame_cache.pack_occ)
+    or a folder of per-frame files {occ_root}/{version_prefix}/{scene_name}/{frame_idx:06d}.npz.
     where scene_token in json may be like "v1/SceneName"; we strip leading "v1/".
     The saved npz contains key 'occ' with shape (T, H, W) (T=6).
     """
@@ -827,15 +840,16 @@ def _load_occ_npz(occ_root, scene_token, frame_idx, version_prefix="v1", reduce_
     st = str(scene_token or "")
     if st.startswith(f"{version_prefix}/"):
         st = st[len(version_prefix) + 1 :]
-    npz_path = os.path.join(str(occ_root), version_prefix, st, f"{int(frame_idx):06d}.npz")
-    if not os.path.exists(npz_path):
-        return None
+    rel = os.path.join(version_prefix, st, f"{int(frame_idx):06d}.npz")
     try:
-        z = np.load(npz_path)
-        occ = z.get("occ", None)
+        # occ_root is a dataset's pack <baseline>.occ.npz or a folder of per-frame files
+        if str(occ_root).endswith(".npz"):
+            occ = _occ_reader().get(os.path.join("pack", rel), str(occ_root))
+        else:
+            occ = _occ_reader().get(os.path.join(str(occ_root), rel))
         if occ is None:
             return None
-        occ = np.asarray(occ)
+        occ = np.asarray(occ, dtype=np.uint8)
         if occ.ndim == 3:
             if reduce_mode == "t0":
                 occ2 = occ[0]
@@ -1119,6 +1133,7 @@ def visualize_one_frame(
     model=None,
     vad_pred_draw=None,
     map_lane_types="markings",
+    fig_format="jpg",
 ):
     mnorm = _normalize_model(model)
     # Compare overlay only when a matched second-frame dict exists (truthy); not just ``--compare_input`` set globally.
@@ -1480,13 +1495,24 @@ def visualize_one_frame(
     ax.set_xlim(xlim[0], xlim[1])
     ax.set_ylim(ylim[0], ylim[1])
 
-    # Save as PDF (vector-friendly for LaTeX \\includegraphics)
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     scene_token = _safe_name(frame_data.get("scene_token", "scene"))
     frame_idx = int(frame_data.get("frame_idx", frame_global_idx))
-    out_path = os.path.join(output_dir, "{}_frame_{:05d}.pdf".format(scene_token, frame_idx))
+    fmt = str(fig_format or "jpg").lower().lstrip(".")
+    if fmt in ("jpg", "jpeg"):
+        ext, mpl_fmt, dpi = "jpg", "jpeg", 150
+    elif fmt == "png":
+        ext, mpl_fmt, dpi = "png", "png", 150
+    else:
+        ext, mpl_fmt, dpi = "pdf", "pdf", 300
+    out_path = os.path.join(output_dir, "{}_frame_{:05d}.{}".format(scene_token, frame_idx, ext))
     plt.tight_layout()
-    plt.savefig(out_path, format="pdf", dpi=300, bbox_inches="tight")
+    save_kw = dict(format=mpl_fmt, dpi=dpi, bbox_inches="tight")
+    if mpl_fmt in ("jpeg", "png"):
+        save_kw["facecolor"] = "white"
+        if mpl_fmt == "jpeg":
+            save_kw["pil_kwargs"] = {"quality": 92}
+    plt.savefig(out_path, **save_kw)
     plt.close(fig)
 
 
@@ -1556,7 +1582,7 @@ def main():
     parser.add_argument(
         "--occ_root",
         default="",
-        help="Optional: root dir for VAD occ cache (e.g. baseline/VAD/vad_occ_cache). Used with --draw_occ.",
+        help="Optional: occupancy of the JSON, its pack (e.g. baseline/VAD/b2d_val/vad_base_baseline_b2d_infos_val.occ.npz) or a folder of per-frame files. Used with --draw_occ.",
     )
     parser.add_argument(
         "--draw_occ",
@@ -1651,6 +1677,12 @@ def main():
         type=int,
         default=None,
         help="Optional: only visualize frames with this frame_idx (use with --only_scene_token for a single frame).",
+    )
+    parser.add_argument(
+        "--fig-format",
+        default="jpg",
+        choices=["jpg", "jpeg", "png", "pdf"],
+        help="Image format for each frame. Default jpg (no PDF).",
     )
     args = parser.parse_args()
 
@@ -1814,6 +1846,7 @@ def main():
             model=mnorm,
             vad_pred_draw=args.vad_pred_draw,
             map_lane_types=args.map_lane_types,
+            fig_format=args.fig_format,
         )
         count += 1
         if count == 1 or count % 50 == 0:
