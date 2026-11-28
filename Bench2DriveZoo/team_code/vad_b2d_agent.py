@@ -27,6 +27,10 @@ from mmcv.core.bbox import get_box_type
 from pyquaternion import Quaternion
 
 SAVE_PATH = os.environ.get('SAVE_PATH', None)
+# SAVE_IMAGES: 'all'/'1' = all 6 RGB + BEV; 'front' = rgb_front only; '0'/'none'/'false' = no images
+_SAVE_IMAGES_MODE = os.environ.get('SAVE_IMAGES', 'all').strip().lower()
+SAVE_FRONT_IMAGE = _SAVE_IMAGES_MODE not in ('0', 'false', 'no', 'off', 'none')
+SAVE_OTHER_IMAGES = _SAVE_IMAGES_MODE not in ('0', 'false', 'no', 'off', 'none', 'front')
 IS_BENCH2DRIVE = os.environ.get('IS_BENCH2DRIVE', None)
 
 
@@ -95,14 +99,16 @@ class VadAgent(autonomous_agent.AutonomousAgent):
             string = self.save_name
             self.save_path = pathlib.Path(os.environ['SAVE_PATH']) / string
             self.save_path.mkdir(parents=True, exist_ok=False)
-            (self.save_path / 'rgb_front').mkdir()
-            (self.save_path / 'rgb_front_right').mkdir()
-            (self.save_path / 'rgb_front_left').mkdir()
-            (self.save_path / 'rgb_back').mkdir()
-            (self.save_path / 'rgb_back_right').mkdir()
-            (self.save_path / 'rgb_back_left').mkdir()
+            if SAVE_FRONT_IMAGE:
+                (self.save_path / 'rgb_front').mkdir()
+            if SAVE_OTHER_IMAGES:
+                (self.save_path / 'rgb_front_right').mkdir()
+                (self.save_path / 'rgb_front_left').mkdir()
+                (self.save_path / 'rgb_back').mkdir()
+                (self.save_path / 'rgb_back_right').mkdir()
+                (self.save_path / 'rgb_back_left').mkdir()
+                (self.save_path / 'bev').mkdir()
             (self.save_path / 'meta').mkdir()
-            (self.save_path / 'bev').mkdir()
    
         self.lidar2img = {
         'CAM_FRONT':np.array([[ 1.14251841e+03,  8.00000000e+02,  0.00000000e+00, -9.52000000e+02],
@@ -428,14 +434,16 @@ class VadAgent(autonomous_agent.AutonomousAgent):
 
     def save(self, tick_data):
         frame = self.step // 10
-        # Deyun: Save as jpg instead of png to save space and time
-        Image.fromarray(tick_data['imgs']['CAM_FRONT']).save(self.save_path / 'rgb_front' / ('%04d.jpg' % frame), quality=85)
-        Image.fromarray(tick_data['imgs']['CAM_FRONT_LEFT']).save(self.save_path / 'rgb_front_left' / ('%04d.jpg' % frame), quality=85)
-        Image.fromarray(tick_data['imgs']['CAM_FRONT_RIGHT']).save(self.save_path / 'rgb_front_right' / ('%04d.jpg' % frame), quality=85)
-        Image.fromarray(tick_data['imgs']['CAM_BACK']).save(self.save_path / 'rgb_back' / ('%04d.jpg' % frame), quality=85)
-        Image.fromarray(tick_data['imgs']['CAM_BACK_LEFT']).save(self.save_path / 'rgb_back_left' / ('%04d.jpg' % frame), quality=85)
-        Image.fromarray(tick_data['imgs']['CAM_BACK_RIGHT']).save(self.save_path / 'rgb_back_right' / ('%04d.jpg' % frame), quality=85)
-        Image.fromarray(tick_data['bev']).save(self.save_path / 'bev' / ('%04d.jpg' % frame), quality=85)
+        if SAVE_FRONT_IMAGE:
+            # Deyun: Save as jpg instead of png to save space and time
+            Image.fromarray(tick_data['imgs']['CAM_FRONT']).save(self.save_path / 'rgb_front' / ('%04d.jpg' % frame), quality=85)
+        if SAVE_OTHER_IMAGES:
+            Image.fromarray(tick_data['imgs']['CAM_FRONT_LEFT']).save(self.save_path / 'rgb_front_left' / ('%04d.jpg' % frame), quality=85)
+            Image.fromarray(tick_data['imgs']['CAM_FRONT_RIGHT']).save(self.save_path / 'rgb_front_right' / ('%04d.jpg' % frame), quality=85)
+            Image.fromarray(tick_data['imgs']['CAM_BACK']).save(self.save_path / 'rgb_back' / ('%04d.jpg' % frame), quality=85)
+            Image.fromarray(tick_data['imgs']['CAM_BACK_LEFT']).save(self.save_path / 'rgb_back_left' / ('%04d.jpg' % frame), quality=85)
+            Image.fromarray(tick_data['imgs']['CAM_BACK_RIGHT']).save(self.save_path / 'rgb_back_right' / ('%04d.jpg' % frame), quality=85)
+            Image.fromarray(tick_data['bev']).save(self.save_path / 'bev' / ('%04d.jpg' % frame), quality=85)
 
         outfile = open(self.save_path / 'meta' / ('%04d.json' % frame), 'w')
         json.dump(self.pid_metadata, outfile, indent=4)
