@@ -132,7 +132,7 @@ def send_email_notification(subject: str, body: str) -> None:
 
 
 def generate_experiment_name(model_name, rep_method, search_algo, search_algo_params, 
-                             fitness, run_idx, base_dir, time_horizon=3):
+                             fitness, run_idx, base_dir, time_horizon=3, keep=0.0, given_weights=False):
     """Generate experiment directory name."""
     w = search_algo_params['num_weights_to_repair']
     p = search_algo_params['num_particles']
@@ -151,6 +151,10 @@ def generate_experiment_name(model_name, rep_method, search_algo, search_algo_pa
         fitness_str = 'CONT2'
     else:
         fitness_str = 'DISC'
+    if keep:
+        fitness_str += f'_keep{keep:g}'
+    if given_weights:                     # weights given instead of localised (RandomRep)
+        rep_method = f'{rep_method}_givenW'
     
     # Add time_horizon to experiment name (e.g., t1s, t2s, t3s)
     time_horizon_str = f"t{time_horizon}s"
@@ -168,6 +172,9 @@ def generate_experiment_name(model_name, rep_method, search_algo, search_algo_pa
         run_idx = max_idx + 1
     
     return f"{model_name}_REP_VAL_{time_horizon_str}_{rep_method}_{search_algo}_{search_params}_{fitness_str}_{run_idx}"
+
+
+UNIAD_BASELINE_WORKERS = 4
 
 
 def shared_baseline_json(model_name, model_type, dataset, repo_root):
@@ -255,8 +262,12 @@ def generate_baseline_json(model_name, model_type, repair_dataset, base_dir, rep
             str(model_paths['config']),
             str(model_paths['checkpoint']),
             "--launcher", "pytorch",
-            "--cfg-options", cfg_options,
-            "--eval", "bbox",
+            # 4 loader workers instead of the config's 32: each spawned worker receives a copy of the
+            # dataset, and 32 copies of a 10k+-frame dataset exceed the host RAM
+            "--cfg-options", f"{cfg_options} data.workers_per_gpu={UNIAD_BASELINE_WORKERS}",
+            # no --eval bbox: the baseline needs only the collected frames, not the detection metrics
+            # empty --out: no output/results.pkl (its default; ~3 GB of full outputs that nothing reads)
+            "--out", "''",
             "--collect-data",
             "--data-output", str(baseline_json),
         ]
@@ -302,7 +313,7 @@ def run_repair(model_name, model_type, baseline_json, exp_dir, repo_root,
               fitness_type='continuous', num_particles=200, num_iterations=100, 
               num_weights_to_repair=100, rep_method='Arachne_v1', early_stop_patience=None,
               search_algo='PSO', cuda_device='0', time_horizon=3,
-              save_full_ckpt=False):
+              save_full_ckpt=False, keep=0.0, localized_weights=None, seed=None):
     """Run repair process. Returns the repaired model as a .patch.pt (or a legacy full .pth)."""
     print("\n" + "="*80)
     print("Running Repair")
@@ -361,6 +372,12 @@ def run_repair(model_name, model_type, baseline_json, exp_dir, repo_root,
     
     # Add time horizon parameter
     cmd.extend(['--time-horizon', str(time_horizon)])
+    if keep:
+        cmd.extend(['--keep', str(keep)])
+    if localized_weights:
+        cmd.extend(['--localized-weights', str(localized_weights)])
+    if seed is not None:
+        cmd.extend(['--seed', str(seed)])
 
     
     # Always use cached evaluation for VAD repair
@@ -545,7 +562,7 @@ def run_cached_evaluation(model_name, model_type, repaired_model, eval_dataset, 
     """eval_mode 'cached' of run_evaluation (VAD): writes output_json in test.py's format."""
     import json
     import torch
-    from repair_common.frame_cache import evaluate_vad_planner, load_vad_decoder, occ_pack_path
+    from repair_common.frame_cache import evaluate_vad_planner, load_vad_decoder, occ_pack_path, save_planner_eval
 
     baseline_json = shared_baseline_json(model_name, model_type, eval_dataset, repo_root)
     if not baseline_json.exists():
@@ -564,16 +581,9 @@ def run_cached_evaluation(model_name, model_type, repaired_model, eval_dataset, 
     device = f"cuda:{cuda_device}"
     decoder = load_vad_decoder(state.get('state_dict', state), device)
     records = evaluate_vad_planner(decoder, json.load(open(baseline_json)), pack, device)
-    with open(output_json, 'w') as f:
-        json.dump(records, f, indent=2)
-    valid = [r for r in records if r.get('fut_valid_flag')]
-    summary = {k: sum(r[k] for r in valid) / len(valid) for k in
-               ('plan_L2_1s', 'plan_L2_2s', 'plan_L2_3s', 'plan_obj_box_col_1s', 'plan_obj_box_col_2s', 'plan_obj_box_col_3s')}
-    with open(output_json.with_suffix('.log'), 'w') as f:
-        f.write(f"cached evaluation (planning head on the cached decoder inputs)\n"
-                f"run: {output_json.parent.parent}\nframes: {baseline_json}\noccupancy: {pack}\n"
-                f"{len(records)} frames, {len(valid)} with a full expert future; their means:\n"
-                + "".join(f"  {k}: {v:.6f}\n" for k, v in summary.items()))
+    save_planner_eval(records, output_json,
+                      f"cached evaluation (planning head on the cached decoder inputs)\n"
+                      f"run: {output_json.parent.parent}\nframes: {baseline_json}\noccupancy: {pack}")
     print(f"Evaluation results: {output_json}")
     return True
 
@@ -691,6 +701,17 @@ def run_closed_loop_evaluation(model_name, model_type, repaired_model, exp_dir, 
     return False
 
 
+def given_weights_of_run(files, k):
+    """The k-th of the given localized_weights.json files in natural order (run 10 after run 9)."""
+    if not files:
+        return None
+    natural = lambda f: [int(t) if t.isdigit() else t for t in re.split(r'(\d+)', f)]  # noqa: E731
+    files = sorted(files, key=natural)
+    if k > len(files):
+        raise ValueError(f'run {k}: only {len(files)} --repair-localized-weights files')
+    return files[k - 1]
+
+
 def run_single_experiment(run_idx, model_name, model_type, repair_dataset, eval_dataset, 
                           base_dir, repo_root, args):
     """Run a single experiment."""
@@ -731,8 +752,10 @@ def run_single_experiment(run_idx, model_name, model_type, repair_dataset, eval_
     exp_name = generate_experiment_name(
         model_name, args.rep_method, args.search_algo, search_algo_params,
         args.fitness, run_idx, base_dir,
-        time_horizon=args.time_horizon
+        time_horizon=args.time_horizon, keep=args.repair_keep,
+        given_weights=bool(args.repair_localized_weights)
     )
+    k = int(exp_name.rsplit('_', 1)[1])    # this run's index
     exp_dir = base_dir / exp_name
     exp_dir.mkdir(exist_ok=True)
     
@@ -833,9 +856,15 @@ def run_single_experiment(run_idx, model_name, model_type, repair_dataset, eval_
         cuda_device=args.eval_cuda_device,
         time_horizon=args.time_horizon,
         save_full_ckpt=args.save_full_ckpt,
+        keep=args.repair_keep,
+        localized_weights=given_weights_of_run(args.repair_localized_weights, k),
+        seed=None if args.repair_seed is None else args.repair_seed + k - 1,
     )
     if not repaired_model:
         return False
+    if args.skip_eval:
+        print("Skipping the evaluation (--skip-eval)")
+        return True
 
     # A patch is turned into a temporary full checkpoint on local disk for test.py and
     # the CARLA agent, and removed afterwards (E2EREP_CKPT_TMP overrides the temp dir).
@@ -919,6 +948,13 @@ def main():
     
     # Repair parameters
     parser.add_argument('--repair-alpha', type=float, default=0.5)
+    parser.add_argument('--repair-localized-weights', nargs='+', default=None,
+                        help="localized_weights.json files to repair instead of localising (VAD; run k uses "
+                             "the k-th in natural order, e.g. RGR's random weights for RandomRep)")
+    parser.add_argument('--repair-seed', type=int, default=None,
+                        help='seed of run 1 of the repair; run k uses seed + k - 1 (none = unseeded)')
+    parser.add_argument('--repair-keep', type=float, default=0.0,
+                        help='kappa of the keep term added to the fitness (VAD, ER/ERC; 0 = none)')
     parser.add_argument('--repair-layers', type=str, default=None,
                        help='Layers to repair (space-separated). '
                             'Default: VAD uses two layers '
@@ -1001,6 +1037,11 @@ def main():
         type=str,
         default=None,
         help='Optional directory to save occupancy during open-loop evaluation.'
+    )
+    parser.add_argument(
+        '--skip-eval', action='store_true',
+        help='Repair only, without the open-loop evaluation on --eval-dataset (e.g. when choosing the '
+             'configuration on a model-selection set, so that the test data stay untouched).'
     )
     parser.add_argument(
         '--eval-mode', choices=['cached', 'full'], default='cached',

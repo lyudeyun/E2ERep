@@ -426,10 +426,23 @@ def main():
                        choices=['discrete', 'continuous', 'continuous2'],
                        help='Fitness function type: discrete (weighted frame counts), continuous (total L2 error), '
                             'or continuous2 (total L2 + collision penalty)')
+    parser.add_argument('--localized-weights', default=None,
+                        help='a localized_weights.json: repair these weights instead of localising them '
+                             '(e.g. the random weights of RGR, for RandomRep)')
+    parser.add_argument('--seed', type=int, default=None,
+                        help='seed of random, numpy and torch (search, sampling); none = unseeded')
+    parser.add_argument('--keep', type=float, default=0.0,
+                       help='kappa of the keep term added to the fitness (ER/ERC): N x kappa x mean distance between '
+                            'the plan and the original plan on the original model\'s positive frames (0 = none)')
     parser.add_argument('--time-horizon', type=int, choices=[1, 2, 3], default=3,
                        help='Time horizon for L2 error and collision: 1s (2 timesteps), 2s (4 timesteps), or 3s (6 timesteps, default). '
                             'This affects both L2 error computation and collision detection (plan_obj_box_col_Xs).')
     args = parser.parse_args()
+    if args.seed is not None:                     # search and sampling (np.random), torch, random
+        import random
+        random.seed(args.seed)
+        np.random.seed(args.seed)
+        torch.manual_seed(args.seed)
     # Default to True (cached eval is on by default)
     # If user doesn't specify --use-cached-eval, it will be False from store_true,
     # so we set it to True as default
@@ -718,6 +731,9 @@ def main():
         early_stop_patience=args.early_stop_patience,
         optimization_algorithm=args.search_algo,  # Set search algorithm (PSO or DE)
     )
+    if args.keep:
+        import copy
+        arachne.set_options(keep=(args.keep, copy.deepcopy(wrapper).eval()))
     
     if args.num_weights_to_repair:
         print(f"  Target number of weights to repair: {args.num_weights_to_repair}")
@@ -733,8 +749,16 @@ def main():
     
     # Determine if we should use Arachne v2 (changed/unchanged method)
     use_changed_unchanged = (args.rep_method == 'Arachne_v2')
-    
-    if use_changed_unchanged:
+    real_name = dict(zip(wrapper.layer_names, wrapper.target_layer_names))
+
+    if args.localized_weights:
+        # given weights: no fault localisation; Arachne's (layer, input, output) from weight[out=i, in=j]
+        given = json.load(open(args.localized_weights))
+        wrapper_name = {real: w for w, real in real_name.items()}
+        weights = [(wrapper_name[w['layer']], int(w['j']), int(w['i'])) for w in given['weights']]
+        wrapper.to(arachne.device)
+        print(f"Using the {len(weights)} given weights of {args.localized_weights} ({given.get('rep_method')})")
+    elif use_changed_unchanged:
         print(f"Using Arachne v2 Changed/Unchanged method:")
         print(f"  Changed (negative) frames: {len(neg_feat)}")
         print(f"  Unchanged (positive) frames: {len(pos_feat)}")
@@ -751,9 +775,9 @@ def main():
     print(f"\nFound {len(weights)} weights to repair")
     # Save the localized weights with their real layer names (used by the gradient-based techniques).
     # Arachne indexes a weight as (input, output); i, j here index the PyTorch weight[out, in].
-    real_name = dict(zip(wrapper.layer_names, wrapper.target_layer_names))
     with open(output_dir / 'localized_weights.json', 'w') as f:
-        json.dump({'rep_method': args.rep_method, 'repair_json': str(args.json),
+        json.dump({'rep_method': f'given: {args.localized_weights}' if args.localized_weights else args.rep_method,
+                   'seed': args.seed, 'repair_json': str(args.json),
                    'weights': [{'layer': real_name[w[0]], 'i': int(w[2]), 'j': int(w[1])} for w in weights]},
                   f, indent=1)
 

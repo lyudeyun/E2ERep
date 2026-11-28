@@ -207,20 +207,9 @@ class ArachnePyTorch(ArachneBase):
             n_mid = cache.n - n_col - n_pos - n_neg
             return result(discrete(n_pos, n_mid, n_neg, n_col), n_pos, n_mid, n_neg, n_col)
 
-        batch_size = self._eval_batch_size(device)
-        l2_parts, col_parts = [], []
-        with torch.no_grad():
-            for s in range(0, cache.n, batch_size):
-                e = min(s + batch_size, cache.n)
-                pred = repaired_layers(cache.feats[s:e])          # (B, 72): 6 commands x 6 steps x 2
-                if pred.dim() == 1:
-                    pred = pred.unsqueeze(0)
-                cmd = cache.cmd[s:e]
-                l2_parts.append(self._compute_l2_error_gpu(pred, cache.gt[s:e], cmd, time_horizon=time_horizon))
-                pred_abs = self._pred_traj_to_abs_gpu(pred, cmd)[:, :6, :2]
-                col_parts.append(cache.collision(pred_abs, s, n_steps))
-        l2 = torch.cat(l2_parts).double().cpu().numpy()
-        col = torch.cat(col_parts).cpu().numpy()
+        l2_t, col_t, plans = self._plans(repaired_layers, cache, device, time_horizon, n_steps)
+        l2 = l2_t.double().cpu().numpy()
+        col = col_t.cpu().numpy()
 
         if use_original_l2_for_classification:
             stored = cache.field(f'plan_L2_{time_horizon}s')
@@ -250,6 +239,15 @@ class ArachnePyTorch(ArachneBase):
             fitness = float('inf') if valid_frame_count == 0 else total_l2_error
         else:
             fitness = float('inf') if valid_frame_count == 0 else total_l2_error + 10.0 * n_col
+        if self.keep:
+            # keep term: N x kappa x mean distance to the original plan over the original model's
+            # positive frames, i.e. N x the hard counterpart of the gradient loss + keep term
+            if fitness_type == 'discrete':
+                raise ValueError('the keep term is defined for the fitness functions ER and ERC only')
+            plan_0, good = self._keep_reference_plans(cache, device, time_horizon, n_steps)
+            if good.any():
+                fitness += self.keep * valid_frame_count * \
+                    torch.linalg.norm(plans[good] - plan_0[good], dim=-1).mean().item()
 
         if use_original_l2_for_classification:
             return result(fitness, n_pos, n_mid, n_neg, n_col)
@@ -261,6 +259,34 @@ class ArachnePyTorch(ArachneBase):
             f"collision_count={n_col} valid_frames={valid_frame_count}"
         )
         return float(fitness)
+
+    def _plans(self, layers, cache, device, time_horizon, n_steps):
+        """L2 error, collision flag and plan (positions of the frame's command, (N, 6, 2)) of the
+        decoder `layers` on every frame of the cache; the decoder runs in chunks."""
+        batch_size = self._eval_batch_size(device)
+        l2_parts, col_parts, plan_parts = [], [], []
+        with torch.no_grad():
+            for s in range(0, cache.n, batch_size):
+                e = min(s + batch_size, cache.n)
+                pred = layers(cache.feats[s:e])                   # (B, 72): 6 commands x 6 steps x 2
+                if pred.dim() == 1:
+                    pred = pred.unsqueeze(0)
+                cmd = cache.cmd[s:e]
+                l2_parts.append(self._compute_l2_error_gpu(pred, cache.gt[s:e], cmd, time_horizon=time_horizon))
+                pred_abs = self._pred_traj_to_abs_gpu(pred, cmd)[:, :6, :2]
+                col_parts.append(cache.collision(pred_abs, s, n_steps))
+                plan_parts.append(pred_abs)
+        return torch.cat(l2_parts), torch.cat(col_parts), torch.cat(plan_parts)
+
+    def _keep_reference_plans(self, cache, device, time_horizon, n_steps):
+        """Plans of the original decoder (keep_reference) and its positive frames, as in the gradient
+        techniques (trel/repair/training.py): no collision and L2 < mean - 0.5 std (split adv)."""
+        if getattr(cache, 'keep_ref', None) is None:
+            self.keep_reference.to(device)          # the copy of the original decoder starts on the CPU
+            l2_0, col_0, plan_0 = self._plans(self.keep_reference, cache, device, time_horizon, n_steps)
+            l2_0 = l2_0.double()
+            cache.keep_ref = (plan_0, ~col_0 & (l2_0 < l2_0.mean() - 0.5 * l2_0.std()))
+        return cache.keep_ref
 
     def _compute_l2_error(self, pred_traj, gt_traj, cmd_idx=0):
         """

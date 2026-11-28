@@ -62,7 +62,8 @@ def find_repaired_model(exp_dir, model_type):
     repair_dir = exp_dir / "repair" / "repair_output"
 
     if model_type == "VAD":
-        candidates = ["VAD_repaired_both_layers.patch.pt", "VAD_repaired_both_layers.pth"]
+        # E2ERep: VAD_repaired_both_layers.*; gradient-based repair (trel): VAD_repaired.patch.pt
+        candidates = ["VAD_repaired_both_layers.patch.pt", "VAD_repaired.patch.pt", "VAD_repaired_both_layers.pth"]
     elif model_type == "UniAD":
         # newer runs keep only the small wrapper state dict in repaired_model.pth
         candidates = ["UniAD_repaired_model.patch.pt", "UniAD_repaired_model.pth", "repaired_model.pth"]

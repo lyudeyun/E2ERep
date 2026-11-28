@@ -37,6 +37,8 @@ class ArachneBase:
         self.early_stop_patience = None  # Early stopping patience (None = disabled, int = number of iterations without improvement)
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.eval_batch_size = None  # Batch size for fitness evaluation (None = auto-detect based on GPU memory)
+        self.keep = 0.0              # kappa of the keep term (VAD: ER and ERC fitness); 0 = no keep term
+        self.keep_reference = None   # the original decoder, whose plans the keep term keeps
 
         # Optimization algorithm selection
         self.optimization_algorithm = 'PSO'  # Options: 'PSO' or 'DE' (Differential Evolution)
@@ -90,6 +92,9 @@ class ArachneBase:
         if 'de_mutation_factor' in kwargs:
             # DE mutation factor (F) in [0, 2]
             self.de_mutation_factor = kwargs['de_mutation_factor']
+        if 'keep' in kwargs:
+            # (kappa, original decoder): adds the keep term to the fitness (ER, ERC); kappa 0 = none
+            self.keep, self.keep_reference = kwargs['keep']
         if 'de_strategy' in kwargs:
             # DE strategy: 'rand/1/bin', 'best/1/bin', 'rand/2/bin', etc.
             self.de_strategy = kwargs['de_strategy']

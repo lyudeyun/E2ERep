@@ -297,6 +297,25 @@ def evaluate_vad_planner(decoder, records, pack_file, device, batch=4096):
     return out_records
 
 
+PLAN_METRICS = ('plan_L2_1s', 'plan_L2_2s', 'plan_L2_3s',
+                'plan_obj_box_col_1s', 'plan_obj_box_col_2s', 'plan_obj_box_col_3s')
+
+
+def save_planner_eval(records, output_json, header):
+    """Write the records of evaluate_vad_planner to output_json (test.py's format) and, next to
+    it, a .log with `header` and the means over the frames with a full expert future."""
+    output_json = str(output_json)
+    with open(output_json, 'w') as f:
+        json.dump(records, f, indent=2)
+    valid = [r for r in records if r.get('fut_valid_flag')]
+    means = {k: sum(r[k] for r in valid) / len(valid) for k in PLAN_METRICS}
+    with open(os.path.splitext(output_json)[0] + '.log', 'w') as f:
+        f.write(header.rstrip('\n') + '\n'
+                + f"{len(records)} frames, {len(valid)} with a full expert future; their means:\n"
+                + ''.join(f"  {k}: {v:.6f}\n" for k, v in means.items()))
+    return means
+
+
 def uniad_gt_mask(frame_data):
     """(6, 2) float32 L2 mask of the expert trajectory, as the UniAD evaluation built it
     (the same shape handling as convert_uniad_to_vad_metrics.py; all ones if missing)."""

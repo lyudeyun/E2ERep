@@ -8,6 +8,7 @@ import numpy as np
 from pathlib import Path
 import json
 import copy
+import time
 
 
 class DEOptimizer:
@@ -188,6 +189,8 @@ class DEOptimizer:
         
         print(f"Original model fitness: {original_fitness:.6f}", flush=True)
         fitness_history.append(original_fitness)
+        # search time: from here (the frames are loaded by the first evaluation above) to the end of the search
+        t_search = time.time()
         
         # Initialize global best
         global_best_fitness = original_fitness
@@ -434,7 +437,8 @@ class DEOptimizer:
             print(f"Iter {iteration+1:3d}/{self.num_iterations}: fitness={global_best_fitness:7.2f}, "
                   f"Δ={delta:+6.2f}, improvements={improvements}/{len(individuals)}{early_stop_msg}", flush=True)
         
-        print(f"\nDE optimization complete!", flush=True)
+        search_seconds = round(time.time() - t_search, 1)
+        print(f"\nDE optimization complete! (search time {search_seconds} s)", flush=True)
         print(f"  Original fitness: {fitness_history[0]:.6f}", flush=True)
         print(f"  Final fitness:    {fitness_history[-1]:.6f}", flush=True)
         print(f"  Improvement:      {fitness_history[0] - fitness_history[-1]:.6f}", flush=True)
@@ -455,6 +459,7 @@ class DEOptimizer:
                     'de_strategy': self.de_strategy,
                     'de_crossover_rate': self.de_crossover_rate,
                     'de_mutation_factor': self.de_mutation_factor,
+                    'search_seconds': search_seconds,
                     'individual_evaluations': individual_evaluations
                 }, f, indent=2)
             print(f"  DE evaluations saved to: {individuals_file}")
